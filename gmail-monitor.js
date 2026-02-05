@@ -8,6 +8,7 @@ const { execSync } = require('child_process');
 const fs = require('fs');
 const https = require('https');
 const emailCache = require('./email-cache');
+const followupsDb = require('./followups-db');
 
 // Configuration
 const CONFIG = {
@@ -30,6 +31,9 @@ let filteringStats = {
   deleted: 0,
   unsubscribed: 0
 };
+
+// Follow-ups database connection
+let followupsDbConn = null;
 
 // VIP senders - C-levels and VPs at example.com (from executives.csv)
 const VIPS = [
@@ -400,6 +404,11 @@ function applyRuleBasedFilter(email) {
     return { action: 'archive', reason: 'Vanta Trust Center request' };
   }
 
+  // Delete GCP alerts (managed elsewhere)
+  if (from.includes('alerting-noreply@google.com') && subject.includes('[ALERT')) {
+    return { action: 'delete', reason: 'GCP alerts (handled in GCP console)' };
+  }
+
   // Auto-delete/unsubscribe rules (spam/marketing)
   if (from.match(/@(cio\.com|grouptogether\.com)/)) {
     return { action: 'delete', reason: 'External marketing' };
@@ -589,6 +598,51 @@ function shouldSendBatch() {
     return true;
   }
   return false;
+}
+
+/**
+ * Extract thread ID from email for tracking
+ */
+function getEmailThreadId(email) {
+  // Use thread ID if available, otherwise use message ID
+  return `email:${email.threadId || email.id}`;
+}
+
+/**
+ * Track email conversation in follow-ups database
+ */
+function trackEmailConversation(db, email, direction) {
+  if (!db) return;
+
+  try {
+    const threadId = getEmailThreadId(email);
+    const now = Math.floor(Date.now() / 1000);
+
+    // Determine who sent last and who's waiting
+    const lastSender = direction === 'incoming' ? 'them' : 'me';
+    const waitingFor = direction === 'incoming' ? 'my-response' : 'their-response';
+
+    // Extract sender name from "Name <email@domain.com>" format
+    let fromName = email.from;
+    const match = email.from.match(/^(.+?)\s*<(.+?)>$/);
+    if (match) {
+      fromName = match[1].replace(/"/g, '');
+    }
+
+    followupsDb.trackConversation(db, {
+      id: threadId,
+      type: 'email',
+      subject: email.subject,
+      from_user: email.from,
+      from_name: fromName,
+      last_activity: Math.floor(new Date(email.date).getTime() / 1000),
+      last_sender: lastSender,
+      waiting_for: waitingFor,
+      first_seen: now
+    });
+  } catch (error) {
+    console.error('     ✗ Failed to track email:', error.message);
+  }
 }
 
 /**
@@ -808,6 +862,9 @@ async function checkEmails() {
       } catch (error) {
         console.error(`     ✗ macOS notification error:`, error.message);
       }
+
+      // Track in follow-ups database
+      trackEmailConversation(followupsDbConn, email, 'incoming');
     } else {
       // Add to batch queue for later summary
       batchQueue.push({
@@ -816,6 +873,8 @@ async function checkEmails() {
         date: email.date,
         id: email.id
       });
+      // Track in follow-ups database
+      trackEmailConversation(followupsDbConn, email, 'incoming');
     }
   }
 
@@ -857,6 +916,14 @@ async function main() {
   loadBatchQueue();
   if (batchQueue.length > 0) {
     console.log(`   Loaded ${batchQueue.length} emails from previous batch queue\n`);
+  }
+
+  // Initialize follow-ups database
+  try {
+    followupsDbConn = followupsDb.initDatabase();
+    console.log('   ✓ Follow-ups tracking initialized\n');
+  } catch (error) {
+    console.error('   ✗ Failed to init follow-ups DB:', error.message);
   }
 
   // Initial check
