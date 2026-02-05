@@ -35,3 +35,6 @@ followup-checker.pid
 # OpenClaw database
 openclaw.db
 openclaw.db-*
+
+# Git worktrees
+.worktrees/
