@@ -4,7 +4,7 @@
 // Patterns ordered by specificity - check location first (more reliable),
 // then description. Within each field, order: zoom > meet > teams.
 const PATTERNS = {
-  zoom: /https?:\/\/[a-z0-9.-]*zoom\.us\/[^\s<>"')]+/i,
+  zoom: /https?:\/\/(?:[a-z0-9-]+\.)*zoom\.us\/[^\s<>"')]+/i,
   meet: /https?:\/\/meet\.google\.com\/[^\s<>"')]+/i,
   teams: /https?:\/\/teams\.microsoft\.com\/[^\s<>"')]+/i
 };

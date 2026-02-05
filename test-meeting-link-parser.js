@@ -100,5 +100,16 @@ assert('location link takes precedence over description',
   { platform: 'zoom', url: 'https://zoom.us/j/111222333' }
 );
 
+// Test 6: Security - reject malicious domains
+console.log('\nSecurity:');
+assert('rejects malicious zoom-like domain',
+  parser.extractMeetingLink({
+    description: 'https://mynozoom.us/meeting',
+    location: '',
+    htmlLink: 'https://calendar.google.com/event?eid=999'
+  }),
+  { platform: 'calendar', url: 'https://calendar.google.com/event?eid=999' }
+);
+
 console.log(`\n${passed} passed, ${failed} failed`);
 process.exit(failed > 0 ? 1 : 0);
