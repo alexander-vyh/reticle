@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 'use strict';
 
-const { exec } = require('child_process');
+const { execFile } = require('child_process');
 
 // macOS app names for platform-specific launching
 const PLATFORM_APPS = {
@@ -18,23 +18,33 @@ const JOIN_LABELS = {
 };
 
 /**
- * Get the shell command to launch a meeting (without executing it).
- * Useful for testing and logging.
+ * Get the launch arguments for opening a meeting URL.
+ * Returns { command, args } for use with execFile (shell-safe).
+ * Also provides a display string for logging.
  *
  * @param {string} platform - 'zoom', 'meet', 'teams', 'calendar', or other
  * @param {string} url - Meeting URL
- * @returns {string} Shell command
+ * @returns {{ command: string, args: string[], display: string }}
  */
 function getLaunchCommand(platform, url) {
   const app = PLATFORM_APPS[platform];
   if (app) {
-    return `open -a "${app}" "${url}"`;
+    return {
+      command: 'open',
+      args: ['-a', app, url],
+      display: `open -a "${app}" "${url}"`
+    };
   }
-  return `open "${url}"`;
+  return {
+    command: 'open',
+    args: [url],
+    display: `open "${url}"`
+  };
 }
 
 /**
  * Launch a meeting in the appropriate app.
+ * Uses execFile (not exec) to avoid shell injection.
  *
  * @param {string} platform - 'zoom', 'meet', 'teams', 'calendar', or other
  * @param {string} url - Meeting URL
@@ -42,13 +52,13 @@ function getLaunchCommand(platform, url) {
  */
 function launchMeeting(platform, url) {
   return new Promise((resolve, reject) => {
-    const command = getLaunchCommand(platform, url);
-    console.log(`Launching: ${command}`);
-    exec(command, (error) => {
+    const cmd = getLaunchCommand(platform, url);
+    console.log(`Launching: ${cmd.display}`);
+    execFile(cmd.command, cmd.args, (error) => {
       if (error) {
         console.error(`Launch failed: ${error.message}`);
-        // Fallback: try default browser
-        exec(`open "${url}"`, (fallbackError) => {
+        // Fallback: try default browser (also via execFile for safety)
+        execFile('open', [url], (fallbackError) => {
           if (fallbackError) reject(fallbackError);
           else resolve();
         });
