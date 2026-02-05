@@ -600,6 +600,12 @@ async function handleInteractive(payload) {
       if (responseText) {
         await postMessage(channel, responseText);
       }
+
+      // Mark conversation as resolved in follow-ups
+      if (followupsDbConn) {
+        const convId = `slack:dm:${userId}`;
+        followupsDb.resolveConversation(followupsDbConn, convId);
+      }
     } catch (error) {
       console.error(`  ✗ Error handling action:`, error.message);
       await postMessage(channel, `✗ Error: ${error.message}`);
