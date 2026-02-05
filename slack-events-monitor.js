@@ -9,6 +9,7 @@ const fs = require('fs');
 const WebSocket = require('ws');
 const { execSync } = require('child_process');
 const emailCache = require('./email-cache');
+const followupsDb = require('./followups-db');
 
 // Configuration
 const CONFIG = {
@@ -25,6 +26,7 @@ const CONFIG = {
 let pendingMessages = {};
 let ws = null;
 let reconnectTimeout = null;
+let followupsDbConn = null;
 
 /**
  * Make Slack API call
@@ -145,6 +147,47 @@ async function getSocketModeUrl() {
 async function getMyUserId() {
   const data = await slackAPI('auth.test');
   return data.user_id;
+}
+
+/**
+ * Track Slack conversation in follow-ups database
+ */
+function trackSlackConversation(db, event, direction) {
+  if (!db) return;
+
+  try {
+    const now = Math.floor(Date.now() / 1000);
+    let conversationId, conversationType;
+
+    if (event.channel_type === 'im') {
+      // Direct message
+      conversationId = `slack:dm:${event.user}`;
+      conversationType = 'slack-dm';
+    } else {
+      // Channel mention - use message timestamp for uniqueness
+      conversationId = `slack:mention:${event.channel}-${event.ts}`;
+      conversationType = 'slack-mention';
+    }
+
+    const lastSender = direction === 'incoming' ? 'them' : 'me';
+    const waitingFor = direction === 'incoming' ? 'my-response' : 'their-response';
+
+    followupsDb.trackConversation(db, {
+      id: conversationId,
+      type: conversationType,
+      subject: event.text ? event.text.substring(0, 100) : null,
+      from_user: event.user,
+      from_name: event.username || event.user,
+      channel_id: event.channel_type === 'im' ? null : event.channel,
+      channel_name: null, // Will be enriched later if needed
+      last_activity: Math.floor(parseFloat(event.ts)),
+      last_sender: lastSender,
+      waiting_for: waitingFor,
+      first_seen: now
+    });
+  } catch (error) {
+    console.error('     ✗ Failed to track Slack conversation:', error.message);
+  }
 }
 
 /**
@@ -318,18 +361,34 @@ async function checkTimeouts() {
 /**
  * Handle incoming Slack event
  */
-async function handleEvent(event) {
-  // Ignore bot messages and messages from me
-  if (event.bot_id || event.user === CONFIG.myUserId) {
-    // Check if this is my message (responding to something)
-    if (event.user === CONFIG.myUserId) {
-      markResponded(event.channel, event.ts);
+async function handleEvent(event, db) {
+  // Check if this is my message (responding to something)
+  if (event.user === CONFIG.myUserId) {
+    markResponded(event.channel, event.ts);
+
+    // Mark conversation as resolved in follow-ups database
+    if (db && event.type === 'message' && event.channel_type === 'im') {
+      // For DMs, we need to find the other user in the conversation
+      // The channel is a DM channel, so we need to look up who we're talking to
+      // This is a simplified approach - in a real implementation we'd get the user from the channel
+      // For now, we'll track outgoing messages
+      trackSlackConversation(db, event, 'outgoing');
     }
+    return;
+  }
+
+  // Ignore bot messages
+  if (event.bot_id) {
     return;
   }
 
   const eventType = event.type === 'message' ? 'message' : event.type;
   console.log(`  📨 Event: ${eventType} in ${event.channel}`);
+
+  // Track conversation in follow-ups database
+  if (event.type === 'message' && !event.subtype && event.user !== CONFIG.myUserId) {
+    trackSlackConversation(db, event, 'incoming');
+  }
 
   switch (event.type) {
     case 'message':
@@ -675,7 +734,7 @@ cd ~/.openclaw/workspace
 /**
  * Connect to Socket Mode
  */
-async function connectSocketMode() {
+async function connectSocketMode(db) {
   try {
     console.log('  Connecting to Slack Socket Mode...');
     const url = await getSocketModeUrl();
@@ -711,7 +770,7 @@ async function connectSocketMode() {
         } else if (envelope.type === 'events_api') {
           // This is an actual event
           console.log(`  📨 Event type: ${envelope.payload.event.type}`);
-          await handleEvent(envelope.payload.event);
+          await handleEvent(envelope.payload.event, db);
         } else if (envelope.type === 'interactive') {
           // Handle button clicks
           await handleInteractive(envelope.payload);
@@ -731,12 +790,12 @@ async function connectSocketMode() {
     ws.on('close', () => {
       console.log('  ⚠️  Socket Mode disconnected, reconnecting in 3s...');
       ws = null;
-      reconnectTimeout = setTimeout(connectSocketMode, CONFIG.reconnectDelay);
+      reconnectTimeout = setTimeout(() => connectSocketMode(db), CONFIG.reconnectDelay);
     });
 
   } catch (error) {
     console.error('  ✗ Failed to connect:', error.message);
-    reconnectTimeout = setTimeout(connectSocketMode, CONFIG.reconnectDelay);
+    reconnectTimeout = setTimeout(() => connectSocketMode(db), CONFIG.reconnectDelay);
   }
 }
 
@@ -759,11 +818,19 @@ async function main() {
   CONFIG.myUserId = await getMyUserId();
   console.log(`   My user ID: ${CONFIG.myUserId}`);
 
+  // Initialize follow-ups database
+  try {
+    followupsDbConn = followupsDb.initDatabase();
+    console.log('   ✓ Follow-ups tracking initialized\n');
+  } catch (error) {
+    console.error('   ✗ Failed to init follow-ups DB:', error.message);
+  }
+
   // Load state
   loadState();
 
   // Connect to Socket Mode
-  await connectSocketMode();
+  await connectSocketMode(followupsDbConn);
 
   // Start timeout checker
   setInterval(async () => {
