@@ -1,0 +1,26 @@
+# Dependencies
+node_modules/
+package-lock.json
+
+# Logs
+*.log
+*.log.*
+
+# State files
+gmail-last-check.txt
+gmail-batch-queue.json
+slack-events-state.json
+slack-monitor-state.json
+
+# Cache
+email-cache/
+.cache/
+
+# Credentials (should be in parent .openclaw dir)
+*-credentials.json
+*-token.json
+
+# Temporary files
+*.tmp
+*.swp
+.DS_Store

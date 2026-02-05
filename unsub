@@ -1,0 +1,234 @@
+#!/usr/bin/env node
+/**
+ * OpenClaw Automated Unsubscribe
+ * Fully automated email unsubscribe using Gmail API
+ */
+
+const fs = require('fs');
+const { google } = require('googleapis');
+const https = require('https');
+const http = require('http');
+const { URL } = require('url');
+const { execSync } = require('child_process');
+
+const CREDENTIALS_PATH = process.env.HOME + '/.openclaw/gmail-credentials.json';
+const TOKEN_PATH = process.env.HOME + '/.openclaw/gmail-token.json';
+const GMAIL_ACCOUNT = 'user@example.com';
+
+/**
+ * Get authorized Gmail client
+ */
+function getGmailClient() {
+  const credentials = JSON.parse(fs.readFileSync(CREDENTIALS_PATH));
+  const { client_secret, client_id, redirect_uris } = credentials.installed;
+
+  const oAuth2Client = new google.auth.OAuth2(
+    client_id,
+    client_secret,
+    redirect_uris[0]
+  );
+
+  if (!fs.existsSync(TOKEN_PATH)) {
+    console.error('✗ Not authorized yet. Run: node gmail-auth.js');
+    process.exit(1);
+  }
+
+  const token = JSON.parse(fs.readFileSync(TOKEN_PATH));
+  oAuth2Client.setCredentials(token);
+
+  return google.gmail({ version: 'v1', auth: oAuth2Client });
+}
+
+/**
+ * Search for email using gog (faster than API for search)
+ */
+function searchEmail(query) {
+  try {
+    const result = execSync(
+      `gog gmail messages search "${query}" --account ${GMAIL_ACCOUNT} --max 1 --json`,
+      { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'ignore'] }
+    );
+    const data = JSON.parse(result);
+    return data.messages?.[0]?.id || null;
+  } catch (error) {
+    return null;
+  }
+}
+
+/**
+ * Get full email via Gmail API
+ */
+async function getEmail(gmail, emailId) {
+  const res = await gmail.users.messages.get({
+    userId: 'me',
+    id: emailId,
+    format: 'full'
+  });
+  return res.data;
+}
+
+/**
+ * Extract unsubscribe link from email
+ */
+function extractUnsubscribeLink(email) {
+  const headers = email.payload.headers;
+
+  // Check List-Unsubscribe header (RFC 2369)
+  const listUnsub = headers.find(h => h.name.toLowerCase() === 'list-unsubscribe');
+  if (listUnsub) {
+    // Try HTTPS URL first (one-click unsubscribe)
+    const httpsMatch = listUnsub.value.match(/<(https:\/\/[^>]+)>/);
+    if (httpsMatch) {
+      return { url: httpsMatch[1], method: 'one-click' };
+    }
+
+    // Try HTTP URL
+    const httpMatch = listUnsub.value.match(/<(http:\/\/[^>]+)>/);
+    if (httpMatch) {
+      return { url: httpMatch[1], method: 'one-click' };
+    }
+
+    // Try mailto
+    const mailtoMatch = listUnsub.value.match(/<mailto:([^>]+)>/);
+    if (mailtoMatch) {
+      return { mailto: mailtoMatch[1], method: 'mailto' };
+    }
+  }
+
+  // Parse HTML body for unsubscribe link
+  const parts = email.payload.parts || [email.payload];
+  for (const part of parts) {
+    if (part.mimeType === 'text/html' && part.body.data) {
+      const html = Buffer.from(part.body.data, 'base64').toString();
+      const match = html.match(/<a[^>]+href=["']([^"']+unsubscribe[^"']+)["']/i);
+      if (match) {
+        return { url: match[1].replace(/&amp;/g, '&'), method: 'html-link' };
+      }
+    }
+  }
+
+  return null;
+}
+
+/**
+ * Visit unsubscribe URL
+ */
+function visitUrl(urlString) {
+  return new Promise((resolve, reject) => {
+    const parsedUrl = new URL(urlString);
+    const client = parsedUrl.protocol === 'https:' ? https : http;
+
+    const options = {
+      method: 'GET',
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36'
+      }
+    };
+
+    client.get(urlString, options, (res) => {
+      let body = '';
+      res.on('data', chunk => body += chunk);
+      res.on('end', () => {
+        // Check if we got redirected or need to confirm
+        if (res.statusCode >= 200 && res.statusCode < 400) {
+          resolve({ success: true, status: res.statusCode, body });
+        } else {
+          reject(new Error(`HTTP ${res.statusCode}`));
+        }
+      });
+    }).on('error', reject);
+  });
+}
+
+/**
+ * Archive email after unsubscribe
+ */
+async function archiveEmail(gmail, emailId) {
+  await gmail.users.messages.modify({
+    userId: 'me',
+    id: emailId,
+    requestBody: {
+      removeLabelIds: ['INBOX']
+    }
+  });
+}
+
+/**
+ * Main unsubscribe workflow
+ */
+async function main() {
+  const query = process.argv.slice(2).join(' ');
+  if (!query) {
+    console.error('Usage: unsub <search query>');
+    console.error('Example: unsub from:onetrust');
+    process.exit(1);
+  }
+
+  console.log(`\n🔍 Searching for: "${query}"\n`);
+
+  // Search for email
+  const emailId = searchEmail(query);
+  if (!emailId) {
+    console.error('✗ No email found');
+    process.exit(1);
+  }
+
+  console.log(`✓ Found email ID: ${emailId}`);
+
+  // Get Gmail client
+  const gmail = getGmailClient();
+
+  // Get full email
+  console.log('📧 Fetching email via Gmail API...');
+  const email = await getEmail(gmail, emailId);
+
+  const from = email.payload.headers.find(h => h.name === 'From')?.value || 'Unknown';
+  const subject = email.payload.headers.find(h => h.name === 'Subject')?.value || 'No subject';
+
+  console.log(`   From: ${from}`);
+  console.log(`   Subject: ${subject}\n`);
+
+  // Extract unsubscribe link
+  console.log('🔗 Looking for unsubscribe link...');
+  const unsub = extractUnsubscribeLink(email);
+
+  if (!unsub) {
+    console.error('✗ No unsubscribe link found in email');
+    process.exit(1);
+  }
+
+  console.log(`✓ Found unsubscribe link (${unsub.method})`);
+
+  if (unsub.mailto) {
+    console.log(`   Mailto: ${unsub.mailto}`);
+    console.log('✗ Mailto unsubscribe requires manual action');
+    execSync(`open "mailto:${unsub.mailto}"`);
+    process.exit(1);
+  }
+
+  // Visit unsubscribe URL
+  console.log(`   URL: ${unsub.url.substring(0, 80)}...`);
+  console.log('\n🤖 Automatically unsubscribing...');
+
+  try {
+    const result = await visitUrl(unsub.url);
+    console.log(`✓ Unsubscribe request sent (HTTP ${result.status})`);
+
+    // Archive the email
+    console.log('📦 Archiving email...');
+    await archiveEmail(gmail, emailId);
+    console.log('✓ Email archived');
+
+    console.log('\n✅ Successfully unsubscribed!\n');
+  } catch (error) {
+    console.error(`✗ Failed to unsubscribe: ${error.message}`);
+    console.log('   Opening link in browser for manual completion...');
+    execSync(`open "${unsub.url}"`);
+    process.exit(1);
+  }
+}
+
+main().catch(error => {
+  console.error('Error:', error.message);
+  process.exit(1);
+});

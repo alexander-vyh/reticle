@@ -1,0 +1,62 @@
+#!/usr/bin/env node
+/**
+ * OpenClaw Unsubscribe Helper
+ * Opens email in Gmail for easy unsubscribe
+ */
+
+const { execSync } = require('child_process');
+
+const CONFIG = {
+  gmailAccount: 'user@example.com'
+};
+
+/**
+ * Find email by search query
+ */
+function findEmail(query) {
+  try {
+    const result = execSync(
+      `gog gmail messages search "${query}" --account ${CONFIG.gmailAccount} --max 1 --json`,
+      { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'ignore'] }
+    );
+    const data = JSON.parse(result);
+    return data.messages?.[0] || null;
+  } catch (error) {
+    console.error('Error finding email:', error.message);
+    return null;
+  }
+}
+
+/**
+ * Main
+ */
+function main() {
+  const query = process.argv.slice(2).join(' ');
+  if (!query) {
+    console.error('Usage: unsub <search query>');
+    console.error('Example: unsub from:onetrust');
+    console.error('Example: unsub onetrust governance');
+    process.exit(1);
+  }
+
+  console.log(`\n🔍 Searching for: "${query}"\n`);
+
+  // Find email
+  const email = findEmail(query);
+  if (!email) {
+    console.error('✗ No email found matching that query');
+    process.exit(1);
+  }
+
+  console.log(`✓ Found email:`);
+  console.log(`  From: ${email.from}`);
+  console.log(`  Subject: ${email.subject}\n`);
+
+  // Open in Gmail
+  const gmailUrl = `https://mail.google.com/mail/u/0/#inbox/${email.id}`;
+  console.log('📧 Opening in Gmail...');
+  console.log('   Look for "Unsubscribe" button at top or link at bottom\n');
+  execSync(`open "${gmailUrl}"`);
+}
+
+main();

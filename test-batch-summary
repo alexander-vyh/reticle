@@ -1,0 +1,200 @@
+#!/usr/bin/env node
+/**
+ * Test Batch Email Summary with Interactive Buttons
+ * Sends a sample batch summary to test the button interactions
+ */
+
+const https = require('https');
+const { execSync } = require('child_process');
+
+const CONFIG = {
+  slackToken: 'REDACTED_SLACK_BOT_TOKEN',
+  mySlackUserId: 'REDACTED_SLACK_USER_ID',
+  gmailAccount: 'user@example.com'
+};
+
+/**
+ * Get real unread email IDs for testing
+ */
+function getRealEmailIds(count = 3) {
+  try {
+    const result = execSync(
+      `gog gmail messages search "is:unread" --account ${CONFIG.gmailAccount} --max ${count} --json`,
+      { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'ignore'] }
+    );
+    const data = JSON.parse(result);
+    return data.messages?.map(m => m.id) || [];
+  } catch (error) {
+    return [];
+  }
+}
+
+/**
+ * Create Block Kit blocks for test batch summary
+ */
+function createTestBatchBlocks(emailIds) {
+  const now = new Date();
+  const timeStr = now.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
+
+  const blocks = [
+    {
+      type: "section",
+      text: {
+        type: "mrkdwn",
+        text: `📬 *Email Summary - ${timeStr}* _(Test Notification)_\nFound ${emailIds.length} non-urgent email(s):`
+      }
+    },
+    { type: "divider" }
+  ];
+
+  // Add each email with buttons
+  emailIds.forEach((emailId, index) => {
+    blocks.push({
+      type: "section",
+      text: {
+        type: "mrkdwn",
+        text: `*From:* Test Sender ${index + 1} <test${index + 1}@example.com>\n*Subject:* Test Email ${index + 1} - Batch Summary Demo`
+      }
+    });
+
+    blocks.push({
+      type: "actions",
+      elements: [
+        {
+          type: "button",
+          text: { type: "plain_text", text: "📧 View" },
+          action_id: "view_email_modal",
+          value: emailId,
+          style: "primary"
+        },
+        {
+          type: "button",
+          text: { type: "plain_text", text: "🌐 Gmail" },
+          action_id: "open_in_gmail",
+          value: emailId,
+          url: `https://mail.google.com/mail/u/0/#inbox/${emailId}`
+        },
+        {
+          type: "button",
+          text: { type: "plain_text", text: "✓ Archive" },
+          action_id: "archive_email",
+          value: emailId
+        },
+        {
+          type: "button",
+          text: { type: "plain_text", text: "🗑️ Trash" },
+          action_id: "delete_email",
+          value: emailId,
+          style: "danger"
+        },
+        {
+          type: "button",
+          text: { type: "plain_text", text: "Unsubscribe" },
+          action_id: "unsubscribe_email",
+          value: emailId
+        }
+      ]
+    });
+  });
+
+  blocks.push({
+    type: "context",
+    elements: [
+      {
+        type: "mrkdwn",
+        text: "💡 _This is a test batch summary. Click any button to test the interactive features!_"
+      }
+    ]
+  });
+
+  return blocks;
+}
+
+/**
+ * Send Slack message
+ */
+function sendSlackMessage(channel, text, blocks) {
+  return new Promise((resolve, reject) => {
+    const data = JSON.stringify({
+      channel,
+      text,
+      blocks,
+      unfurl_links: false
+    });
+
+    const options = {
+      hostname: 'slack.com',
+      path: '/api/chat.postMessage',
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${CONFIG.slackToken}`,
+        'Content-Type': 'application/json',
+        'Content-Length': Buffer.byteLength(data)
+      }
+    };
+
+    const req = https.request(options, (res) => {
+      let body = '';
+      res.on('data', chunk => body += chunk);
+      res.on('end', () => {
+        try {
+          const response = JSON.parse(body);
+          if (response.ok) {
+            resolve(response);
+          } else {
+            reject(new Error(`Slack error: ${response.error}`));
+          }
+        } catch (e) {
+          reject(e);
+        }
+      });
+    });
+
+    req.on('error', reject);
+    req.write(data);
+    req.end();
+  });
+}
+
+/**
+ * Main
+ */
+async function main() {
+  console.log('\n🧪 Testing Batch Email Summary with Interactive Buttons\n');
+
+  // Get real email IDs from inbox
+  console.log('📧 Finding real emails for testing...');
+  const emailIds = getRealEmailIds(3);
+
+  if (emailIds.length === 0) {
+    console.error('✗ No unread emails found. Please ensure you have some unread emails.');
+    process.exit(1);
+  }
+
+  console.log(`✓ Using ${emailIds.length} email ID(s): ${emailIds.join(', ')}\n`);
+
+  // Create test batch summary blocks
+  const blocks = createTestBatchBlocks(emailIds);
+
+  // Send test batch summary
+  console.log('📨 Sending test batch summary to Slack...');
+  try {
+    await sendSlackMessage(
+      CONFIG.mySlackUserId,
+      '📬 TEST: Batch Email Summary',
+      blocks
+    );
+    console.log('✓ Test batch summary sent!\n');
+    console.log('Check your Slack DMs and try clicking the buttons on any email:\n');
+    console.log('  📧 View - Gets full email content in ephemeral message');
+    console.log('  🌐 Gmail - Opens email in browser');
+    console.log('  ✓ Archive - Archives the email');
+    console.log('  🗑️ Delete - Moves to trash');
+    console.log('  🚫 Unsubscribe - Runs automated unsubscribe\n');
+  } catch (error) {
+    console.error('✗ Failed to send test batch summary:', error.message);
+    process.exit(1);
+  }
+}
+
+main();
