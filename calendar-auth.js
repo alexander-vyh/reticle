@@ -11,6 +11,9 @@ const TOKEN_PATH = process.env.HOME + '/.openclaw/calendar-token.json';
 const SCOPES = ['https://www.googleapis.com/auth/calendar.readonly'];
 
 async function getCalendarClient() {
+  if (!fs.existsSync(CREDENTIALS_PATH)) {
+    throw new Error(`Credentials file not found: ${CREDENTIALS_PATH}\nSet up Google OAuth credentials first.`);
+  }
   const credentials = JSON.parse(fs.readFileSync(CREDENTIALS_PATH));
   const { client_secret, client_id, redirect_uris } = credentials.installed;
   const oAuth2Client = new google.auth.OAuth2(client_id, client_secret, redirect_uris[0]);
