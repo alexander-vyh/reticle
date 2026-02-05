@@ -727,7 +727,7 @@ async function unsubscribeEmailAction(emailId) {
     const scriptPath = '/tmp/unsub-by-id.sh';
     fs.writeFileSync(scriptPath, `#!/bin/bash
 cd ~/.openclaw/workspace
-./unsub "rfc822msgid:$(gog gmail messages search "id:${emailId}" --account user@example.com --max 1 --json 2>/dev/null | jq -r '.messages[0].id')"
+./unsub "id:${emailId}"
 `);
     execSync(`chmod +x ${scriptPath}`);
     execSync(scriptPath, { stdio: 'pipe', timeout: 30000 });
