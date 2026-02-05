@@ -24,3 +24,10 @@ email-cache/
 *.tmp
 *.swp
 .DS_Store
+
+# Follow-ups database
+followups.db
+followups.db-*
+followup-checker.log
+followup-checker-error.log
+followup-checker.pid
