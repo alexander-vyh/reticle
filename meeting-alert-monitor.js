@@ -353,6 +353,81 @@ async function checkO3Notifications(events, db) {
   }
 }
 
+let lastWeeklySummaryDate = null;
+
+/**
+ * Check whether it's time to send the weekly summary.
+ * Fires once on Sunday at 6pm (or the next poll after 6pm).
+ */
+function checkWeeklySummary(db) {
+  if (!db) return;
+  const now = new Date();
+  if (now.getDay() !== O3_CONFIG.weeklySummaryDay) return;
+  if (now.getHours() < O3_CONFIG.weeklySummaryHour) return;
+
+  const todayKey = now.toISOString().split('T')[0];
+  if (lastWeeklySummaryDate === todayKey) return;
+
+  lastWeeklySummaryDate = todayKey;
+  sendWeeklySummary(db);
+}
+
+/**
+ * Build and send weekly O3 accountability summary.
+ */
+async function sendWeeklySummary(db) {
+  const now = new Date();
+  // Monday 00:00 of this week
+  const monday = new Date(now);
+  monday.setDate(monday.getDate() - ((monday.getDay() + 6) % 7));
+  monday.setHours(0, 0, 0, 0);
+  const weekStart = Math.floor(monday.getTime() / 1000);
+
+  // Sunday 23:59 (end of week)
+  const sunday = new Date(monday);
+  sunday.setDate(sunday.getDate() + 6);
+  sunday.setHours(23, 59, 59, 0);
+  const weekEnd = Math.floor(sunday.getTime() / 1000);
+
+  const sessions = followupsDb.getWeeklyO3Summary(db, weekStart, weekEnd);
+
+  // Group by report
+  const byReport = {};
+  for (const report of O3_CONFIG.directReports) {
+    byReport[report.email] = { name: report.name, held: 0, logged: 0 };
+  }
+  for (const s of sessions) {
+    if (!byReport[s.report_email]) continue;
+    byReport[s.report_email].held++;
+    if (s.lattice_logged) byReport[s.report_email].logged++;
+  }
+
+  // Build summary
+  const lines = Object.values(byReport).map(r => {
+    const latticeIcon = r.held > 0
+      ? (r.logged >= r.held ? ':white_check_mark:' : `:warning: ${r.logged}/${r.held} logged`)
+      : ':no_entry_sign: No O3';
+    return `• *${r.name}*: ${r.held} O3(s) ${latticeIcon}`;
+  });
+
+  const blocks = [
+    {
+      type: 'section',
+      text: {
+        type: 'mrkdwn',
+        text: `*Weekly O3 Summary*\n_${monday.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })} – ${sunday.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}_\n\n${lines.join('\n')}`
+      }
+    }
+  ];
+
+  try {
+    await slack.sendSlackDM(`Weekly O3 Summary`, blocks);
+    console.log(`[${timestamp()}] Weekly O3 summary sent`);
+  } catch (err) {
+    console.error(`[${timestamp()}] Weekly O3 summary failed: ${err.message}`);
+  }
+}
+
 function timestamp() {
   return new Date().toLocaleTimeString('en-US', { hour12: false });
 }
@@ -644,6 +719,7 @@ async function main() {
     const syncedEvents = await syncCalendar();
     meetingCache.cleanupAlertState(syncedEvents);
     await checkO3Notifications(syncedEvents, o3Db);
+    checkWeeklySummary(o3Db);
   }, CONFIG.pollInterval);
 
   // Set up alert checking interval
