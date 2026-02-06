@@ -15,6 +15,11 @@ const CREDENTIALS_PATH = process.env.HOME + '/.openclaw/gmail-credentials.json';
 const TOKEN_PATH = process.env.HOME + '/.openclaw/gmail-token.json';
 const GMAIL_ACCOUNT = 'user@example.com';
 
+// Parse --correlation-id from args (passed by gmail-monitor)
+const correlationArg = process.argv.find(a => a.startsWith('--correlation-id='));
+const correlationId = correlationArg ? correlationArg.split('=')[1] : undefined;
+const log = require('./lib/logger')('unsub', { correlationId });
+
 /**
  * Get authorized Gmail client
  */
@@ -29,7 +34,7 @@ function getGmailClient() {
   );
 
   if (!fs.existsSync(TOKEN_PATH)) {
-    console.error('✗ Not authorized yet. Run: node gmail-auth.js');
+    log.error('Not authorized yet. Run: node gmail-auth.js');
     process.exit(1);
   }
 
@@ -68,6 +73,16 @@ async function getEmail(gmail, emailId) {
 }
 
 /**
+ * Recursively collect all MIME parts from a Gmail message payload
+ */
+function flattenParts(part) {
+  if (part.parts) {
+    return part.parts.flatMap(flattenParts);
+  }
+  return [part];
+}
+
+/**
  * Extract unsubscribe link from email
  */
 function extractUnsubscribeLink(email) {
@@ -95,14 +110,22 @@ function extractUnsubscribeLink(email) {
     }
   }
 
-  // Parse HTML body for unsubscribe link
-  const parts = email.payload.parts || [email.payload];
-  for (const part of parts) {
-    if (part.mimeType === 'text/html' && part.body.data) {
+  // Parse HTML body for unsubscribe link (recursively flatten MIME parts)
+  const allParts = flattenParts(email.payload);
+  for (const part of allParts) {
+    if (part.mimeType === 'text/html' && part.body?.data) {
       const html = Buffer.from(part.body.data, 'base64').toString();
-      const match = html.match(/<a[^>]+href=["']([^"']+unsubscribe[^"']+)["']/i);
-      if (match) {
-        return { url: match[1].replace(/&amp;/g, '&'), method: 'html-link' };
+
+      // 1) URL itself contains "unsubscribe"
+      const urlMatch = html.match(/<a[^>]+href=["']([^"']*unsubscribe[^"']*)["']/i);
+      if (urlMatch) {
+        return { url: urlMatch[1].replace(/&amp;/g, '&'), method: 'html-link' };
+      }
+
+      // 2) Link text contains "unsubscribe" (common with tracking URLs)
+      const textMatch = html.match(/<a[^>]+href=["']([^"']+)["'][^>]*>[^<]*unsubscribe[^<]*/i);
+      if (textMatch) {
+        return { url: textMatch[1].replace(/&amp;/g, '&'), method: 'html-link-text' };
       }
     }
   }
@@ -157,78 +180,79 @@ async function archiveEmail(gmail, emailId) {
  * Main unsubscribe workflow
  */
 async function main() {
-  const query = process.argv.slice(2).join(' ');
+  const query = process.argv.slice(2).filter(a => !a.startsWith('--correlation-id=')).join(' ');
   if (!query) {
-    console.error('Usage: unsub <search query>');
-    console.error('Example: unsub from:onetrust');
+    log.error('Usage: unsub <search query | id:<gmail-message-id>>');
     process.exit(1);
   }
 
-  console.log(`\n🔍 Searching for: "${query}"\n`);
+  let emailId;
 
-  // Search for email
-  const emailId = searchEmail(query);
-  if (!emailId) {
-    console.error('✗ No email found');
-    process.exit(1);
+  // Direct ID lookup (e.g. "id:19c2fed919be283b")
+  const idMatch = query.match(/^id:(\S+)$/);
+  if (idMatch) {
+    emailId = idMatch[1];
+    log.info({ emailId }, 'Using message ID directly');
+  } else {
+    log.info({ query }, 'Searching for email');
+    emailId = searchEmail(query);
+    if (!emailId) {
+      log.error({ query }, 'No email found');
+      process.exit(1);
+    }
+    log.info({ emailId }, 'Found email');
   }
-
-  console.log(`✓ Found email ID: ${emailId}`);
 
   // Get Gmail client
   const gmail = getGmailClient();
 
   // Get full email
-  console.log('📧 Fetching email via Gmail API...');
+  log.info('Fetching email via Gmail API');
   const email = await getEmail(gmail, emailId);
 
   const from = email.payload.headers.find(h => h.name === 'From')?.value || 'Unknown';
   const subject = email.payload.headers.find(h => h.name === 'Subject')?.value || 'No subject';
 
-  console.log(`   From: ${from}`);
-  console.log(`   Subject: ${subject}\n`);
+  log.info({ from, subject }, 'Email retrieved');
 
   // Extract unsubscribe link
-  console.log('🔗 Looking for unsubscribe link...');
+  log.info('Looking for unsubscribe link');
   const unsub = extractUnsubscribeLink(email);
 
   if (!unsub) {
-    console.error('✗ No unsubscribe link found in email');
+    log.error({ from, subject }, 'No unsubscribe link found in email');
     process.exit(1);
   }
 
-  console.log(`✓ Found unsubscribe link (${unsub.method})`);
+  log.info({ method: unsub.method }, 'Found unsubscribe link');
 
   if (unsub.mailto) {
-    console.log(`   Mailto: ${unsub.mailto}`);
-    console.log('✗ Mailto unsubscribe requires manual action');
+    log.warn({ mailto: unsub.mailto }, 'Mailto unsubscribe requires manual action');
     execSync(`open "mailto:${unsub.mailto}"`);
     process.exit(1);
   }
 
   // Visit unsubscribe URL
-  console.log(`   URL: ${unsub.url.substring(0, 80)}...`);
-  console.log('\n🤖 Automatically unsubscribing...');
+  log.info({ url: unsub.url.substring(0, 80) }, 'Visiting unsubscribe URL');
 
   try {
     const result = await visitUrl(unsub.url);
-    console.log(`✓ Unsubscribe request sent (HTTP ${result.status})`);
+    log.info({ status: result.status }, 'Unsubscribe request sent');
 
     // Archive the email
-    console.log('📦 Archiving email...');
+    log.info('Archiving email');
     await archiveEmail(gmail, emailId);
-    console.log('✓ Email archived');
+    log.info('Email archived');
 
-    console.log('\n✅ Successfully unsubscribed!\n');
+    log.info({ from, subject }, 'Successfully unsubscribed');
   } catch (error) {
-    console.error(`✗ Failed to unsubscribe: ${error.message}`);
-    console.log('   Opening link in browser for manual completion...');
+    log.error({ err: error, url: unsub.url }, 'Failed to unsubscribe, opening in browser');
     execSync(`open "${unsub.url}"`);
     process.exit(1);
   }
 }
 
 main().catch(error => {
-  console.error('Error:', error.message);
+  log.fatal({ err: error }, 'Unhandled error');
   process.exit(1);
 });
