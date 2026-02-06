@@ -262,15 +262,11 @@
         .map(a => escapeHtml(a.displayName || a.email.split('@')[0]))
         .slice(0, 3);
       if (names.length === 0) return '';
-      const suffix = attendees.length > 4 ? ` +${attendees.length - 3} more` : '';
+      const others = attendees.filter(a => !a.self);
+      const suffix = others.length > 3 ? ` +${others.length - 3} more` : '';
       return `with ${names.join(', ')}${suffix}`;
     }
 
-    // Play sound alerts
-    ipcRenderer.on('play-sound', (event, soundPath) => {
-      // We use the main process to play sounds via afplay
-      ipcRenderer.send('play-sound-request', soundPath);
-    });
   </script>
 </body>
 </html>

@@ -3,7 +3,7 @@
 
 const { app, BrowserWindow, ipcMain, screen } = require('electron');
 const path = require('path');
-const { exec } = require('child_process');
+const { execFile } = require('child_process');
 const launcher = require('./platform-launcher');
 
 // Parse meeting data from command line args
@@ -99,7 +99,7 @@ function setupReexpand(alertLevel) {
 }
 
 function playSound(soundPath) {
-  exec(`afplay "${soundPath}"`, (error) => {
+  execFile('afplay', [soundPath], (error) => {
     if (error) console.error('Sound play failed:', error.message);
   });
 }
@@ -126,11 +126,6 @@ ipcMain.on('dismiss', (event, data) => {
     if (reexpandInterval) clearInterval(reexpandInterval);
     app.quit();
   }
-});
-
-// IPC: Play sound from renderer
-ipcMain.on('play-sound-request', (event, soundPath) => {
-  playSound(soundPath);
 });
 
 app.whenReady().then(createWindow);
