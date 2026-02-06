@@ -103,6 +103,15 @@ function checkAlerts(events) {
         triggerAlert(event, level);
       }
     }
+
+    // Play 1-minute warning sound (no new popup, just sound)
+    if (timeUntil <= 60 * 1000 && timeUntil > 45 * 1000) {
+      if (!meetingCache.hasAlerted(event.id, 'oneMin')) {
+        meetingCache.recordAlert(event.id, 'oneMin');
+        console.log(`  🔊 1-minute warning: "${event.summary}"`);
+        playSound(SOUNDS.oneMin);
+      }
+    }
   }
 }
 
