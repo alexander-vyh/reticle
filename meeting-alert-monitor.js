@@ -3,7 +3,10 @@
 
 const fs = require('fs');
 const path = require('path');
-const { execFile } = require('child_process');
+const { execFile, spawn } = require('child_process');
+const https = require('https');
+const followupsDb = require('./followups-db');
+const slack = require('./lib/slack');
 const calendarAuth = require('./calendar-auth');
 const meetingCache = require('./meeting-cache');
 const linkParser = require('./meeting-link-parser');
@@ -14,6 +17,7 @@ const CONFIG = {
   alertThresholds: {
     tenMin: 10 * 60 * 1000,           // 10 minutes
     fiveMin: 5 * 60 * 1000,           // 5 minutes
+    oneMin: 60 * 1000,                // 1 minute
     start: 0                           // At start time
   },
   alertCheckInterval: 15 * 1000,      // Check every 15 seconds
@@ -30,6 +34,112 @@ const SOUNDS = {
   oneMin: '/System/Library/Sounds/Sosumi.aiff',
   start: '/System/Library/Sounds/Hero.aiff'
 };
+
+const O3_CONFIG = {
+  myEmail: 'user@example.com',
+  directReports: [
+    { name: 'Report One', email: 'report1@example.com', slackId: 'REDACTED_REPORT1_SLACK_ID' },
+    { name: 'Report Two', email: 'report2@example.com', slackId: 'REDACTED_REPORT2_SLACK_ID' },
+    { name: 'Report Three', email: 'report3@example.com', slackId: 'REDACTED_REPORT3_SLACK_ID' },
+    { name: 'Report Four', email: 'report4@example.com', slackId: 'REDACTED_REPORT4_SLACK_ID' },
+    { name: 'Report Five', email: 'report5@example.com', slackId: 'REDACTED_REPORT5_SLACK_ID' },
+    { name: 'Report Six', email: 'report6@example.com', slackId: 'REDACTED_REPORT6_SLACK_ID' }
+  ],
+  afternoonPrepWindow: { startHour: 14, endHour: 15 },  // 2-3pm
+  minGapMinutes: 10,
+  maxPostDeferHours: 4,
+  weeklySummaryDay: 0,   // Sunday
+  weeklySummaryHour: 18  // 6pm
+};
+
+/**
+ * Detect whether a calendar event is a 1:1 with a direct report.
+ * Returns the matching report config object, or null.
+ */
+function detectO3(event) {
+  const attendees = event.attendees || [];
+  // Must have exactly 2 attendees (self + 1 other)
+  if (attendees.length !== 2) return null;
+
+  const other = attendees.find(a => !a.self);
+  if (!other) return null;
+
+  // Other must not have declined
+  if (other.responseStatus === 'declined') return null;
+
+  // Self must not have declined
+  const self = attendees.find(a => a.self);
+  if (self && self.responseStatus === 'declined') return null;
+
+  // Match against direct reports
+  const email = (other.email || '').toLowerCase();
+  return O3_CONFIG.directReports.find(r => r.email.toLowerCase() === email) || null;
+}
+
+/**
+ * Find free gaps in the calendar within a time window using Google FreeBusy API.
+ * More accurate than cached events — sees all calendars (shared, subscribed, PTO).
+ * @param {number} windowStart - Window start (epoch ms)
+ * @param {number} windowEnd - Window end (epoch ms)
+ * @param {number} minMinutes - Minimum gap duration in minutes
+ * @returns {Promise<Array<{start: number, end: number}>>} Free gaps (epoch ms)
+ */
+async function findGaps(windowStart, windowEnd, minMinutes) {
+  if (!calendar) return [];
+
+  try {
+    const response = await calendar.freebusy.query({
+      requestBody: {
+        timeMin: new Date(windowStart).toISOString(),
+        timeMax: new Date(windowEnd).toISOString(),
+        items: [{ id: 'primary' }]
+      }
+    });
+
+    const busyPeriods = (response.data.calendars.primary.busy || [])
+      .map(b => ({ start: new Date(b.start).getTime(), end: new Date(b.end).getTime() }))
+      .sort((a, b) => a.start - b.start);
+
+    // Invert busy periods to get free gaps
+    const gaps = [];
+    let cursor = windowStart;
+
+    for (const busy of busyPeriods) {
+      if (busy.start > cursor) {
+        const gapMs = busy.start - cursor;
+        if (gapMs >= minMinutes * 60 * 1000) {
+          gaps.push({ start: cursor, end: busy.start });
+        }
+      }
+      cursor = Math.max(cursor, busy.end);
+    }
+
+    // Trailing gap after last busy period
+    if (cursor < windowEnd) {
+      const gapMs = windowEnd - cursor;
+      if (gapMs >= minMinutes * 60 * 1000) {
+        gaps.push({ start: cursor, end: windowEnd });
+      }
+    }
+
+    return gaps;
+  } catch (err) {
+    console.error(`[${timestamp()}] FreeBusy query failed: ${err.message}`);
+    return [];
+  }
+}
+
+/**
+ * Find the best gap for a notification in a time window.
+ * For "before" notifications: returns the LAST gap (closest to the meeting).
+ * For "after" notifications: returns the FIRST gap.
+ * @param {'before'|'after'} preference
+ */
+async function findBestGap(windowStart, windowEnd, minMinutes, preference) {
+  const gaps = await findGaps(windowStart, windowEnd, minMinutes);
+  if (gaps.length === 0) return null;
+  return preference === 'before' ? gaps[gaps.length - 1] : gaps[0];
+}
 
 function timestamp() {
   return new Date().toLocaleTimeString('en-US', { hour12: false });
@@ -108,15 +218,6 @@ function checkAlerts(events) {
         triggerAlert(event, level);
       }
     }
-
-    // Play 1-minute warning sound (no new popup, just sound)
-    if (timeUntil <= 60 * 1000 && timeUntil > 45 * 1000) {
-      if (!meetingCache.hasAlerted(event.id, 'oneMin')) {
-        meetingCache.recordAlert(event.id, 'oneMin');
-        console.log(`  🔊 1-minute warning: "${event.summary}"`);
-        playSound(SOUNDS.oneMin);
-      }
-    }
   }
 }
 
@@ -174,30 +275,56 @@ function triggerAlert(event, level) {
   // Use group start time as the group key
   const groupKey = `group-${eventGroup.startTime}`;
 
-  // Kill existing popup for the same group (upgrading alert level)
+  // Escalate existing popup via stdin, or spawn a new one
   if (activePopups[groupKey]) {
-    try {
-      activePopups[groupKey].kill();
-    } catch (e) {
-      // Process may have already exited
+    const escalated = escalatePopup(groupKey, popupData);
+    if (escalated) {
+      // Play sound for escalation level
+      if (SOUNDS[level]) playSound(SOUNDS[level]);
+      return;
     }
+    // Pipe broken — popup crashed; fall through to spawn a new one
     delete activePopups[groupKey];
   }
 
   spawnPopup(groupKey, popupData);
+
+  // Play sound for initial spawn (except tenMin which is ambient)
+  if (SOUNDS[level]) playSound(SOUNDS[level]);
+}
+
+/**
+ * Escalate an existing popup via stdin IPC.
+ * Returns true if the message was written successfully, false if the pipe is broken.
+ */
+function escalatePopup(groupKey, popupData) {
+  const child = activePopups[groupKey];
+  if (!child || !child.stdin || !child.stdin.writable) return false;
+
+  const msg = JSON.stringify({ type: 'escalate', ...popupData }) + '\n';
+  try {
+    child.stdin.write(msg);
+    console.log(`[${timestamp()}] Escalated popup ${groupKey} to ${popupData.alertLevel}`);
+    return true;
+  } catch (e) {
+    console.error(`[${timestamp()}] Escalation write failed for ${groupKey}: ${e.message}`);
+    return false;
+  }
 }
 
 /**
  * Spawn an Electron popup window for the given meeting data.
+ * Uses spawn (not execFile) so child.stdin is a writable pipe for escalation.
  */
 function spawnPopup(groupKey, popupData) {
   const dataB64 = Buffer.from(JSON.stringify(popupData)).toString('base64');
 
-  const child = execFile(
+  const child = spawn(
     CONFIG.electronPath,
     [CONFIG.popupScript, dataB64],
     {
       cwd: __dirname,
+      stdio: ['pipe', 'pipe', 'pipe'],
       env: { ...process.env, ELECTRON_DISABLE_SECURITY_WARNINGS: 'true' }
     }
   );
