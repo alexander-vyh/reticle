@@ -29,15 +29,20 @@ const SOUNDS = {
   start: '/System/Library/Sounds/Hero.aiff'
 };
 
+const COLLAPSED_WIDTH = 80;
+const COLLAPSED_HEIGHT = 44;
+
 let mainWindow = null;
-let reexpandInterval = null;
+let reexpandTimeout = null;
+let isCollapsed = false;
+let expandedSize = null; // { width, height } — saved when collapsing
 
 function createWindow() {
   const display = screen.getPrimaryDisplay();
   const { width: screenWidth } = display.workAreaSize;
 
   const windowWidth = 300;
-  const windowHeight = 60 + (meetingData.meetings.length * 120);
+  const windowHeight = 100 + (meetingData.meetings.length * 150);
 
   mainWindow = new BrowserWindow({
     width: windowWidth,
@@ -49,6 +54,7 @@ function createWindow() {
     transparent: true,
     skipTaskbar: true,
     resizable: false,
+    focusable: false,
     hasShadow: true,
     webPreferences: {
       nodeIntegration: true,
@@ -66,9 +72,6 @@ function createWindow() {
     mainWindow.webContents.send('meeting-data', meetingData);
   });
 
-  // Set up re-expansion behavior for 5min and start alerts
-  setupReexpand(meetingData.alertLevel);
-
   // Play initial sound based on alert level
   if (meetingData.alertLevel === 'fiveMin') {
     playSound(SOUNDS.fiveMin);
@@ -77,25 +80,47 @@ function createWindow() {
   }
 }
 
-function setupReexpand(alertLevel) {
-  if (alertLevel === 'fiveMin') {
-    // Re-expand every 30 seconds if minimized
-    reexpandInterval = setInterval(() => {
-      if (mainWindow && mainWindow.isMinimized()) {
-        mainWindow.restore();
-        mainWindow.focus();
-      }
-    }, 30 * 1000);
-  } else if (alertLevel === 'start') {
-    // Re-expand every 5 seconds - cannot minimize
-    reexpandInterval = setInterval(() => {
-      if (mainWindow) {
-        mainWindow.restore();
-        mainWindow.show();
-        mainWindow.focus();
-      }
-    }, 5 * 1000);
-  }
+function collapseWindow() {
+  if (!mainWindow || isCollapsed) return;
+
+  const bounds = mainWindow.getBounds();
+  expandedSize = { width: bounds.width, height: bounds.height };
+  isCollapsed = true;
+
+  // Resize to small pill, anchored to top-right corner
+  const x = bounds.x + bounds.width - COLLAPSED_WIDTH;
+  const y = bounds.y;
+  mainWindow.setBounds({ x, y, width: COLLAPSED_WIDTH, height: COLLAPSED_HEIGHT });
+
+  // Tell renderer to show collapsed view
+  mainWindow.webContents.send('collapse');
+
+  // Schedule re-expand based on alert level
+  const delay = meetingData.alertLevel === 'start' ? 5000 : 30000;
+  if (reexpandTimeout) clearTimeout(reexpandTimeout);
+  reexpandTimeout = setTimeout(() => {
+    expandWindow();
+  }, delay);
+}
+
+function expandWindow() {
+  if (!mainWindow || !isCollapsed) return;
+
+  isCollapsed = false;
+  if (reexpandTimeout) clearTimeout(reexpandTimeout);
+
+  // Expand from current pill position, anchoring to right edge
+  const pillBounds = mainWindow.getBounds();
+  const w = expandedSize ? expandedSize.width : 300;
+  const h = expandedSize ? expandedSize.height : 250;
+  const x = pillBounds.x + pillBounds.width - w;
+  const y = pillBounds.y;
+
+  mainWindow.setBounds({ x, y, width: w, height: h });
+
+  // Tell renderer to show expanded view
+  mainWindow.webContents.send('expand');
+  mainWindow.showInactive();
 }
 
 function playSound(soundPath) {
@@ -110,27 +135,38 @@ ipcMain.on('join-meeting', (event, data) => {
   launcher.launchMeeting(data.platform, data.url);
 });
 
-// IPC: Dismiss
+// IPC: Dismiss (collapse for fiveMin, quit for tenMin)
 ipcMain.on('dismiss', (event, data) => {
   if (data.alertLevel === 'start') {
-    // Cannot dismiss at start time - re-show
+    // Cannot dismiss at start time
     return;
   }
 
   if (data.alertLevel === 'fiveMin') {
-    // Minimize (will re-expand)
-    mainWindow.minimize();
+    collapseWindow();
   } else {
     // tenMin - fully dismiss
     console.log(JSON.stringify({ action: 'dismiss' }));
-    if (reexpandInterval) clearInterval(reexpandInterval);
+    if (reexpandTimeout) clearTimeout(reexpandTimeout);
     app.quit();
   }
+});
+
+// IPC: Expand from collapsed pill
+ipcMain.on('expand', () => {
+  expandWindow();
+});
+
+// IPC: Move window by delta (for custom pill dragging)
+ipcMain.on('move-window', (event, { deltaX, deltaY }) => {
+  if (!mainWindow) return;
+  const [x, y] = mainWindow.getPosition();
+  mainWindow.setPosition(x + deltaX, y + deltaY);
 });
 
 app.whenReady().then(createWindow);
 
 app.on('window-all-closed', () => {
-  if (reexpandInterval) clearInterval(reexpandInterval);
+  if (reexpandTimeout) clearTimeout(reexpandTimeout);
   app.quit();
 });

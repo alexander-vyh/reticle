@@ -13,6 +13,7 @@
       user-select: none;
     }
 
+    /* ── Expanded view ── */
     .container {
       background: rgba(30, 30, 30, 0.95);
       border-radius: 12px;
@@ -94,6 +95,11 @@
       text-overflow: ellipsis;
     }
 
+    .btn-row {
+      display: flex;
+      gap: 6px;
+    }
+
     .join-btn {
       -webkit-app-region: no-drag;
       background: #4CAF50;
@@ -104,12 +110,29 @@
       font-size: 13px;
       font-weight: 600;
       cursor: pointer;
-      width: 100%;
+      flex: 1;
       transition: background 0.15s;
     }
 
     .join-btn:hover { background: #45a049; }
     .join-btn:active { background: #3d8b40; }
+
+    .copy-btn {
+      -webkit-app-region: no-drag;
+      background: rgba(255, 255, 255, 0.1);
+      color: rgba(255, 255, 255, 0.7);
+      border: none;
+      padding: 8px 10px;
+      border-radius: 6px;
+      font-size: 13px;
+      cursor: pointer;
+      transition: background 0.15s, color 0.15s;
+      flex-shrink: 0;
+    }
+
+    .copy-btn:hover { background: rgba(255, 255, 255, 0.2); color: white; }
+    .copy-btn:active { background: rgba(255, 255, 255, 0.25); }
+    .copy-btn.copied { color: #4CAF50; }
 
     .dismiss-btn {
       -webkit-app-region: no-drag;
@@ -125,6 +148,61 @@
 
     .dismiss-btn:hover { color: rgba(255, 255, 255, 0.7); }
     .dismiss-btn.hidden { display: none; }
+
+    /* ── Collapsed pill ── */
+    .pill {
+      display: none;
+      -webkit-app-region: no-drag;
+      cursor: pointer;
+      width: 80px;
+      height: 44px;
+      border-radius: 22px;
+      background: rgba(30, 30, 30, 0.95);
+      border: 1px solid rgba(255, 255, 255, 0.15);
+      box-shadow: 0 4px 16px rgba(0, 0, 0, 0.5);
+      backdrop-filter: blur(20px);
+      -webkit-backdrop-filter: blur(20px);
+      align-items: center;
+      justify-content: center;
+      gap: 6px;
+    }
+
+    .pill:hover {
+      background: rgba(50, 50, 50, 0.95);
+      border-color: rgba(255, 255, 255, 0.25);
+    }
+
+    .pill:active {
+      background: rgba(60, 60, 60, 0.95);
+    }
+
+    .pill.dragging {
+      cursor: grabbing;
+    }
+
+    .pill-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: #ffc107;
+      flex-shrink: 0;
+    }
+
+    .pill-dot.red { background: #dc3545; }
+    .pill-dot.yellow { background: #ffc107; }
+
+    .pill-countdown {
+      font-size: 15px;
+      font-weight: 600;
+      color: white;
+      font-variant-numeric: tabular-nums;
+    }
+
+    .pill-countdown.urgent { color: #ffc107; }
+    .pill-countdown.now { color: #dc3545; }
+
+    body.collapsed .container { display: none; }
+    body.collapsed .pill { display: flex; }
   </style>
 </head>
 <body>
@@ -134,12 +212,17 @@
     <button class="dismiss-btn" id="dismissBtn" onclick="dismiss()">Dismiss</button>
   </div>
 
+  <div class="pill" id="pill">
+    <div class="pill-dot yellow" id="pillDot"></div>
+    <div class="pill-countdown" id="pillCountdown">--:--</div>
+  </div>
+
   <script>
     const { ipcRenderer } = require('electron');
 
     let meetings = [];
     let alertLevel = 'tenMin';
-    let reexpandInterval = null;
+    let collapsed = false;
 
     // Receive meeting data from main process
     ipcRenderer.on('meeting-data', (event, data) => {
@@ -148,6 +231,17 @@
       renderMeetings();
       startCountdowns();
       configureAlertBehavior();
+    });
+
+    // Collapse/expand messages from main process
+    ipcRenderer.on('collapse', () => {
+      collapsed = true;
+      document.body.classList.add('collapsed');
+    });
+
+    ipcRenderer.on('expand', () => {
+      collapsed = false;
+      document.body.classList.remove('collapsed');
     });
 
     function renderMeetings() {
@@ -161,7 +255,10 @@
           <div class="countdown" id="countdown-${idx}">--:--</div>
           <div class="title">${escapeHtml(meeting.summary || 'Untitled Meeting')}</div>
           <div class="attendees">${formatAttendees(meeting.attendees)}</div>
-          <button class="join-btn" onclick="joinMeeting(${idx})">${escapeHtml(meeting.joinLabel || 'Join Meeting')}</button>
+          <div class="btn-row">
+            <button class="join-btn" onclick="joinMeeting(${idx})">${escapeHtml(meeting.joinLabel || 'Join Meeting')}</button>
+            <button class="copy-btn" id="copy-btn-${idx}" onclick="copyLink(${idx})" title="Copy meeting link">Copy</button>
+          </div>
         `;
         container.appendChild(div);
       });
@@ -211,6 +308,25 @@
         header.className = 'header white';
       }
 
+      // Update pill countdown and dot
+      const pillCountdown = document.getElementById('pillCountdown');
+      const pillDot = document.getElementById('pillDot');
+      const urgentMs = mostUrgent * 60000;
+      if (urgentMs <= 0) {
+        const absMs = Math.abs(urgentMs);
+        const oMin = Math.floor(absMs / 60000);
+        const oSec = Math.floor((absMs % 60000) / 1000);
+        pillCountdown.textContent = `-${oMin}:${String(oSec).padStart(2, '0')}`;
+        pillCountdown.className = 'pill-countdown now';
+        pillDot.className = 'pill-dot red';
+      } else {
+        const min = Math.floor(urgentMs / 60000);
+        const sec = Math.floor((urgentMs % 60000) / 1000);
+        pillCountdown.textContent = `${min}:${String(sec).padStart(2, '0')}`;
+        pillCountdown.className = mostUrgent <= 5 ? 'pill-countdown urgent' : 'pill-countdown';
+        pillDot.className = mostUrgent <= 5 ? 'pill-dot yellow' : 'pill-dot yellow';
+      }
+
       // Trigger shake at 1 minute and start time (wider window to ensure it fires)
       const container = document.getElementById('container');
       if ((mostUrgent <= 1.05 && mostUrgent > 0.95) || (mostUrgent <= 0.05 && mostUrgent > -0.05)) {
@@ -228,12 +344,25 @@
         // Cannot dismiss at start time
         dismissBtn.classList.add('hidden');
       } else if (alertLevel === 'fiveMin') {
-        // Can minimize but it re-expands
+        // Can collapse but it re-expands
         dismissBtn.textContent = 'Minimize';
       } else {
         // 10min - fully dismissible
         dismissBtn.textContent = 'Dismiss';
       }
+    }
+
+    function copyLink(idx) {
+      const meeting = meetings[idx];
+      if (!meeting.url) return;
+      require('electron').clipboard.writeText(meeting.url);
+      const btn = document.getElementById(`copy-btn-${idx}`);
+      btn.textContent = 'Copied';
+      btn.classList.add('copied');
+      setTimeout(() => {
+        btn.textContent = 'Copy';
+        btn.classList.remove('copied');
+      }, 1500);
     }
 
     function joinMeeting(idx) {
@@ -248,6 +377,48 @@
     function dismiss() {
       ipcRenderer.send('dismiss', { alertLevel });
     }
+
+    function requestExpand() {
+      ipcRenderer.send('expand');
+    }
+
+    // Custom drag/click handling for the pill.
+    // Short press with no movement = click (expand).
+    // Press + movement = drag the window.
+    (function setupPillDrag() {
+      const pill = document.getElementById('pill');
+      const DRAG_THRESHOLD = 4; // px before we consider it a drag
+      let drag = null;
+
+      pill.addEventListener('mousedown', (e) => {
+        e.preventDefault();
+        drag = { startX: e.screenX, startY: e.screenY, moved: false };
+      });
+
+      document.addEventListener('mousemove', (e) => {
+        if (!drag) return;
+        const dx = e.screenX - drag.startX;
+        const dy = e.screenY - drag.startY;
+        if (!drag.moved && (Math.abs(dx) > DRAG_THRESHOLD || Math.abs(dy) > DRAG_THRESHOLD)) {
+          drag.moved = true;
+          pill.classList.add('dragging');
+        }
+        if (drag.moved) {
+          ipcRenderer.send('move-window', { deltaX: dx, deltaY: dy });
+          drag.startX = e.screenX;
+          drag.startY = e.screenY;
+        }
+      });
+
+      document.addEventListener('mouseup', () => {
+        if (!drag) return;
+        if (!drag.moved) {
+          requestExpand();
+        }
+        pill.classList.remove('dragging');
+        drag = null;
+      });
+    })();
 
     function escapeHtml(text) {
       const div = document.createElement('div');
