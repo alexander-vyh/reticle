@@ -18,10 +18,28 @@ const PATTERNS = {
  * @returns {{ platform: string, url: string }}
  */
 function extractMeetingLink(event) {
+  // Check conferenceData first (most authoritative — set by calendar add-ons)
+  if (event.conferenceData && event.conferenceData.entryPoints) {
+    const videoEntry = event.conferenceData.entryPoints.find(ep => ep.entryPointType === 'video');
+    if (videoEntry && videoEntry.uri) {
+      for (const [platform, pattern] of Object.entries(PATTERNS)) {
+        if (pattern.test(videoEntry.uri)) return { platform, url: videoEntry.uri };
+      }
+      // Video entry exists but doesn't match known patterns — use it anyway
+      const name = (event.conferenceData.conferenceSolution && event.conferenceData.conferenceSolution.name) || 'video';
+      return { platform: name.toLowerCase().split(' ')[0], url: videoEntry.uri };
+    }
+  }
+
+  // Check hangoutLink (older Google Meet integration)
+  if (event.hangoutLink) {
+    return { platform: 'meet', url: event.hangoutLink };
+  }
+
   const location = event.location || '';
   const description = event.description || '';
 
-  // Check location first (usually more reliable/intentional)
+  // Check location (usually more reliable/intentional)
   for (const [platform, pattern] of Object.entries(PATTERNS)) {
     const match = location.match(pattern);
     if (match) return { platform, url: match[0] };
