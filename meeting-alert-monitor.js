@@ -141,6 +141,218 @@ async function findBestGap(windowStart, windowEnd, minMinutes, preference) {
   return preference === 'before' ? gaps[gaps.length - 1] : gaps[0];
 }
 
+/**
+ * Send afternoon-before prep notification.
+ * Content: list of tomorrow's O3s + open follow-up count per person + days since last O3
+ */
+async function sendAfternoonPrep(db, event, report) {
+  const startMs = new Date(event.start.dateTime).getTime();
+  const startTime = new Date(startMs).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
+
+  // Days since last O3
+  const lastO3 = followupsDb.getLastO3ForReport(db, report.email, Math.floor(startMs / 1000));
+  const daysSinceLast = lastO3
+    ? Math.round((startMs / 1000 - lastO3.scheduled_start) / 86400)
+    : null;
+
+  // Open follow-ups for this person
+  const pendingFollowups = followupsDb.getPendingResponses(db, { type: null })
+    .filter(c => c.from_user && c.from_user.toLowerCase().includes(report.email.split('@')[0]));
+
+  const daysSinceText = daysSinceLast !== null ? `${daysSinceLast} days since last O3` : 'First tracked O3';
+  const followupText = pendingFollowups.length > 0
+    ? `${pendingFollowups.length} open follow-up(s)`
+    : 'No open follow-ups';
+
+  const blocks = [
+    {
+      type: 'section',
+      text: {
+        type: 'mrkdwn',
+        text: `*Tomorrow's O3: ${report.name}*\n:clock1: ${startTime}\n:memo: ${daysSinceText}\n:pushpin: ${followupText}`
+      }
+    }
+  ];
+
+  try {
+    await slack.sendSlackDM(`Tomorrow's O3 prep: ${report.name} at ${startTime}`, blocks);
+    followupsDb.markO3Notified(db, event.id, 'prep_sent_afternoon');
+    console.log(`[${timestamp()}] O3 afternoon prep sent for ${report.name}`);
+  } catch (err) {
+    console.error(`[${timestamp()}] O3 afternoon prep failed: ${err.message}`);
+  }
+}
+
+/**
+ * Send pre-meeting prep notification (nearest gap before O3, within 3 hours).
+ * Content: open follow-ups, last O3 date, join link
+ */
+async function sendPreMeetingPrep(db, event, report) {
+  const startMs = new Date(event.start.dateTime).getTime();
+  const startTime = new Date(startMs).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
+  const minutesUntil = Math.round((startMs - Date.now()) / 60000);
+
+  // Last O3
+  const lastO3 = followupsDb.getLastO3ForReport(db, report.email, Math.floor(startMs / 1000));
+  const lastO3Text = lastO3
+    ? new Date(lastO3.scheduled_start * 1000).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
+    : 'None tracked';
+
+  // Open follow-ups
+  const pendingFollowups = followupsDb.getPendingResponses(db, { type: null })
+    .filter(c => c.from_user && c.from_user.toLowerCase().includes(report.email.split('@')[0]));
+
+  // Meeting link
+  const linkInfo = linkParser.extractMeetingLink(event);
+
+  let followupSection = '';
+  if (pendingFollowups.length > 0) {
+    followupSection = '\n\n*Open follow-ups:*\n' + pendingFollowups
+      .slice(0, 5)
+      .map(f => `• ${f.subject || 'Untitled'}`)
+      .join('\n');
+  }
+
+  const blocks = [
+    {
+      type: 'section',
+      text: {
+        type: 'mrkdwn',
+        text: `*O3 with ${report.name} in ~${minutesUntil}min*\n:calendar: Last O3: ${lastO3Text}\n:link: ${linkInfo.url ? `<${linkInfo.url}|Join ${linkInfo.platform}>` : 'No meeting link found'}${followupSection}`
+      }
+    }
+  ];
+
+  try {
+    await slack.sendSlackDM(`O3 with ${report.name} in ~${minutesUntil}min`, blocks);
+    followupsDb.markO3Notified(db, event.id, 'prep_sent_before');
+    console.log(`[${timestamp()}] O3 pre-meeting prep sent for ${report.name}`);
+  } catch (err) {
+    console.error(`[${timestamp()}] O3 pre-meeting prep failed: ${err.message}`);
+  }
+}
+
+/**
+ * Send post-meeting Lattice nudge (first gap after O3 ends).
+ * Content: "Log in Lattice" prompt with action buttons
+ */
+async function sendPostMeetingNudge(db, event, report) {
+  const blocks = [
+    {
+      type: 'section',
+      text: {
+        type: 'mrkdwn',
+        text: `*O3 with ${report.name} complete* :white_check_mark:\n\nDon't forget to log your notes in Lattice:\n• Action items\n• Feedback given/received\n• Career discussion topics`
+      }
+    },
+    {
+      type: 'actions',
+      elements: [
+        {
+          type: 'button',
+          text: { type: 'plain_text', text: 'Logged in Lattice' },
+          style: 'primary',
+          action_id: `o3_lattice_logged_${event.id}`
+        },
+        {
+          type: 'button',
+          text: { type: 'plain_text', text: 'Snooze 30m' },
+          action_id: `o3_snooze_${event.id}`
+        },
+        {
+          type: 'button',
+          text: { type: 'plain_text', text: 'Skip' },
+          action_id: `o3_skip_${event.id}`
+        }
+      ]
+    }
+  ];
+
+  try {
+    await slack.sendSlackDM(`O3 with ${report.name} — log in Lattice`, blocks);
+    followupsDb.markO3Notified(db, event.id, 'post_nudge_sent');
+    console.log(`[${timestamp()}] O3 post-meeting nudge sent for ${report.name}`);
+  } catch (err) {
+    console.error(`[${timestamp()}] O3 post-meeting nudge failed: ${err.message}`);
+  }
+}
+
+/**
+ * Main O3 notification loop — called on each poll cycle.
+ * Scans cached events, detects O3s, upserts to DB, fires gap-aware notifications.
+ * Uses FreeBusy API for gap-finding (async).
+ */
+async function checkO3Notifications(events, db) {
+  if (!db) return;
+  const now = Date.now();
+
+  for (const event of events) {
+    const report = detectO3(event);
+    if (!report) continue;
+
+    const startMs = new Date(event.start.dateTime).getTime();
+    const endMs = new Date(event.end.dateTime).getTime();
+
+    // Upsert the O3 session
+    followupsDb.upsertO3Session(db, {
+      id: event.id,
+      report_name: report.name,
+      report_email: report.email,
+      scheduled_start: Math.floor(startMs / 1000),
+      scheduled_end: Math.floor(endMs / 1000)
+    });
+
+    const session = followupsDb.getO3Session(db, event.id);
+
+    // --- Afternoon-before prep ---
+    // If the O3 is tomorrow and we haven't sent afternoon prep yet
+    const tomorrow = new Date(now);
+    tomorrow.setDate(tomorrow.getDate() + 1);
+    const o3Date = new Date(startMs);
+    const isTomorrow = o3Date.getDate() === tomorrow.getDate()
+      && o3Date.getMonth() === tomorrow.getMonth()
+      && o3Date.getFullYear() === tomorrow.getFullYear();
+
+    if (isTomorrow && !session.prep_sent_afternoon) {
+      const today = new Date(now);
+      const windowStart = new Date(today.getFullYear(), today.getMonth(), today.getDate(),
+        O3_CONFIG.afternoonPrepWindow.startHour).getTime();
+      const windowEnd = new Date(today.getFullYear(), today.getMonth(), today.getDate(),
+        O3_CONFIG.afternoonPrepWindow.endHour).getTime();
+
+      if (now >= windowStart && now <= windowEnd) {
+        const gap = await findBestGap(now, windowEnd, O3_CONFIG.minGapMinutes, 'after');
+        if (gap && now >= gap.start) {
+          await sendAfternoonPrep(db, event, report);
+        }
+      }
+    }
+
+    // --- Pre-meeting prep ---
+    // Within 3 hours before the O3
+    const threeHoursBefore = startMs - 3 * 60 * 60 * 1000;
+    if (!session.prep_sent_before && now >= threeHoursBefore && now < startMs) {
+      const gap = await findBestGap(now, startMs, O3_CONFIG.minGapMinutes, 'before');
+      if (gap && now >= gap.start) {
+        await sendPreMeetingPrep(db, event, report);
+      }
+    }
+
+    // --- Post-meeting nudge ---
+    // After the O3 ends, within 4 hours
+    const maxDefer = endMs + O3_CONFIG.maxPostDeferHours * 60 * 60 * 1000;
+    if (!session.post_nudge_sent && now >= endMs && now <= maxDefer) {
+      const gap = await findBestGap(now, maxDefer, O3_CONFIG.minGapMinutes, 'after');
+      if (gap && now >= gap.start) {
+        await sendPostMeetingNudge(db, event, report);
+      } else if (now >= maxDefer) {
+        // Max defer exceeded — fire anyway
+        await sendPostMeetingNudge(db, event, report);
+      }
+    }
+  }
+}
+
 function timestamp() {
   return new Date().toLocaleTimeString('en-US', { hour12: false });
 }
@@ -404,6 +616,16 @@ async function main() {
     process.exit(1);
   }
 
+  // Initialize followups database (for O3 tracking)
+  let o3Db;
+  try {
+    o3Db = followupsDb.initDatabase();
+    console.log(`[${timestamp()}] O3 database initialized`);
+  } catch (err) {
+    console.error(`[${timestamp()}] O3 database init failed: ${err.message}`);
+    // Non-fatal — O3 features will be disabled
+  }
+
   // Initial sync
   const events = await syncCalendar();
 
@@ -421,6 +643,7 @@ async function main() {
   setInterval(async () => {
     const syncedEvents = await syncCalendar();
     meetingCache.cleanupAlertState(syncedEvents);
+    await checkO3Notifications(syncedEvents, o3Db);
   }, CONFIG.pollInterval);
 
   // Set up alert checking interval
@@ -433,6 +656,7 @@ async function main() {
 
   // Immediate alert check
   checkAlerts(events);
+  await checkO3Notifications(events, o3Db);
 }
 
 // Graceful shutdown - kill all popup children
