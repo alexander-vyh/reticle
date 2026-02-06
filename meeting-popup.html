@@ -1,0 +1,272 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Display', sans-serif;
+      background: transparent;
+      overflow: hidden;
+      -webkit-app-region: drag;
+      user-select: none;
+    }
+
+    .container {
+      background: rgba(30, 30, 30, 0.95);
+      border-radius: 12px;
+      border: 1px solid rgba(255, 255, 255, 0.1);
+      box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
+      padding: 16px;
+      min-height: 100px;
+      backdrop-filter: blur(20px);
+      -webkit-backdrop-filter: blur(20px);
+    }
+
+    .header {
+      font-size: 11px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 1px;
+      margin-bottom: 12px;
+      padding: 4px 8px;
+      border-radius: 4px;
+      display: inline-block;
+    }
+
+    .header.red { background: #dc3545; color: white; }
+    .header.yellow { background: #ffc107; color: #333; }
+    .header.white { background: rgba(255, 255, 255, 0.2); color: #ccc; }
+
+    .meeting-group {
+      margin-bottom: 12px;
+      padding-bottom: 12px;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+    }
+
+    .meeting-group:last-child {
+      margin-bottom: 0;
+      padding-bottom: 0;
+      border-bottom: none;
+    }
+
+    .countdown {
+      font-size: 36px;
+      font-weight: 200;
+      color: white;
+      font-variant-numeric: tabular-nums;
+      margin-bottom: 4px;
+    }
+
+    .countdown.urgent { color: #ffc107; }
+    .countdown.now { color: #dc3545; animation: pulse 1s infinite; }
+
+    @keyframes pulse {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.5; }
+    }
+
+    @keyframes shake {
+      0%, 100% { transform: translateX(0); }
+      25% { transform: translateX(-4px); }
+      75% { transform: translateX(4px); }
+    }
+
+    .shake { animation: shake 0.3s ease-in-out 3; }
+
+    .title {
+      font-size: 14px;
+      font-weight: 600;
+      color: white;
+      margin-bottom: 2px;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .attendees {
+      font-size: 11px;
+      color: rgba(255, 255, 255, 0.5);
+      margin-bottom: 10px;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .join-btn {
+      -webkit-app-region: no-drag;
+      background: #4CAF50;
+      color: white;
+      border: none;
+      padding: 8px 20px;
+      border-radius: 6px;
+      font-size: 13px;
+      font-weight: 600;
+      cursor: pointer;
+      width: 100%;
+      transition: background 0.15s;
+    }
+
+    .join-btn:hover { background: #45a049; }
+    .join-btn:active { background: #3d8b40; }
+
+    .dismiss-btn {
+      -webkit-app-region: no-drag;
+      background: none;
+      border: none;
+      color: rgba(255, 255, 255, 0.4);
+      font-size: 11px;
+      cursor: pointer;
+      margin-top: 8px;
+      width: 100%;
+      padding: 4px;
+    }
+
+    .dismiss-btn:hover { color: rgba(255, 255, 255, 0.7); }
+    .dismiss-btn.hidden { display: none; }
+  </style>
+</head>
+<body>
+  <div class="container" id="container">
+    <div class="header white" id="header">UPCOMING MEETING</div>
+    <div id="meetings"></div>
+    <button class="dismiss-btn" id="dismissBtn" onclick="dismiss()">Dismiss</button>
+  </div>
+
+  <script>
+    const { ipcRenderer } = require('electron');
+
+    let meetings = [];
+    let alertLevel = 'tenMin';
+    let reexpandInterval = null;
+
+    // Receive meeting data from main process
+    ipcRenderer.on('meeting-data', (event, data) => {
+      meetings = data.meetings;
+      alertLevel = data.alertLevel;
+      renderMeetings();
+      startCountdowns();
+      configureAlertBehavior();
+    });
+
+    function renderMeetings() {
+      const container = document.getElementById('meetings');
+      container.innerHTML = '';
+
+      meetings.forEach((meeting, idx) => {
+        const div = document.createElement('div');
+        div.className = 'meeting-group';
+        div.innerHTML = `
+          <div class="countdown" id="countdown-${idx}">--:--</div>
+          <div class="title">${escapeHtml(meeting.summary || 'Untitled Meeting')}</div>
+          <div class="attendees">${formatAttendees(meeting.attendees)}</div>
+          <button class="join-btn" onclick="joinMeeting(${idx})">${escapeHtml(meeting.joinLabel || 'Join Meeting')}</button>
+        `;
+        container.appendChild(div);
+      });
+    }
+
+    function startCountdowns() {
+      updateCountdowns();
+      setInterval(updateCountdowns, 1000);
+    }
+
+    function updateCountdowns() {
+      const now = Date.now();
+      let mostUrgent = Infinity;
+
+      meetings.forEach((meeting, idx) => {
+        const start = new Date(meeting.startTime).getTime();
+        const diffMs = start - now;
+        const diffMin = diffMs / 60000;
+        mostUrgent = Math.min(mostUrgent, diffMin);
+
+        const el = document.getElementById(`countdown-${idx}`);
+        if (!el) return;
+
+        if (diffMs <= 0) {
+          const overMin = Math.floor(Math.abs(diffMs) / 60000);
+          const overSec = Math.floor((Math.abs(diffMs) % 60000) / 1000);
+          el.textContent = `-${overMin}:${String(overSec).padStart(2, '0')}`;
+          el.className = 'countdown now';
+        } else {
+          const min = Math.floor(diffMs / 60000);
+          const sec = Math.floor((diffMs % 60000) / 1000);
+          el.textContent = `${min}:${String(sec).padStart(2, '0')}`;
+          el.className = diffMin <= 5 ? 'countdown urgent' : 'countdown';
+        }
+      });
+
+      // Update header
+      const header = document.getElementById('header');
+      if (mostUrgent <= 0) {
+        header.textContent = 'MEETING NOW';
+        header.className = 'header red';
+      } else if (mostUrgent <= 5) {
+        header.textContent = `MEETING IN ${Math.ceil(mostUrgent)} MIN`;
+        header.className = 'header yellow';
+      } else {
+        header.textContent = `MEETING IN ${Math.ceil(mostUrgent)} MIN`;
+        header.className = 'header white';
+      }
+
+      // Trigger shake at 1 minute and start time (wider window to ensure it fires)
+      const container = document.getElementById('container');
+      if ((mostUrgent <= 1.05 && mostUrgent > 0.95) || (mostUrgent <= 0.05 && mostUrgent > -0.05)) {
+        if (!container.classList.contains('shake')) {
+          container.classList.add('shake');
+          setTimeout(() => container.classList.remove('shake'), 1000);
+        }
+      }
+    }
+
+    function configureAlertBehavior() {
+      const dismissBtn = document.getElementById('dismissBtn');
+
+      if (alertLevel === 'start') {
+        // Cannot dismiss at start time
+        dismissBtn.classList.add('hidden');
+      } else if (alertLevel === 'fiveMin') {
+        // Can minimize but it re-expands
+        dismissBtn.textContent = 'Minimize';
+      } else {
+        // 10min - fully dismissible
+        dismissBtn.textContent = 'Dismiss';
+      }
+    }
+
+    function joinMeeting(idx) {
+      const meeting = meetings[idx];
+      ipcRenderer.send('join-meeting', {
+        platform: meeting.platform,
+        url: meeting.url,
+        eventId: meeting.id
+      });
+    }
+
+    function dismiss() {
+      ipcRenderer.send('dismiss', { alertLevel });
+    }
+
+    function escapeHtml(text) {
+      const div = document.createElement('div');
+      div.textContent = text;
+      return div.innerHTML;
+    }
+
+    function formatAttendees(attendees) {
+      if (!attendees || attendees.length === 0) return '';
+      const names = attendees
+        .filter(a => !a.self)
+        .map(a => escapeHtml(a.displayName || a.email.split('@')[0]))
+        .slice(0, 3);
+      if (names.length === 0) return '';
+      const others = attendees.filter(a => !a.self);
+      const suffix = others.length > 3 ? ` +${others.length - 3} more` : '';
+      return `with ${names.join(', ')}${suffix}`;
+    }
+
+  </script>
+</body>
+</html>
