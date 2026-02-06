@@ -211,14 +211,13 @@
         header.className = 'header white';
       }
 
-      // Trigger shake at 1 minute and start time
-      if (mostUrgent <= 1 && mostUrgent > 0.98) {
-        document.getElementById('container').classList.add('shake');
-        setTimeout(() => document.getElementById('container').classList.remove('shake'), 1000);
-      }
-      if (mostUrgent <= 0 && mostUrgent > -0.02) {
-        document.getElementById('container').classList.add('shake');
-        setTimeout(() => document.getElementById('container').classList.remove('shake'), 1000);
+      // Trigger shake at 1 minute and start time (wider window to ensure it fires)
+      const container = document.getElementById('container');
+      if ((mostUrgent <= 1.05 && mostUrgent > 0.95) || (mostUrgent <= 0.05 && mostUrgent > -0.05)) {
+        if (!container.classList.contains('shake')) {
+          container.classList.add('shake');
+          setTimeout(() => container.classList.remove('shake'), 1000);
+        }
       }
     }
 
@@ -260,7 +259,7 @@
       if (!attendees || attendees.length === 0) return '';
       const names = attendees
         .filter(a => !a.self)
-        .map(a => a.displayName || a.email.split('@')[0])
+        .map(a => escapeHtml(a.displayName || a.email.split('@')[0]))
         .slice(0, 3);
       if (names.length === 0) return '';
       const suffix = attendees.length > 4 ? ` +${attendees.length - 3} more` : '';
