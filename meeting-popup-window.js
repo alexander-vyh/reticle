@@ -3,7 +3,6 @@
 
 const { app, BrowserWindow, ipcMain, screen } = require('electron');
 const path = require('path');
-const { execFile } = require('child_process');
 const launcher = require('./platform-launcher');
 
 // Parse meeting data from command line args
@@ -14,7 +13,7 @@ let meetingData;
 try {
   meetingData = JSON.parse(Buffer.from(meetingDataB64 || '', 'base64').toString('utf8'));
 } catch (e) {
-  // Also try reading from stdin or direct JSON arg
+  // Also try direct JSON arg
   try {
     meetingData = JSON.parse(process.argv[process.argv.length - 1]);
   } catch (e2) {
@@ -23,17 +22,10 @@ try {
   }
 }
 
-const SOUNDS = {
-  fiveMin: '/System/Library/Sounds/Blow.aiff',
-  oneMin: '/System/Library/Sounds/Sosumi.aiff',
-  start: '/System/Library/Sounds/Hero.aiff'
-};
-
 const COLLAPSED_WIDTH = 80;
 const COLLAPSED_HEIGHT = 44;
 
 let mainWindow = null;
-let reexpandTimeout = null;
 let isCollapsed = false;
 let expandedSize = null; // { width, height } — saved when collapsing
 
@@ -41,12 +33,19 @@ function createWindow() {
   const display = screen.getPrimaryDisplay();
   const { width: screenWidth } = display.workAreaSize;
 
-  const windowWidth = 300;
-  const windowHeight = 100 + (meetingData.meetings.length * 150);
+  const startAsPill = meetingData.alertLevel === 'tenMin';
+  const windowWidth = startAsPill ? COLLAPSED_WIDTH : 300;
+  const windowHeight = startAsPill ? COLLAPSED_HEIGHT : Math.min(100 + (meetingData.meetings.length * 150), 500);
+
+  // Save expanded size for later expand from pill
+  if (startAsPill) {
+    expandedSize = { width: 300, height: Math.min(100 + (meetingData.meetings.length * 150), 500) };
+    isCollapsed = true;
+  }
 
   mainWindow = new BrowserWindow({
     width: windowWidth,
-    height: Math.min(windowHeight, 500),
+    height: windowHeight,
     x: screenWidth - windowWidth - 20,
     y: 20,
     alwaysOnTop: true,
@@ -70,14 +69,16 @@ function createWindow() {
 
   mainWindow.webContents.on('did-finish-load', () => {
     mainWindow.webContents.send('meeting-data', meetingData);
+    if (startAsPill) {
+      mainWindow.webContents.send('start-collapsed');
+    }
   });
 
-  // Play initial sound based on alert level
-  if (meetingData.alertLevel === 'fiveMin') {
-    playSound(SOUNDS.fiveMin);
-  } else if (meetingData.alertLevel === 'start') {
-    playSound(SOUNDS.start);
-  }
+  // Start listening for escalations from the monitor via stdin
+  listenForEscalations();
+
+  // Auto-close 5 minutes after meeting start
+  scheduleAutoClose();
 }
 
 function collapseWindow() {
@@ -94,20 +95,13 @@ function collapseWindow() {
 
   // Tell renderer to show collapsed view
   mainWindow.webContents.send('collapse');
-
-  // Schedule re-expand based on alert level
-  const delay = meetingData.alertLevel === 'start' ? 5000 : 30000;
-  if (reexpandTimeout) clearTimeout(reexpandTimeout);
-  reexpandTimeout = setTimeout(() => {
-    expandWindow();
-  }, delay);
+  // No re-expand timer — collapse means "acknowledged until next threshold via stdin"
 }
 
 function expandWindow() {
   if (!mainWindow || !isCollapsed) return;
 
   isCollapsed = false;
-  if (reexpandTimeout) clearTimeout(reexpandTimeout);
 
   // Expand from current pill position, anchoring to right edge
   const pillBounds = mainWindow.getBounds();
@@ -123,10 +117,57 @@ function expandWindow() {
   mainWindow.showInactive();
 }
 
-function playSound(soundPath) {
-  execFile('afplay', [soundPath], (error) => {
-    if (error) console.error('Sound play failed:', error.message);
+/**
+ * Listen for newline-delimited JSON escalation messages from the monitor via stdin.
+ */
+function listenForEscalations() {
+  process.stdin.resume();
+  process.stdin.setEncoding('utf8');
+
+  let buffer = '';
+  process.stdin.on('data', (chunk) => {
+    buffer += chunk;
+    const lines = buffer.split('\n');
+    buffer = lines.pop(); // Keep incomplete line in buffer
+
+    for (const line of lines) {
+      if (!line.trim()) continue;
+      try {
+        const msg = JSON.parse(line);
+        if (msg.type === 'escalate') {
+          handleEscalation(msg);
+        }
+      } catch (e) {
+        // Not JSON, ignore
+      }
+    }
   });
+
+  process.stdin.on('end', () => {
+    // Monitor disconnected — keep running (user may still want the popup)
+  });
+}
+
+function handleEscalation(msg) {
+  meetingData.alertLevel = msg.alertLevel;
+  if (msg.meetings) {
+    meetingData.meetings = msg.meetings;
+    // Recalculate expanded size in case meeting count changed
+    expandedSize = { width: 300, height: Math.min(100 + (msg.meetings.length * 150), 500) };
+  }
+
+  // Forward to renderer
+  if (mainWindow && mainWindow.webContents) {
+    mainWindow.webContents.send('alert-level-update', {
+      alertLevel: msg.alertLevel,
+      meetings: msg.meetings
+    });
+  }
+
+  // If collapsed, expand for the new threshold
+  if (isCollapsed) {
+    expandWindow();
+  }
 }
 
 // IPC: Join meeting
@@ -135,22 +176,29 @@ ipcMain.on('join-meeting', (event, data) => {
   launcher.launchMeeting(data.platform, data.url);
 });
 
-// IPC: Dismiss (collapse for fiveMin, quit for tenMin)
+// IPC: Dismiss — all non-start levels collapse to pill
 ipcMain.on('dismiss', (event, data) => {
   if (data.alertLevel === 'start') {
-    // Cannot dismiss at start time
     return;
   }
-
-  if (data.alertLevel === 'fiveMin') {
-    collapseWindow();
-  } else {
-    // tenMin - fully dismiss
-    console.log(JSON.stringify({ action: 'dismiss' }));
-    if (reexpandTimeout) clearTimeout(reexpandTimeout);
-    app.quit();
-  }
+  collapseWindow();
 });
+
+// Auto-close 5 minutes after meeting start time
+function scheduleAutoClose() {
+  if (!meetingData.meetings || meetingData.meetings.length === 0) return;
+  const earliest = meetingData.meetings
+    .map(m => new Date(m.startTime).getTime())
+    .reduce((a, b) => Math.min(a, b));
+  const autoCloseAt = earliest + 5 * 60 * 1000;
+  const delay = autoCloseAt - Date.now();
+  if (delay <= 0) {
+    // Already past auto-close time — close now
+    app.quit();
+  } else {
+    setTimeout(() => app.quit(), delay);
+  }
+}
 
 // IPC: Expand from collapsed pill
 ipcMain.on('expand', () => {
@@ -167,6 +215,5 @@ ipcMain.on('move-window', (event, { deltaX, deltaY }) => {
 app.whenReady().then(createWindow);
 
 app.on('window-all-closed', () => {
-  if (reexpandTimeout) clearTimeout(reexpandTimeout);
   app.quit();
 });
