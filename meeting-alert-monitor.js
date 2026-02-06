@@ -3,7 +3,7 @@
 
 const fs = require('fs');
 const path = require('path');
-const { fork, execFile } = require('child_process');
+const { execFile } = require('child_process');
 const calendarAuth = require('./calendar-auth');
 const meetingCache = require('./meeting-cache');
 const linkParser = require('./meeting-link-parser');
@@ -42,6 +42,11 @@ function timestamp() {
 async function syncCalendar() {
   const now = new Date();
   const timeMax = new Date(now.getTime() + CONFIG.lookAheadHours * 60 * 60 * 1000);
+
+  if (!calendar) {
+    console.error(`[${timestamp()}] Calendar client not initialized`);
+    return [];
+  }
 
   try {
     const response = await calendar.events.list({
