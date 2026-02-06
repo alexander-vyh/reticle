@@ -38,3 +38,10 @@ openclaw.db-*
 
 # Git worktrees
 .worktrees/
+
+# Meeting alerts
+meeting-cache.json
+alert-state.json
+meeting-alerts.log
+meeting-alerts-error.log
+meeting-alerts.pid
