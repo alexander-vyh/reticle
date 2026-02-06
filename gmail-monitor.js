@@ -9,6 +9,7 @@ const fs = require('fs');
 const https = require('https');
 const emailCache = require('./email-cache');
 const followupsDb = require('./followups-db');
+const log = require('./lib/logger')('gmail-monitor');
 
 // Configuration
 const CONFIG = {
@@ -174,9 +175,9 @@ function sendMacOSNotification(title, message) {
       { stdio: 'pipe' }
     );
   } catch (error) {
-    console.error('  ✗ macOS notification error:', error.message);
+    log.error({ err: error }, 'macOS notification error');
     if (error.stderr) {
-      console.error('  ✗ terminal-notifier stderr:', error.stderr.toString());
+      log.error({ stderr: error.stderr?.toString() }, 'terminal-notifier stderr');
     }
   }
 }
@@ -252,10 +253,10 @@ async function fetchAndCacheEmail(emailId) {
 
     // Cache it
     emailCache.cacheEmail(emailId, { from, subject, date, body });
-    console.log(`     💾 Pre-cached email ${emailId}`);
+    log.info({ emailId }, 'Pre-cached email');
     return true;
   } catch (error) {
-    console.error(`     ✗ Failed to pre-cache email ${emailId}:`, error.message);
+    log.error({ err: error, emailId }, 'Failed to pre-cache email');
     return false;
   }
 }
@@ -433,7 +434,7 @@ function archiveEmail(emailId) {
     );
     return true;
   } catch (error) {
-    console.error(`     ✗ Archive failed: ${error.message}`);
+    log.error({ err: error, emailId }, 'Archive failed');
     return false;
   }
 }
@@ -449,7 +450,7 @@ function deleteEmail(emailId) {
     );
     return true;
   } catch (error) {
-    console.error(`     ✗ Delete failed: ${error.message}`);
+    log.error({ err: error, emailId }, 'Delete failed');
     return false;
   }
 }
@@ -465,7 +466,7 @@ function tagEmail(emailId, label) {
     );
     return true;
   } catch (error) {
-    console.error(`     ✗ Tag failed: ${error.message}`);
+    log.error({ err: error, emailId, label }, 'Tag failed');
     return false;
   }
 }
@@ -532,7 +533,7 @@ function getRecentEmails() {
     const data = JSON.parse(result);
     return data.messages || [];
   } catch (error) {
-    console.error('Error fetching emails:', error.message);
+    log.error({ err: error }, 'Error fetching emails');
     return [];
   }
 }
@@ -556,7 +557,7 @@ function saveLastCheckTime() {
   try {
     fs.writeFileSync(CONFIG.historyFile, Date.now().toString());
   } catch (error) {
-    console.error('Error saving history:', error.message);
+    log.error({ err: error }, 'Error saving history');
   }
 }
 
@@ -570,7 +571,7 @@ function loadBatchQueue() {
       batchQueue = JSON.parse(data);
     }
   } catch (error) {
-    console.error('Error loading batch queue:', error.message);
+    log.error({ err: error }, 'Error loading batch queue');
     batchQueue = [];
   }
 }
@@ -582,7 +583,7 @@ function saveBatchQueue() {
   try {
     fs.writeFileSync(CONFIG.batchQueueFile, JSON.stringify(batchQueue, null, 2));
   } catch (error) {
-    console.error('Error saving batch queue:', error.message);
+    log.error({ err: error }, 'Error saving batch queue');
   }
 }
 
@@ -641,7 +642,7 @@ function trackEmailConversation(db, email, direction) {
       first_seen: now
     });
   } catch (error) {
-    console.error('     ✗ Failed to track email:', error.message);
+    log.error({ err: error }, 'Failed to track email');
   }
 }
 
@@ -650,7 +651,7 @@ function trackEmailConversation(db, email, direction) {
  */
 async function sendBatchSummary() {
   if (batchQueue.length === 0) {
-    console.log('  ℹ️  No non-urgent emails to summarize');
+    log.info('No non-urgent emails to summarize');
     return;
   }
 
@@ -745,20 +746,20 @@ async function sendBatchSummary() {
   try {
     const fallbackText = `📬 Email Summary - ${timeStr} (${batchQueue.length} emails)`;
     await sendSlackDM(fallbackText, blocks);
-    console.log(`  ✓ Sent batch summary (${batchQueue.length} emails)`);
+    log.info({ count: batchQueue.length }, 'Sent batch summary');
 
     // Pre-cache emails for instant "View" button response
-    console.log(`  💾 Pre-caching ${emailsToShow.length} email(s)...`);
+    log.info({ count: emailsToShow.length }, 'Pre-caching emails');
     const cachePromises = emailsToShow.map(email => fetchAndCacheEmail(email.id));
     await Promise.all(cachePromises);
-    console.log(`  ✓ Cached ${emailsToShow.length} email(s)`);
+    log.info({ count: emailsToShow.length }, 'Cached emails');
 
     // Clear queue
     batchQueue = [];
     saveBatchQueue();
     lastBatchHour = now.getHours();
   } catch (error) {
-    console.error('  ✗ Failed to send batch summary:', error.message);
+    log.error({ err: error }, 'Failed to send batch summary');
   }
 }
 
@@ -766,19 +767,18 @@ async function sendBatchSummary() {
  * Main check function
  */
 async function checkEmails() {
-  const timestamp = new Date().toISOString().replace('T', ' ').substring(0, 19);
-  console.log(`[${timestamp}] Checking for new emails...`);
+  log.info('Checking for new emails');
 
   const emails = getRecentEmails();
   const lastCheck = getLastCheckTime();
 
   if (emails.length === 0) {
-    console.log('  No unread emails in last 10 minutes');
+    log.info('No unread emails in last 10 minutes');
     saveLastCheckTime();
     return;
   }
 
-  console.log(`  Found ${emails.length} unread email(s)`);
+  log.info({ count: emails.length }, 'Found unread emails');
 
   let urgentCount = 0;
 
@@ -791,8 +791,7 @@ async function checkEmails() {
     const fromShort = email.from.length > 50 ? email.from.substring(0, 47) + '...' : email.from;
 
     if (filter.action === 'archive') {
-      console.log(`  📦 Archiving: ${fromShort}`);
-      console.log(`     Reason: ${filter.reason}`);
+      log.info({ from: fromShort, reason: filter.reason }, 'Archiving email');
       if (archiveEmail(email.id)) {
         filteringStats.archived++;
       }
@@ -800,8 +799,7 @@ async function checkEmails() {
     }
 
     if (filter.action === 'delete') {
-      console.log(`  🗑️  Deleting: ${fromShort}`);
-      console.log(`     Reason: ${filter.reason}`);
+      log.info({ from: fromShort, reason: filter.reason }, 'Deleting email');
       if (deleteEmail(email.id)) {
         filteringStats.deleted++;
       }
@@ -809,9 +807,7 @@ async function checkEmails() {
     }
 
     if (filter.action === 'tag') {
-      console.log(`  🏷️  Tagging: ${fromShort}`);
-      console.log(`     Label: ${filter.label}`);
-      console.log(`     Reason: ${filter.reason}`);
+      log.info({ from: fromShort, label: filter.label, reason: filter.reason }, 'Tagging email');
       tagEmail(email.id, filter.label);
       // Continue processing (don't skip) - email stays in inbox and will be checked for urgency
     }
@@ -819,9 +815,12 @@ async function checkEmails() {
     // Email passed filters - check urgency
     const urgency = checkUrgency(email);
 
-    console.log(`  📧 From: ${fromShort}`);
-    console.log(`     Subject: ${email.subject}`);
-    console.log(`     ${urgency.urgent ? '🔴 URGENT - ' + urgency.reason : '⚪ Normal'}`);
+    log.info({
+      from: fromShort,
+      subject: email.subject,
+      urgent: urgency.urgent,
+      reason: urgency.urgent ? urgency.reason : undefined
+    }, urgency.urgent ? 'Urgent email detected' : 'Normal email queued');
 
     if (urgency.urgent) {
       urgentCount++;
@@ -844,12 +843,12 @@ async function checkEmails() {
           `🔴 URGENT EMAIL from ${safeFrom}`, // Fallback text
           blocks
         );
-        console.log(`     ✓ Sent Slack DM with action buttons (${target})`);
+        log.info({ target }, 'Sent Slack DM with action buttons');
 
         // Pre-cache email content for instant "View" button response
         await fetchAndCacheEmail(email.id);
       } catch (error) {
-        console.error(`     ✗ Slack error:`, error.message);
+        log.error({ err: error }, 'Slack notification failed');
       }
 
       // Always send macOS notification (independent of Slack)
@@ -858,9 +857,9 @@ async function checkEmails() {
           `🔴 Urgent Email: ${urgency.reason}`,
           `From: ${safeFrom.substring(0, 50)}\n${safeSubject.substring(0, 100)}`
         );
-        console.log(`     ✓ Sent macOS notification`);
+        log.info('Sent macOS notification');
       } catch (error) {
-        console.error(`     ✗ macOS notification error:`, error.message);
+        log.error({ err: error }, 'macOS notification failed');
       }
 
       // Track in follow-ups database
@@ -879,14 +878,13 @@ async function checkEmails() {
   }
 
   // Report processing summary
-  const filtered = filteringStats.archived + filteringStats.deleted;
-  if (urgentCount > 0 || batchQueue.length > 0 || filtered > 0) {
-    let summary = `  ✓ Processed ${emails.length} emails`;
-    if (urgentCount > 0) summary += `, ${urgentCount} urgent`;
-    if (filtered > 0) summary += `, ${filtered} filtered (${filteringStats.archived} archived, ${filteringStats.deleted} deleted)`;
-    if (batchQueue.length > 0) summary += `, ${batchQueue.length} in batch queue`;
-    console.log(summary);
-  }
+  log.info({
+    total: emails.length,
+    urgent: urgentCount,
+    archived: filteringStats.archived,
+    deleted: filteringStats.deleted,
+    queued: batchQueue.length
+  }, 'Email check complete');
 
   // Reset filtering stats for next check
   filteringStats = { archived: 0, deleted: 0, unsubscribed: 0 };
@@ -896,7 +894,7 @@ async function checkEmails() {
 
   // Check if it's time to send batch summary
   if (shouldSendBatch()) {
-    console.log('\n  ⏰ Batch summary time!');
+    log.info('Batch summary time');
     await sendBatchSummary();
   }
 }
@@ -905,43 +903,41 @@ async function checkEmails() {
  * Main
  */
 async function main() {
-  console.log('🦞 OpenClaw Gmail Monitor');
-  console.log(`   Account: ${CONFIG.gmailAccount}`);
-  console.log(`   Mode: DM notifications for urgent emails`);
-  console.log(`   VIPs configured: ${VIPS.length} patterns`);
-  console.log(`   Batch times: ${CONFIG.batchTimes.map(h => `${h}:00`).join(', ')}`);
-  console.log(`   Check interval: ${CONFIG.checkInterval / 1000}s\n`);
+  log.info({
+    account: CONFIG.gmailAccount,
+    vipCount: VIPS.length,
+    batchTimes: CONFIG.batchTimes,
+    checkInterval: CONFIG.checkInterval / 1000
+  }, 'Gmail Monitor starting');
 
   // Load batch queue from previous session
   loadBatchQueue();
   if (batchQueue.length > 0) {
-    console.log(`   Loaded ${batchQueue.length} emails from previous batch queue\n`);
+    log.info({ count: batchQueue.length }, 'Loaded batch queue from previous session');
   }
 
   // Initialize follow-ups database
   try {
     followupsDbConn = followupsDb.initDatabase();
-    console.log('   ✓ Follow-ups tracking initialized\n');
+    log.info('Follow-ups tracking initialized');
   } catch (error) {
-    console.error('   ✗ Failed to init follow-ups DB:', error.message);
+    log.error({ err: error }, 'Failed to init follow-ups DB');
   }
 
   // Initial check
   await checkEmails();
-  console.log('');
 
   // Loop
   setInterval(async () => {
     try {
       await checkEmails();
-      console.log('');
     } catch (error) {
-      console.error('Check error:', error);
+      log.error({ err: error }, 'Check error');
     }
   }, CONFIG.checkInterval);
 }
 
 main().catch(error => {
-  console.error('Fatal error:', error);
+  log.fatal({ err: error }, 'Fatal error');
   process.exit(1);
 });
