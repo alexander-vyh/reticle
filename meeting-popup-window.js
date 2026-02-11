@@ -1,9 +1,10 @@
 #!/usr/bin/env node
 'use strict';
 
-const { app, BrowserWindow, ipcMain, screen } = require('electron');
+const { app, BrowserWindow, ipcMain, screen, shell } = require('electron');
 const path = require('path');
 const launcher = require('./platform-launcher');
+const calendarAuth = require('./calendar-auth');
 
 // Parse meeting data from command line args
 // Usage: electron meeting-popup-window.js <base64-encoded-json>
@@ -210,6 +211,82 @@ ipcMain.on('move-window', (event, { deltaX, deltaY }) => {
   if (!mainWindow) return;
   const [x, y] = mainWindow.getPosition();
   mainWindow.setPosition(x + deltaX, y + deltaY);
+});
+
+// IPC: Open calendar link in default browser
+ipcMain.on('open-calendar-link', (event, data) => {
+  if (data.url) shell.openExternal(data.url);
+});
+
+// IPC: Add conferencing (Zoom) to a calendar event
+ipcMain.on('add-conferencing', async (event, data) => {
+  try {
+    const calendar = await calendarAuth.getCalendarClient();
+
+    await calendar.events.patch({
+      calendarId: 'primary',
+      eventId: data.eventId,
+      conferenceDataVersion: 1,
+      requestBody: {
+        conferenceData: {
+          createRequest: {
+            requestId: `zoom-${data.eventId}-${Date.now()}`,
+            conferenceSolutionKey: { type: 'addOn' }
+          }
+        }
+      }
+    });
+
+    // Conference creation is async — wait and re-fetch
+    await new Promise(resolve => setTimeout(resolve, 3000));
+
+    const updated = await calendar.events.get({
+      calendarId: 'primary',
+      eventId: data.eventId
+    });
+
+    const confData = updated.data.conferenceData;
+    if (confData && confData.entryPoints) {
+      const videoEntry = confData.entryPoints.find(ep => ep.entryPointType === 'video');
+      if (videoEntry && videoEntry.uri) {
+        const solutionName = (confData.conferenceSolution && confData.conferenceSolution.name) || 'Video';
+        const platform = solutionName.toLowerCase().split(' ')[0];
+        event.sender.send('add-conferencing-result', {
+          success: true,
+          eventId: data.eventId,
+          platform,
+          url: videoEntry.uri,
+          joinLabel: `Join ${solutionName}`
+        });
+        return;
+      }
+    }
+
+    // Conference may still be pending
+    const status = confData && confData.createRequest && confData.createRequest.status;
+    if (status && status.statusCode === 'pending') {
+      event.sender.send('add-conferencing-result', {
+        success: false,
+        eventId: data.eventId,
+        error: 'Conference is being created — try again in a moment'
+      });
+    } else {
+      event.sender.send('add-conferencing-result', {
+        success: false,
+        eventId: data.eventId,
+        error: 'No conferencing solution was added — Zoom add-on may not be installed'
+      });
+    }
+  } catch (err) {
+    const msg = err.code === 403
+      ? 'Permission denied — you may not be the organizer'
+      : err.message || 'Failed to add conferencing';
+    event.sender.send('add-conferencing-result', {
+      success: false,
+      eventId: data.eventId,
+      error: msg
+    });
+  }
 });
 
 app.whenReady().then(createWindow);

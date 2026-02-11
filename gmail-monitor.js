@@ -18,23 +18,42 @@ const CONFIG = {
   mySlackUserId: 'REDACTED_SLACK_USER_ID', // the primary user's user ID
   checkInterval: 5 * 60 * 1000, // 5 minutes
   batchTimes: [9, 12, 15, 18], // Hours to send batched summaries (9am, 12pm, 3pm, 6pm)
+  healthCheckHour: 8, // Daily health summary at 8 AM
   historyFile: process.env.HOME + '/.openclaw/workspace/gmail-last-check.txt',
-  batchQueueFile: process.env.HOME + '/.openclaw/workspace/gmail-batch-queue.json'
+  batchQueueFile: process.env.HOME + '/.openclaw/workspace/gmail-batch-queue.json',
+  heartbeatFile: process.env.HOME + '/.openclaw/workspace/gmail-heartbeat.json'
 };
 
 // Batch queue for non-urgent emails
 let batchQueue = [];
 let lastBatchHour = -1;
 
-// Filtering stats
+// Filtering stats (per check cycle)
 let filteringStats = {
   archived: 0,
   deleted: 0,
   unsubscribed: 0
 };
 
+// Daily cumulative stats (reset after health summary)
+let dailyStats = {
+  checksRun: 0,
+  emailsSeen: 0,
+  archived: 0,
+  deleted: 0,
+  urgent: 0,
+  batched: 0,
+  batchesSent: 0,
+  errors: 0,
+  startedAt: Date.now()
+};
+let lastHealthCheckHour = -1;
+
 // Follow-ups database connection
 let followupsDbConn = null;
+
+// Sent-mail detection: use wider window on first run to cover restart gaps
+let sentMailFirstRun = true;
 
 // VIP senders - C-levels and VPs at example.com (from executives.csv)
 const VIPS = [
@@ -113,7 +132,8 @@ const URGENT_KEYWORDS = [
 /**
  * Create Block Kit blocks for urgent email with action buttons
  */
-function createUrgentEmailBlocks(from, subject, reason, date, emailId) {
+function createUrgentEmailBlocks(from, subject, reason, date, emailId, threadId) {
+  const value = threadId ? `${emailId}|${threadId}` : emailId;
   return [
     {
       type: "section",
@@ -129,34 +149,51 @@ function createUrgentEmailBlocks(from, subject, reason, date, emailId) {
           type: "button",
           text: { type: "plain_text", text: "📧 View" },
           action_id: "view_email_modal",
-          value: emailId,
+          value: value,
           style: "primary"
         },
         {
           type: "button",
           text: { type: "plain_text", text: "🌐 Gmail" },
           action_id: "open_in_gmail",
-          value: emailId,
+          value: value,
           url: `https://mail.google.com/mail/u/0/#inbox/${emailId}`
+        },
+        {
+          type: "button",
+          text: { type: "plain_text", text: "Replied" },
+          action_id: "mark_replied",
+          value: value
+        },
+        {
+          type: "button",
+          text: { type: "plain_text", text: "No Reply Needed" },
+          action_id: "mark_no_response_needed",
+          value: value
         },
         {
           type: "button",
           text: { type: "plain_text", text: "✓ Archive" },
           action_id: "archive_email",
-          value: emailId
-        },
+          value: value
+        }
+      ]
+    },
+    {
+      type: "actions",
+      elements: [
         {
           type: "button",
           text: { type: "plain_text", text: "🗑️ Trash" },
           action_id: "delete_email",
-          value: emailId,
+          value: value,
           style: "danger"
         },
         {
           type: "button",
           text: { type: "plain_text", text: "Unsubscribe" },
           action_id: "unsubscribe_email",
-          value: emailId
+          value: value
         }
       ]
     }
@@ -339,6 +376,7 @@ function sendSlackMessage(channel, message, blocks = null) {
         try {
           const response = JSON.parse(body);
           if (response.ok) {
+            log.debug({ ts: response.ts, channel }, 'Slack message delivered');
             resolve(response);
           } else {
             reject(new Error(`Slack error: ${response.error}`));
@@ -363,6 +401,17 @@ function applyRuleBasedFilter(email) {
   const from = email.from.toLowerCase();
   const subject = email.subject.toLowerCase();
 
+  // De-duplicate: archive DW-forwarded copies of emails that also arrive directly
+  if (from.includes('via digital workplace')) {
+    const dwDuplicateSenders = [
+      'datadog', 'cursor', 'google workspace alerts', "'google'",
+      'slack', 'atlassian', 'warmly', 'otter.ai'
+    ];
+    if (dwDuplicateSenders.some(s => from.includes(s))) {
+      return { action: 'archive', reason: 'DW duplicate (direct copy exists)' };
+    }
+  }
+
   // Auto-archive rules (noise, but keep in archive)
   if (from.includes("' via it") && !from.includes('@example.com">')) {
     return { action: 'archive', reason: 'Kantata via IT notification' };
@@ -370,6 +419,21 @@ function applyRuleBasedFilter(email) {
 
   if (from.includes('no-reply@zoom.us') && subject.includes('has joined')) {
     return { action: 'archive', reason: 'Zoom join notification' };
+  }
+
+  // Archive automated Role Group Audit notifications (DW automation)
+  if (subject.includes('role group audit')) {
+    return { action: 'archive', reason: 'Role Group Audit automation' };
+  }
+
+  // Archive Salesloft notices via DW
+  if (from.includes('via digital workplace') && from.includes('salesloft')) {
+    return { action: 'archive', reason: 'Salesloft via DW' };
+  }
+
+  // Archive Docusign completion/decline via DW (not direct Docusign emails)
+  if (from.includes('via digital workplace') && from.includes('docusign')) {
+    return { action: 'archive', reason: 'Docusign via DW' };
   }
 
   if (subject.includes('[hoxhunt report]')) {
@@ -399,14 +463,49 @@ function applyRuleBasedFilter(email) {
     return { action: 'archive', reason: 'Okta/Jira user lifecycle notification' };
   }
 
+  // Archive all Jira notification emails (already visible in Jira/Slack)
+  if (from.includes('jira@company.atlassian.net')) {
+    return { action: 'archive', reason: 'Jira notification (available in Jira)' };
+  }
+
+  // Archive Confluence digest emails (already visible in Confluence)
+  if (from.includes('confluence@company.atlassian.net') && subject.includes('digest')) {
+    return { action: 'archive', reason: 'Confluence digest' };
+  }
+
+  // Archive Atlassian admin notifications
+  if (from.includes('@id.atlassian.net')) {
+    return { action: 'archive', reason: 'Atlassian admin notification' };
+  }
+
   // Archive Vanta Trust Center access requests (automated vendor requests)
   if (from.includes('no-reply@vanta.com') &&
       subject.includes('would like access to your trust center')) {
     return { action: 'archive', reason: 'Vanta Trust Center request' };
   }
 
+  // Archive MxToolBox blacklist summaries
+  if (from.includes('mxtoolbox.com')) {
+    return { action: 'archive', reason: 'MxToolBox summary' };
+  }
+
+  // Archive OpenX automated reports (goes to IT team list)
+  if (from.includes('openx.com') && subject.includes('scheduled report')) {
+    return { action: 'archive', reason: 'OpenX team report' };
+  }
+
+  // Archive CISA bulletins (via infosec list)
+  if (from.includes('infosec@example.com') && from.includes('cisa')) {
+    return { action: 'archive', reason: 'CISA bulletin' };
+  }
+
+  // Delete Slack email notification summaries (redundant with Slack itself)
+  if (from.includes('feedback@slack.com') || (from.includes('slack') && subject.match(/notifications in .* for /i))) {
+    return { action: 'delete', reason: 'Slack email digest' };
+  }
+
   // Delete GCP alerts (managed elsewhere)
-  if (from.includes('alerting-noreply@google.com') && subject.includes('[ALERT')) {
+  if (from.includes('alerting-noreply@google.com') && subject.includes('[alert')) {
     return { action: 'delete', reason: 'GCP alerts (handled in GCP console)' };
   }
 
@@ -419,6 +518,49 @@ function applyRuleBasedFilter(email) {
     return { action: 'delete', reason: 'Marketing content' };
   }
 
+  // Product marketing / vendor spam (unsubscribed or unwanted)
+  if (from.includes('hello@warmly.ai') || from.includes('warmly.ai')) {
+    return { action: 'delete', reason: 'Warmly marketing' };
+  }
+  if (from.includes('@dtdg.co') && subject.match(/digest/i)) {
+    return { action: 'delete', reason: 'Datadog digest' };
+  }
+  if (from.includes('team@mail.cursor.com')) {
+    return { action: 'delete', reason: 'Cursor marketing' };
+  }
+  if (from.includes('otter.ai')) {
+    return { action: 'delete', reason: 'Otter.ai notifications' };
+  }
+  if (from.includes('brighttalk.com')) {
+    return { action: 'delete', reason: 'BrightTALK marketing' };
+  }
+  if (from.includes('tropicapp.io')) {
+    return { action: 'delete', reason: 'Tropic marketing' };
+  }
+  if (from.includes('commvault.com') && !from.includes('@example.com')) {
+    return { action: 'delete', reason: 'Commvault marketing' };
+  }
+  if (from.includes('stoneflymail')) {
+    return { action: 'delete', reason: 'Cold outreach spam' };
+  }
+  if (from.includes('brightenergywellness')) {
+    return { action: 'delete', reason: 'Spam' };
+  }
+  if (from.includes('trycomp.ai')) {
+    return { action: 'delete', reason: 'Comp AI marketing' };
+  }
+
+  // Vendor cold outreach / sales spam
+  if (from.includes('akeyless.io')) {
+    return { action: 'delete', reason: 'Vendor outreach (Akeyless)' };
+  }
+  if (from.includes('lumos.com')) {
+    return { action: 'delete', reason: 'Vendor outreach (Lumos)' };
+  }
+  if (from.includes('mailboxmerchants.com')) {
+    return { action: 'delete', reason: 'Vendor outreach (Mailbox Merchants)' };
+  }
+
   // Keep for batch/AI review
   return { action: 'keep', reason: 'Passed filters' };
 }
@@ -429,7 +571,7 @@ function applyRuleBasedFilter(email) {
 function archiveEmail(emailId) {
   try {
     execSync(
-      `gog gmail messages modify "${emailId}" --account ${CONFIG.gmailAccount} --remove-labels INBOX --add-labels UNREAD 2>/dev/null`,
+      `gog gmail batch modify "${emailId}" --remove INBOX --account ${CONFIG.gmailAccount} --no-input`,
       { stdio: 'ignore' }
     );
     return true;
@@ -445,7 +587,7 @@ function archiveEmail(emailId) {
 function deleteEmail(emailId) {
   try {
     execSync(
-      `gog gmail messages trash "${emailId}" --account ${CONFIG.gmailAccount} 2>/dev/null`,
+      `gog gmail batch modify "${emailId}" --add TRASH --remove INBOX --account ${CONFIG.gmailAccount} --no-input`,
       { stdio: 'ignore' }
     );
     return true;
@@ -501,6 +643,13 @@ function checkUrgency(email) {
   // VIP check first
   if (isVIP(email.from)) {
     return { urgent: true, reason: '⭐ VIP sender', priority: 'high' };
+  }
+
+  // Okta admin role changes — always urgent
+  const fromLower = email.from.toLowerCase();
+  const subjLower = email.subject.toLowerCase();
+  if (fromLower.includes('noreply@okta.com') && subjLower.includes('admin role')) {
+    return { urgent: true, reason: '🔒 Okta admin role change', priority: 'high' };
   }
 
   // Keyword check with word boundaries for short keywords
@@ -612,7 +761,7 @@ function getEmailThreadId(email) {
 /**
  * Track email conversation in follow-ups database
  */
-function trackEmailConversation(db, email, direction) {
+function trackEmailConversation(db, email, direction, metadata) {
   if (!db) return;
 
   try {
@@ -639,7 +788,8 @@ function trackEmailConversation(db, email, direction) {
       last_activity: Math.floor(new Date(email.date).getTime() / 1000),
       last_sender: lastSender,
       waiting_for: waitingFor,
-      first_seen: now
+      first_seen: now,
+      metadata: metadata || null
     });
   } catch (error) {
     log.error({ err: error }, 'Failed to track email');
@@ -689,7 +839,9 @@ async function sendBatchSummary() {
       }
     });
 
-    // Action buttons for this email
+    // Action buttons for this email (encode emailId|threadId for conversation tracking)
+    const batchValue = email.threadId ? `${email.id}|${email.threadId}` : email.id;
+
     blocks.push({
       type: "actions",
       elements: [
@@ -697,34 +849,52 @@ async function sendBatchSummary() {
           type: "button",
           text: { type: "plain_text", text: "📧 View" },
           action_id: "view_email_modal",
-          value: email.id,
+          value: batchValue,
           style: "primary"
         },
         {
           type: "button",
           text: { type: "plain_text", text: "🌐 Gmail" },
           action_id: "open_in_gmail",
-          value: email.id,
+          value: batchValue,
           url: `https://mail.google.com/mail/u/0/#inbox/${email.id}`
+        },
+        {
+          type: "button",
+          text: { type: "plain_text", text: "Replied" },
+          action_id: "mark_replied",
+          value: batchValue
+        },
+        {
+          type: "button",
+          text: { type: "plain_text", text: "No Reply Needed" },
+          action_id: "mark_no_response_needed",
+          value: batchValue
         },
         {
           type: "button",
           text: { type: "plain_text", text: "✓ Archive" },
           action_id: "archive_email",
-          value: email.id
-        },
+          value: batchValue
+        }
+      ]
+    });
+
+    blocks.push({
+      type: "actions",
+      elements: [
         {
           type: "button",
           text: { type: "plain_text", text: "🗑️ Trash" },
           action_id: "delete_email",
-          value: email.id,
+          value: batchValue,
           style: "danger"
         },
         {
           type: "button",
           text: { type: "plain_text", text: "Unsubscribe" },
           action_id: "unsubscribe_email",
-          value: email.id
+          value: batchValue
         }
       ]
     });
@@ -760,6 +930,69 @@ async function sendBatchSummary() {
     lastBatchHour = now.getHours();
   } catch (error) {
     log.error({ err: error }, 'Failed to send batch summary');
+  }
+}
+
+/**
+ * Check sent emails to detect replies to tracked conversations
+ * Flips waiting_for from 'my-response' to 'their-response' when a reply is found
+ */
+async function checkSentEmails() {
+  if (!followupsDbConn) return;
+
+  try {
+    const gmail = getGmailClient();
+
+    // Use wider window on first run to cover restart gaps
+    const timeWindow = sentMailFirstRun ? '30m' : '10m';
+    sentMailFirstRun = false;
+
+    const res = await gmail.users.messages.list({
+      userId: 'me',
+      q: `in:sent newer_than:${timeWindow}`,
+      maxResults: 50
+    });
+
+    const sentMessages = res.data.messages || [];
+    if (sentMessages.length === 0) {
+      log.debug('No recent sent emails');
+      return;
+    }
+
+    // Get all pending email conversations
+    const pending = followupsDb.getPendingResponses(followupsDbConn, { type: 'email' });
+    if (pending.length === 0) {
+      log.debug('No pending email conversations to match against');
+      return;
+    }
+
+    // Build set of pending threadIds (strip 'email:' prefix from conversation IDs)
+    const pendingByThread = new Map();
+    for (const conv of pending) {
+      const threadId = conv.id.replace(/^email:/, '');
+      pendingByThread.set(threadId, conv);
+    }
+
+    let flipped = 0;
+    for (const msg of sentMessages) {
+      if (!msg.threadId || !pendingByThread.has(msg.threadId)) continue;
+
+      const conv = pendingByThread.get(msg.threadId);
+
+      // Idempotency: skip if already flipped
+      if (conv.waiting_for === 'their-response') continue;
+
+      followupsDb.updateConversationState(followupsDbConn, conv.id, 'me', 'their-response');
+      flipped++;
+    }
+
+    if (flipped > 0) {
+      log.info({ flipped, checked: sentMessages.length }, 'Flipped conversations to their-response via sent-mail detection');
+    } else {
+      log.debug({ checked: sentMessages.length }, 'Sent-mail check: 0 flipped');
+    }
+  } catch (error) {
+    log.error({ err: error }, 'Sent-mail detection failed');
   }
 }
 
@@ -837,7 +1070,8 @@ async function checkEmails() {
           safeSubject,
           urgency.reason,
           email.date,
-          email.id
+          email.id,
+          email.threadId
         );
         const target = await sendSlackDM(
           `🔴 URGENT EMAIL from ${safeFrom}`, // Fallback text
@@ -862,18 +1096,19 @@ async function checkEmails() {
         log.error({ err: error }, 'macOS notification failed');
       }
 
-      // Track in follow-ups database
-      trackEmailConversation(followupsDbConn, email, 'incoming');
+      // Track in follow-ups database with urgency metadata
+      trackEmailConversation(followupsDbConn, email, 'incoming', { urgency: 'urgent', reason: urgency.reason });
     } else {
       // Add to batch queue for later summary
       batchQueue.push({
         from: email.from,
         subject: email.subject,
         date: email.date,
-        id: email.id
+        id: email.id,
+        threadId: email.threadId
       });
-      // Track in follow-ups database
-      trackEmailConversation(followupsDbConn, email, 'incoming');
+      // Track in follow-ups database with batch metadata
+      trackEmailConversation(followupsDbConn, email, 'incoming', { urgency: 'batch' });
     }
   }
 
@@ -886,17 +1121,82 @@ async function checkEmails() {
     queued: batchQueue.length
   }, 'Email check complete');
 
+  // Accumulate daily stats
+  dailyStats.checksRun++;
+  dailyStats.emailsSeen += emails.length;
+  dailyStats.archived += filteringStats.archived;
+  dailyStats.deleted += filteringStats.deleted;
+  dailyStats.urgent += urgentCount;
+
   // Reset filtering stats for next check
   filteringStats = { archived: 0, deleted: 0, unsubscribed: 0 };
 
   saveBatchQueue();
   saveLastCheckTime();
+  writeHeartbeat();
 
   // Check if it's time to send batch summary
   if (shouldSendBatch()) {
     log.info('Batch summary time');
     await sendBatchSummary();
+    dailyStats.batchesSent++;
   }
+
+  // Daily health check at configured hour
+  await maybeSendHealthCheck();
+
+  // Detect replies in sent mail and flip conversation state
+  await checkSentEmails();
+}
+
+/**
+ * Write heartbeat file with current state
+ */
+function writeHeartbeat() {
+  try {
+    const heartbeat = {
+      lastCheck: Date.now(),
+      pid: process.pid,
+      uptime: Math.round(process.uptime()),
+      batchQueueSize: batchQueue.length,
+      dailyStats
+    };
+    fs.writeFileSync(CONFIG.heartbeatFile, JSON.stringify(heartbeat));
+  } catch (e) {
+    log.warn({ err: e }, 'Failed to write heartbeat');
+  }
+}
+
+/**
+ * Send daily health summary at configured hour
+ */
+async function maybeSendHealthCheck() {
+  const currentHour = new Date().getHours();
+  if (currentHour !== CONFIG.healthCheckHour || lastHealthCheckHour === currentHour) return;
+
+  lastHealthCheckHour = currentHour;
+
+  const uptimeHrs = Math.round(process.uptime() / 3600);
+  const summary = [
+    `*Gmail Monitor Health Check*`,
+    `Uptime: ${uptimeHrs}h | PID: ${process.pid}`,
+    `Since last health check: ${dailyStats.checksRun} checks, ${dailyStats.emailsSeen} emails scanned`,
+    `  Archived: ${dailyStats.archived} | Deleted: ${dailyStats.deleted} | Urgent: ${dailyStats.urgent} | Batches sent: ${dailyStats.batchesSent}`,
+    `  Queue: ${batchQueue.length} emails pending for next batch`
+  ].join('\n');
+
+  try {
+    await sendSlackDM(summary);
+    log.info('Daily health check sent');
+  } catch (e) {
+    log.error({ err: e }, 'Failed to send health check');
+  }
+
+  // Reset daily stats
+  dailyStats = {
+    checksRun: 0, emailsSeen: 0, archived: 0, deleted: 0,
+    urgent: 0, batched: 0, batchesSent: 0, errors: 0, startedAt: Date.now()
+  };
 }
 
 /**

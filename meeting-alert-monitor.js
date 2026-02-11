@@ -11,6 +11,7 @@ const calendarAuth = require('./calendar-auth');
 const meetingCache = require('./meeting-cache');
 const linkParser = require('./meeting-link-parser');
 const platformLauncher = require('./platform-launcher');
+const log = require('./lib/logger')('meeting-alerts');
 
 const CONFIG = {
   pollInterval: 2 * 60 * 1000,       // 2 minutes
@@ -124,7 +125,7 @@ async function findGaps(windowStart, windowEnd, minMinutes) {
 
     return gaps;
   } catch (err) {
-    console.error(`[${timestamp()}] FreeBusy query failed: ${err.message}`);
+    log.error({ err }, 'FreeBusy query failed');
     return [];
   }
 }
@@ -177,9 +178,9 @@ async function sendAfternoonPrep(db, event, report) {
   try {
     await slack.sendSlackDM(`Tomorrow's O3 prep: ${report.name} at ${startTime}`, blocks);
     followupsDb.markO3Notified(db, event.id, 'prep_sent_afternoon');
-    console.log(`[${timestamp()}] O3 afternoon prep sent for ${report.name}`);
+    log.info({ reportName: report.name, reportEmail: report.email, eventId: event.id }, 'O3 afternoon prep sent');
   } catch (err) {
-    console.error(`[${timestamp()}] O3 afternoon prep failed: ${err.message}`);
+    log.error({ err, reportName: report.name, eventId: event.id }, 'O3 afternoon prep failed');
   }
 }
 
@@ -226,9 +227,9 @@ async function sendPreMeetingPrep(db, event, report) {
   try {
     await slack.sendSlackDM(`O3 with ${report.name} in ~${minutesUntil}min`, blocks);
     followupsDb.markO3Notified(db, event.id, 'prep_sent_before');
-    console.log(`[${timestamp()}] O3 pre-meeting prep sent for ${report.name}`);
+    log.info({ reportName: report.name, reportEmail: report.email, eventId: event.id }, 'O3 pre-meeting prep sent');
   } catch (err) {
-    console.error(`[${timestamp()}] O3 pre-meeting prep failed: ${err.message}`);
+    log.error({ err, reportName: report.name, eventId: event.id }, 'O3 pre-meeting prep failed');
   }
 }
 
@@ -271,9 +272,9 @@ async function sendPostMeetingNudge(db, event, report) {
   try {
     await slack.sendSlackDM(`O3 with ${report.name} — log in Lattice`, blocks);
     followupsDb.markO3Notified(db, event.id, 'post_nudge_sent');
-    console.log(`[${timestamp()}] O3 post-meeting nudge sent for ${report.name}`);
+    log.info({ reportName: report.name, reportEmail: report.email, eventId: event.id }, 'O3 post-meeting nudge sent');
   } catch (err) {
-    console.error(`[${timestamp()}] O3 post-meeting nudge failed: ${err.message}`);
+    log.error({ err, reportName: report.name, eventId: event.id }, 'O3 post-meeting nudge failed');
   }
 }
 
@@ -422,15 +423,12 @@ async function sendWeeklySummary(db) {
 
   try {
     await slack.sendSlackDM(`Weekly O3 Summary`, blocks);
-    console.log(`[${timestamp()}] Weekly O3 summary sent`);
+    log.info('Weekly O3 summary sent');
   } catch (err) {
-    console.error(`[${timestamp()}] Weekly O3 summary failed: ${err.message}`);
+    log.error({ err }, 'Weekly O3 summary failed');
   }
 }
 
-function timestamp() {
-  return new Date().toLocaleTimeString('en-US', { hour12: false });
-}
 
 /**
  * Sync calendar events from Google Calendar API.
@@ -441,7 +439,7 @@ async function syncCalendar() {
   const timeMax = new Date(now.getTime() + CONFIG.lookAheadHours * 60 * 60 * 1000);
 
   if (!calendar) {
-    console.error(`[${timestamp()}] Calendar client not initialized`);
+    log.error('Calendar client not initialized');
     return [];
   }
 
@@ -469,19 +467,19 @@ async function syncCalendar() {
     });
 
     meetingCache.saveCache(events);
-    console.log(`[${timestamp()}] Calendar sync: ${events.length} upcoming events`);
+    log.info({ count: events.length }, 'Calendar sync completed');
     return events;
   } catch (err) {
-    console.error(`[${timestamp()}] Calendar sync failed: ${err.message}`);
+    log.error({ err }, 'Calendar sync failed');
 
     // Fall back to cached data
     const cached = meetingCache.loadCache();
     if (cached && meetingCache.isCacheValid(cached)) {
-      console.log(`[${timestamp()}] Using cached data (${cached.events.length} events)`);
+      log.warn({ count: cached.events.length }, 'Using cached calendar data');
       return cached.events;
     }
 
-    console.error(`[${timestamp()}] No valid cache available`);
+    log.error('No valid cache available');
     return [];
   }
 }
@@ -516,7 +514,7 @@ function triggerAlert(event, level) {
   const linkInfo = linkParser.extractMeetingLink(event);
   meetingCache.recordAlert(event.id, level);
 
-  console.log(`[${timestamp()}] Alert [${level}]: ${event.summary}`);
+  log.info({ alertLevel: level, eventId: event.id, summary: event.summary, startTime: event.start.dateTime }, 'Alert triggered');
 
   // Load current events from cache to find overlapping meetings
   const cached = meetingCache.loadCache();
@@ -541,13 +539,16 @@ function triggerAlert(event, level) {
   // Build popup data with all meetings in the group
   const meetings = eventGroup.meetings.map(m => {
     const link = linkParser.extractMeetingLink(m);
+    const hasVideoLink = link.platform !== 'calendar';
     return {
       id: m.id,
       summary: m.summary || 'Untitled Meeting',
       startTime: m.start.dateTime,
       platform: link.platform,
-      url: link.url,
+      url: hasVideoLink ? link.url : null,
       joinLabel: platformLauncher.getJoinLabel(link.platform),
+      hasVideoLink,
+      calendarLink: m.htmlLink,
       attendees: (m.attendees || [])
         .filter(a => !a.self)
         .map(a => a.displayName || a.email)
@@ -591,10 +592,10 @@ function escalatePopup(groupKey, popupData) {
   const msg = JSON.stringify({ type: 'escalate', ...popupData }) + '\n';
   try {
     child.stdin.write(msg);
-    console.log(`[${timestamp()}] Escalated popup ${groupKey} to ${popupData.alertLevel}`);
+    log.info({ groupKey, alertLevel: popupData.alertLevel }, 'Escalated popup');
     return true;
   } catch (e) {
-    console.error(`[${timestamp()}] Escalation write failed for ${groupKey}: ${e.message}`);
+    log.error({ err: e, groupKey }, 'Escalation write failed');
     return false;
   }
 }
@@ -630,7 +631,7 @@ function spawnPopup(groupKey, popupData) {
         if (!line.trim()) continue;
         try {
           const action = JSON.parse(line);
-          console.log(`[${timestamp()}] Popup action: ${JSON.stringify(action)}`);
+          log.info({ action }, 'Popup action received');
         } catch (e) {
           // Not JSON, ignore
         }
@@ -645,7 +646,7 @@ function spawnPopup(groupKey, popupData) {
       // Suppress common Electron noise
       if (msg.includes('GPU') || msg.includes('WARNING') || msg.includes('Passthrough is not supported')) return;
       if (msg.trim()) {
-        console.error(`[${timestamp()}] Popup stderr: ${msg.trim()}`);
+        log.warn({ stderr: msg.trim() }, 'Popup stderr');
       }
     });
   }
@@ -653,12 +654,12 @@ function spawnPopup(groupKey, popupData) {
   child.on('close', (code) => {
     delete activePopups[groupKey];
     if (code && code !== 0) {
-      console.error(`[${timestamp()}] Popup exited with code ${code}`);
+      log.error({ exitCode: code }, 'Popup exited abnormally');
     }
   });
 
   child.on('error', (err) => {
-    console.error(`[${timestamp()}] Failed to spawn popup: ${err.message}`);
+    log.error({ err }, 'Failed to spawn popup');
     delete activePopups[groupKey];
   });
 }
@@ -669,7 +670,7 @@ function spawnPopup(groupKey, popupData) {
 function playSound(soundFile) {
   execFile('afplay', [soundFile], (err) => {
     if (err) {
-      console.error(`[${timestamp()}] Sound play failed: ${err.message}`);
+      log.warn({ err }, 'Sound play failed');
     }
   });
 }
@@ -678,16 +679,17 @@ function playSound(soundFile) {
  * Main entry point - authorize calendar, start sync and alert loops.
  */
 async function main() {
-  console.log(`[${timestamp()}] Meeting Alert Monitor starting...`);
-  console.log(`[${timestamp()}] Poll interval: ${CONFIG.pollInterval / 1000}s`);
-  console.log(`[${timestamp()}] Alert check interval: ${CONFIG.alertCheckInterval / 1000}s`);
-  console.log(`[${timestamp()}] Look-ahead: ${CONFIG.lookAheadHours} hours`);
+  log.info({
+    pollIntervalMs: CONFIG.pollInterval,
+    alertCheckIntervalMs: CONFIG.alertCheckInterval,
+    lookAheadHours: CONFIG.lookAheadHours
+  }, 'Meeting Alert Monitor starting');
 
   try {
     calendar = await calendarAuth.getCalendarClient();
-    console.log(`[${timestamp()}] Calendar authorized successfully`);
+    log.info('Calendar authorized successfully');
   } catch (err) {
-    console.error(`[${timestamp()}] Calendar authorization failed: ${err.message}`);
+    log.fatal({ err }, 'Calendar authorization failed');
     process.exit(1);
   }
 
@@ -695,9 +697,9 @@ async function main() {
   let o3Db;
   try {
     o3Db = followupsDb.initDatabase();
-    console.log(`[${timestamp()}] O3 database initialized`);
+    log.info('O3 database initialized');
   } catch (err) {
-    console.error(`[${timestamp()}] O3 database init failed: ${err.message}`);
+    log.error({ err }, 'O3 database init failed');
     // Non-fatal — O3 features will be disabled
   }
 
@@ -709,9 +711,9 @@ async function main() {
     const next = events[0];
     const startTime = new Date(next.start.dateTime);
     const minutesUntil = Math.round((startTime.getTime() - Date.now()) / 60000);
-    console.log(`[${timestamp()}] Next meeting: "${next.summary}" in ${minutesUntil} minutes`);
+    log.info({ summary: next.summary, minutesUntil }, 'Next meeting');
   } else {
-    console.log(`[${timestamp()}] No upcoming meetings`);
+    log.info('No upcoming meetings');
   }
 
   // Set up polling interval for calendar sync
@@ -737,7 +739,7 @@ async function main() {
 
 // Graceful shutdown - kill all popup children
 function shutdown(signal) {
-  console.log(`\n[${timestamp()}] Received ${signal}, shutting down...`);
+  log.info({ signal }, 'Received signal, shutting down');
 
   for (const [groupKey, child] of Object.entries(activePopups)) {
     try {
@@ -756,6 +758,6 @@ process.on('SIGINT', () => shutdown('SIGINT'));
 
 // Run
 main().catch(err => {
-  console.error(`[${timestamp()}] Fatal error: ${err.message}`);
+  log.fatal({ err }, 'Fatal error');
   process.exit(1);
 });

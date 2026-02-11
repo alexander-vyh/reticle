@@ -8,8 +8,10 @@ const https = require('https');
 const fs = require('fs');
 const WebSocket = require('ws');
 const { execSync } = require('child_process');
+const crypto = require('crypto');
 const emailCache = require('./email-cache');
 const followupsDb = require('./followups-db');
+const log = require('./lib/logger')('slack-events');
 
 // Configuration
 const CONFIG = {
@@ -98,7 +100,7 @@ function sendMacOSNotification(title, message) {
     const escapedMessage = message.replace(/"/g, '\\"').substring(0, 200);
     execSync(`osascript -e 'display notification "${escapedMessage}" with title "${escapedTitle}"'`, { stdio: 'ignore' });
   } catch (error) {
-    console.error('  ✗ macOS notification error:', error.message);
+    log.error({ err: error }, 'macOS notification error');
   }
 }
 
@@ -186,7 +188,7 @@ function trackSlackConversation(db, event, direction) {
       first_seen: now
     });
   } catch (error) {
-    console.error('     ✗ Failed to track Slack conversation:', error.message);
+    log.error({ err: error }, 'Failed to track Slack conversation');
   }
 }
 
@@ -229,10 +231,10 @@ function loadState() {
     if (fs.existsSync(CONFIG.stateFile)) {
       const data = fs.readFileSync(CONFIG.stateFile, 'utf-8');
       pendingMessages = JSON.parse(data);
-      console.log(`  Loaded ${Object.keys(pendingMessages).length} pending messages from state`);
+      log.info({ count: Object.keys(pendingMessages).length }, 'State loaded');
     }
   } catch (error) {
-    console.error('Error loading state:', error.message);
+    log.error({ err: error }, 'Error loading state');
     pendingMessages = {};
   }
 }
@@ -244,7 +246,7 @@ function saveState() {
   try {
     fs.writeFileSync(CONFIG.stateFile, JSON.stringify(pendingMessages, null, 2));
   } catch (error) {
-    console.error('Error saving state:', error.message);
+    log.error({ err: error }, 'Error saving state');
   }
 }
 
@@ -272,7 +274,7 @@ async function trackMessage(channel, ts, userId, text, type) {
     reminded: false
   };
 
-  console.log(`  📝 Tracking new ${type}: from ${pendingMessages[msgKey].user}`);
+  log.info({ type, user: pendingMessages[msgKey].user, channel }, 'Tracking new message');
   saveState();
 }
 
@@ -293,7 +295,7 @@ function markResponded(channel, ts) {
     }
   }
   if (removed > 0) {
-    console.log(`  ✓ Removed ${removed} tracked message(s) (user responded)`);
+    log.info({ count: removed, channel }, 'Cleared tracked messages (user responded)');
     saveState();
   }
 }
@@ -332,9 +334,9 @@ async function checkTimeouts() {
         pendingMessages[key].reminded = true;
         pendingMessages[key].remindedAt = now;
         reminders++;
-        console.log(`  🔔 Sent reminder for ${type} from ${msg.user} (${minutesAgo}m old)`);
+        log.info({ type, user: msg.user, minutesAgo }, 'Sent reminder');
       } catch (error) {
-        console.error(`  ✗ Failed to send reminder:`, error.message);
+        log.error({ err: error, type, user: msg.user }, 'Failed to send reminder');
       }
     }
   }
@@ -353,7 +355,7 @@ async function checkTimeouts() {
     }
   }
   if (cleaned > 0) {
-    console.log(`  🧹 Cleaned ${cleaned} old message(s)`);
+    log.debug({ count: cleaned }, 'Cleaned old messages');
     saveState();
   }
 }
@@ -383,7 +385,7 @@ async function handleEvent(event, db) {
   }
 
   const eventType = event.type === 'message' ? 'message' : event.type;
-  console.log(`  📨 Event: ${eventType} in ${event.channel}`);
+  log.info({ eventType, channel: event.channel }, 'Event received');
 
   // Track conversation in follow-ups database
   if (event.type === 'message' && !event.subtype && event.user !== CONFIG.myUserId) {
@@ -415,14 +417,14 @@ async function sendEmailContent(channel, userId, emailId) {
     // Check cache first (fast!)
     const cached = emailCache.getCachedEmail(emailId);
     if (cached) {
-      console.log(`  ⚡ Using cached email content for ${emailId}`);
+      log.debug({ emailId }, 'Using cached email content');
       from = cached.from;
       subject = cached.subject;
       date = cached.date;
       body = cached.body;
     } else {
       // Cache miss - fetch from Gmail API (slow)
-      console.log(`  ⏳ Fetching email ${emailId} from Gmail API...`);
+      log.info({ emailId }, 'Fetching email from Gmail API');
 
       const gmail = getGmailClient();
 
@@ -477,7 +479,7 @@ async function sendEmailContent(channel, userId, emailId) {
 
       // Cache this email for next time
       emailCache.cacheEmail(emailId, { from, subject, date, body });
-      console.log(`  💾 Cached email ${emailId}`);
+      log.debug({ emailId }, 'Cached email');
     }
 
     // Limit length for display
@@ -531,7 +533,7 @@ async function sendEmailContent(channel, userId, emailId) {
           try {
             const response = JSON.parse(responseBody);
             if (response.ok) {
-              console.log('  ✓ Email content sent as ephemeral message');
+              log.info({ emailId }, 'Email content sent as ephemeral message');
               resolve(response);
             } else {
               reject(new Error(`Slack API error: ${response.error}`));
@@ -547,7 +549,7 @@ async function sendEmailContent(channel, userId, emailId) {
       req.end();
     });
   } catch (error) {
-    console.error('  ✗ Error sending email content:', error.message);
+    log.error({ err: error, emailId }, 'Error sending email content');
     throw error;
   }
 }
@@ -561,53 +563,89 @@ async function handleInteractive(payload) {
     const username = payload.user.username;
     const userId = payload.user.id; // Actual user ID for ephemeral messages
     const channel = payload.channel.id;
-    const emailId = action.value;
-    const triggerId = payload.trigger_id; // Needed for opening modals
+    const actionId = action.action_id;
+    const cid = `act_${crypto.randomBytes(6).toString('hex')}`;
+    const startTime = Date.now();
 
-    console.log(`  🔘 Button clicked: ${action.action_id} by ${username} for email ${emailId}`);
+    // Parse compound value: emailId|threadId (backward compatible with plain emailId)
+    const valueParts = action.value ? action.value.split('|') : [];
+    const emailId = valueParts[0];
+    const threadId = valueParts[1] || null;
+
+    // Try to get email context from cache (no extra API call)
+    const cached = emailId ? emailCache.getCachedEmail(emailId) : null;
+    const subject = cached?.subject || undefined;
+    const from = cached?.from || undefined;
+
+    log.info({ cid, actionId, username, emailId, threadId, subject, from }, 'Slack action started');
 
     try {
-      let responseText = '';
+      let result = null;
 
-      switch (action.action_id) {
+      switch (actionId) {
         case 'view_email_modal':
           // Send ephemeral message (only visible to user) instead of modal
           await sendEmailContent(channel, userId, emailId);
+          log.info({ cid, actionId, emailId, success: true, durationMs: Date.now() - startTime }, 'Slack action completed');
           return; // No text response needed
 
         case 'archive_email':
-          responseText = await archiveEmailAction(emailId);
+          result = await archiveEmailAction(emailId);
           break;
 
         case 'delete_email':
-          responseText = await deleteEmailAction(emailId);
+          result = await deleteEmailAction(emailId);
           break;
 
         case 'unsubscribe_email':
-          responseText = await unsubscribeEmailAction(emailId);
+          result = await unsubscribeEmailAction(emailId);
+          break;
+
+        case 'mark_replied':
+          // Flip conversation state — still waiting for their reply back
+          if (threadId && followupsDbConn) {
+            followupsDb.updateConversationState(followupsDbConn, `email:${threadId}`, 'me', 'their-response');
+          }
+          result = { success: true, message: '✓ Marked as replied' };
+          break;
+
+        case 'mark_no_response_needed':
+          // Resolve outright — this email doesn't need a reply
+          if (threadId && followupsDbConn) {
+            followupsDb.resolveConversation(followupsDbConn, `email:${threadId}`);
+          }
+          result = { success: true, message: '✓ Marked as no reply needed' };
           break;
 
         case 'open_in_gmail':
           // This is handled by Slack URL button, no server action needed
-          responseText = '✓ Opening in Gmail...';
+          result = { success: true, message: '✓ Opening in Gmail...' };
           break;
 
         default:
-          responseText = '✗ Unknown action';
+          result = { success: false, message: '✗ Unknown action' };
       }
+
+      const durationMs = Date.now() - startTime;
 
       // Send response to user
-      if (responseText) {
-        await postMessage(channel, responseText);
+      if (result && result.message) {
+        await postMessage(channel, result.message);
       }
 
-      // Mark conversation as resolved in follow-ups
-      if (followupsDbConn) {
-        const convId = `slack:dm:${userId}`;
-        followupsDb.resolveConversation(followupsDbConn, convId);
+      if (result?.success) {
+        log.info({ cid, actionId, emailId, success: true, durationMs }, 'Slack action completed');
+      } else {
+        log.warn({ cid, actionId, emailId, success: false, durationMs, message: result?.message }, 'Slack action completed with failure');
+      }
+
+      // Resolve email conversation in follow-ups when archived/deleted/unsubscribed
+      if (followupsDbConn && threadId && ['archive_email', 'delete_email', 'unsubscribe_email'].includes(actionId)) {
+        followupsDb.resolveConversation(followupsDbConn, `email:${threadId}`);
       }
     } catch (error) {
-      console.error(`  ✗ Error handling action:`, error.message);
+      const durationMs = Date.now() - startTime;
+      log.error({ cid, err: error, actionId, emailId, durationMs }, 'Slack action failed');
       await postMessage(channel, `✗ Error: ${error.message}`);
     }
   }
@@ -691,10 +729,11 @@ async function archiveEmailAction(emailId) {
       }
     });
 
-    return '✓ Email archived';
+    log.info({ emailId }, 'Email archived via Gmail API');
+    return { success: true, message: '✓ Email archived' };
   } catch (error) {
-    console.error('  ✗ Archive error:', error.message);
-    return `✗ Archive failed: ${error.message}`;
+    log.error({ err: error, emailId }, 'Archive failed');
+    return { success: false, message: `✗ Archive failed: ${error.message}` };
   }
 }
 
@@ -711,10 +750,11 @@ async function deleteEmailAction(emailId) {
       id: emailId
     });
 
-    return '✓ Email moved to trash';
+    log.info({ emailId }, 'Email trashed via Gmail API');
+    return { success: true, message: '✓ Email moved to trash' };
   } catch (error) {
-    console.error('  ✗ Delete error:', error.message);
-    return `✗ Delete failed: ${error.message}`;
+    log.error({ err: error, emailId }, 'Delete failed');
+    return { success: false, message: `✗ Delete failed: ${error.message}` };
   }
 }
 
@@ -731,9 +771,11 @@ cd ~/.openclaw/workspace
 `);
     execSync(`chmod +x ${scriptPath}`);
     execSync(scriptPath, { stdio: 'pipe', timeout: 30000 });
-    return '✓ Unsubscribe automation started';
+    log.info({ emailId }, 'Unsubscribe automation completed');
+    return { success: true, message: '✓ Unsubscribe automation started' };
   } catch (error) {
-    return `✗ Unsubscribe failed: ${error.message}`;
+    log.error({ err: error, emailId }, 'Unsubscribe failed');
+    return { success: false, message: `✗ Unsubscribe failed: ${error.message}` };
   }
 }
 
@@ -742,13 +784,13 @@ cd ~/.openclaw/workspace
  */
 async function connectSocketMode(db) {
   try {
-    console.log('  Connecting to Slack Socket Mode...');
+    log.info('Connecting to Slack Socket Mode');
     const url = await getSocketModeUrl();
 
     ws = new WebSocket(url);
 
     ws.on('open', () => {
-      console.log('  ✓ Socket Mode connected\n');
+      log.info('Socket Mode connected');
       if (reconnectTimeout) {
         clearTimeout(reconnectTimeout);
         reconnectTimeout = null;
@@ -765,42 +807,41 @@ async function connectSocketMode(db) {
         }
 
         // Debug: Log all envelope types
-        console.log(`  📦 Envelope type: ${envelope.type}`);
+        log.debug({ envelopeType: envelope.type }, 'Envelope received');
 
         // Handle different payload types
         if (envelope.type === 'hello') {
-          console.log('  👋 Received hello from Slack');
+          log.info('Received hello from Slack');
         } else if (envelope.type === 'disconnect') {
-          console.log('  ⚠️  Slack requested disconnect, reconnecting...');
+          log.warn('Slack requested disconnect, reconnecting');
           ws.close();
         } else if (envelope.type === 'events_api') {
           // This is an actual event
-          console.log(`  📨 Event type: ${envelope.payload.event.type}`);
+          log.debug({ eventType: envelope.payload.event.type }, 'Events API payload');
           await handleEvent(envelope.payload.event, db);
         } else if (envelope.type === 'interactive') {
           // Handle button clicks
           await handleInteractive(envelope.payload);
         } else {
-          console.log(`  ⚠️  Unknown envelope type: ${envelope.type}`);
+          log.warn({ envelopeType: envelope.type }, 'Unknown envelope type');
         }
       } catch (error) {
-        console.error('  ✗ Error processing message:', error.message);
-        console.error('  ✗ Stack:', error.stack);
+        log.error({ err: error }, 'Error processing WebSocket message');
       }
     });
 
     ws.on('error', (error) => {
-      console.error('  ✗ WebSocket error:', error.message);
+      log.error({ err: error }, 'WebSocket error');
     });
 
     ws.on('close', () => {
-      console.log('  ⚠️  Socket Mode disconnected, reconnecting in 3s...');
+      log.warn({ reconnectDelayMs: CONFIG.reconnectDelay }, 'Socket Mode disconnected, reconnecting');
       ws = null;
       reconnectTimeout = setTimeout(() => connectSocketMode(db), CONFIG.reconnectDelay);
     });
 
   } catch (error) {
-    console.error('  ✗ Failed to connect:', error.message);
+    log.error({ err: error }, 'Failed to connect to Socket Mode');
     reconnectTimeout = setTimeout(() => connectSocketMode(db), CONFIG.reconnectDelay);
   }
 }
@@ -809,27 +850,25 @@ async function connectSocketMode(db) {
  * Main
  */
 async function main() {
-  console.log('👩‍💼 Claudia - Slack Events Monitor (Socket Mode)');
-  console.log(`   Response timeout: ${CONFIG.responseTimeout / 60000} minutes\n`);
+  log.info({ responseTimeoutMin: CONFIG.responseTimeout / 60000 }, 'Slack Events Monitor starting');
 
   // Clean old cache files
   emailCache.cleanOldCache();
 
   // Show cache stats
   const stats = emailCache.getCacheStats();
-  console.log(`   Email cache: ${stats.count} emails, ${stats.totalSizeMB}MB`);
-  console.log(`   Cache dir: ${emailCache.CACHE_DIR}\n`);
+  log.info({ cacheCount: stats.count, cacheSizeMB: stats.totalSizeMB }, 'Email cache stats');
 
   // Get my user ID
   CONFIG.myUserId = await getMyUserId();
-  console.log(`   My user ID: ${CONFIG.myUserId}`);
+  log.info({ myUserId: CONFIG.myUserId }, 'Authenticated with Slack');
 
   // Initialize follow-ups database
   try {
     followupsDbConn = followupsDb.initDatabase();
-    console.log('   ✓ Follow-ups tracking initialized\n');
+    log.info('Follow-ups tracking initialized');
   } catch (error) {
-    console.error('   ✗ Failed to init follow-ups DB:', error.message);
+    log.error({ err: error }, 'Failed to init follow-ups DB');
   }
 
   // Load state
@@ -840,30 +879,24 @@ async function main() {
 
   // Start timeout checker
   setInterval(async () => {
-    const timestamp = new Date().toISOString().replace('T', ' ').substring(0, 19);
-    console.log(`[${timestamp}] Checking for message timeouts...`);
+    log.debug('Checking for message timeouts');
     await checkTimeouts();
   }, CONFIG.checkInterval);
 }
 
 // Handle graceful shutdown
-process.on('SIGTERM', () => {
-  console.log('\nShutting down gracefully...');
+function shutdown(signal) {
+  log.info({ signal }, 'Received signal, shutting down');
   saveState();
   if (ws) ws.close();
   if (reconnectTimeout) clearTimeout(reconnectTimeout);
   process.exit(0);
-});
+}
 
-process.on('SIGINT', () => {
-  console.log('\nShutting down gracefully...');
-  saveState();
-  if (ws) ws.close();
-  if (reconnectTimeout) clearTimeout(reconnectTimeout);
-  process.exit(0);
-});
+process.on('SIGTERM', () => shutdown('SIGTERM'));
+process.on('SIGINT', () => shutdown('SIGINT'));
 
 main().catch(error => {
-  console.error('Fatal error:', error);
+  log.fatal({ err: error }, 'Fatal error');
   process.exit(1);
 });

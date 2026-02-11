@@ -8,7 +8,7 @@ const url = require('url');
 
 const CREDENTIALS_PATH = process.env.HOME + '/.openclaw/gmail-credentials.json';
 const TOKEN_PATH = process.env.HOME + '/.openclaw/calendar-token.json';
-const SCOPES = ['https://www.googleapis.com/auth/calendar.readonly'];
+const SCOPES = ['https://www.googleapis.com/auth/calendar.events'];
 
 async function getCalendarClient() {
   if (!fs.existsSync(CREDENTIALS_PATH)) {
@@ -42,6 +42,11 @@ async function getCalendarClient() {
 
 function getNewToken(oAuth2Client) {
   return new Promise((resolve, reject) => {
+    const credentials = JSON.parse(fs.readFileSync(CREDENTIALS_PATH));
+    const redirectUri = credentials.installed.redirect_uris[0];
+    const parsed = new url.URL(redirectUri);
+    const port = parsed.port || 80;
+
     const authUrl = oAuth2Client.generateAuthUrl({
       access_type: 'offline',
       scope: SCOPES,
@@ -49,10 +54,10 @@ function getNewToken(oAuth2Client) {
     });
 
     console.log('\n📅 Calendar authorization required.');
-    console.log('Opening browser for Google Calendar access...\n');
+    console.log(`Opening browser (callback on port ${port})...\n`);
 
     const server = http.createServer(async (req, res) => {
-      const qs = new url.URL(req.url, 'http://localhost:3000').searchParams;
+      const qs = new url.URL(req.url, redirectUri).searchParams;
       const code = qs.get('code');
 
       if (code) {
@@ -73,11 +78,11 @@ function getNewToken(oAuth2Client) {
       }
     });
 
-    server.listen(3000, () => {
+    server.listen(port, () => {
       const { exec } = require('child_process');
       exec(`open "${authUrl}"`);
     });
   });
 }
 
-module.exports = { getCalendarClient, CREDENTIALS_PATH, TOKEN_PATH };
+module.exports = { getCalendarClient, google, CREDENTIALS_PATH, TOKEN_PATH };

@@ -11,7 +11,10 @@ const url = require('url');
 
 const CREDENTIALS_PATH = process.env.HOME + '/.openclaw/gmail-credentials.json';
 const TOKEN_PATH = process.env.HOME + '/.openclaw/gmail-token.json';
-const SCOPES = ['https://www.googleapis.com/auth/gmail.modify'];
+const SCOPES = [
+  'https://www.googleapis.com/auth/gmail.modify',
+  'https://www.googleapis.com/auth/gmail.settings.basic'
+];
 
 async function authorize() {
   const credentials = JSON.parse(fs.readFileSync(CREDENTIALS_PATH));

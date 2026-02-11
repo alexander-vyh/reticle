@@ -6,6 +6,7 @@
 
 const https = require('https');
 const followupsDb = require('./followups-db');
+const log = require('./lib/logger')('followup-checker');
 
 // Configuration
 const CONFIG = {
@@ -182,7 +183,67 @@ function buildDailyDigest(pending, awaiting) {
 async function checkImmediate() {
   // For now, VIP detection is handled by gmail-monitor
   // This is a placeholder for future immediate notifications
-  console.log('  Checking for immediate items...');
+  log.debug('Checking for immediate items');
+}
+
+/**
+ * Build EOD email section for the 4-hour batch notification
+ * Returns null if nothing noteworthy to report (conditional suppression)
+ */
+function buildEODSection(db) {
+  const now = Math.floor(Date.now() / 1000);
+  const pendingEmails = followupsDb.getPendingResponses(db, { type: 'email' });
+  const respondedToday = followupsDb.getResolvedToday(db, 'email');
+
+  // Split pending into urgent vs non-urgent by parsing metadata
+  const urgent = [];
+  const nonUrgent = [];
+  for (const conv of pendingEmails) {
+    let meta = null;
+    try { if (conv.metadata) meta = JSON.parse(conv.metadata); } catch (e) {}
+    if (meta?.urgency === 'urgent') {
+      urgent.push({ ...conv, meta });
+    } else {
+      nonUrgent.push(conv);
+    }
+  }
+
+  // Conditional suppression: skip if no urgent unreplied and <= 5 total unreplied
+  if (urgent.length === 0 && pendingEmails.length <= 5 && respondedToday === 0) {
+    return null;
+  }
+
+  let section = `\n\n📊 *End of Day — Email*\n`;
+  section += `Responded to ${respondedToday} today.`;
+  if (pendingEmails.length > 0) {
+    section += ` Carrying ${pendingEmails.length} to tomorrow.`;
+  }
+  section += '\n';
+
+  if (urgent.length > 0) {
+    section += `\n🔴 *Urgent unreplied* (${urgent.length}):\n`;
+    urgent.slice(0, 5).forEach(conv => {
+      const age = formatDuration(now - conv.last_activity);
+      const reason = conv.meta?.reason || '';
+      section += `• ${conv.from_name || conv.from_user} — ${conv.subject || 'No subject'} (${age} ago)${reason ? ` — ${reason}` : ''}\n`;
+    });
+    if (urgent.length > 5) {
+      section += `  _...and ${urgent.length - 5} more_\n`;
+    }
+  }
+
+  if (nonUrgent.length > 0) {
+    section += `\n📬 *Other unreplied* (${nonUrgent.length}):\n`;
+    nonUrgent.slice(0, 3).forEach(conv => {
+      const age = formatDuration(now - conv.last_activity);
+      section += `• ${conv.from_name || conv.from_user} — ${conv.subject || 'No subject'} (${age} ago)\n`;
+    });
+    if (nonUrgent.length > 3) {
+      section += `  _...and ${nonUrgent.length - 3} more_\n`;
+    }
+  }
+
+  return section;
 }
 
 /**
@@ -199,16 +260,15 @@ async function check4Hour() {
     return !conv.notified_at || (now - conv.notified_at) > CONFIG.thresholds.batch4h.slackDm;
   });
 
-  if (pending.length === 0) {
-    console.log('  No 4-hour batch items');
-    return;
-  }
-
   const dms = pending.filter(c => c.type === 'slack-dm');
   const mentions = pending.filter(c => c.type === 'slack-mention');
 
-  if (dms.length > 0 || mentions.length > 0) {
-    let message = `💬 *Follow-ups needed:*\n\n`;
+  // Build the main message (DMs + mentions)
+  let hasContent = dms.length > 0 || mentions.length > 0;
+  let message = '';
+
+  if (hasContent) {
+    message = `💬 *Follow-ups needed:*\n\n`;
 
     if (dms.length > 0) {
       message += `*DMs* (${dms.length}):\n`;
@@ -227,16 +287,32 @@ async function check4Hour() {
       });
       if (mentions.length > 3) message += `  _...and ${mentions.length - 3} more_\n`;
     }
-
-    await sendSlackDM(message);
-    console.log(`  ✓ Sent 4-hour batch notification (${pending.length} items)`);
-
-    // Mark as notified
-    pending.forEach(conv => {
-      followupsDb.markNotified(db, conv.id);
-      followupsDb.logNotification(db, conv.id, '4h-batch');
-    });
   }
+
+  // Append EOD email section if after 5 PM
+  const hour = new Date().getHours();
+  if (hour >= 17) {
+    const eodSection = buildEODSection(db);
+    if (eodSection) {
+      if (!hasContent) message = '📊 *End-of-Day Summary*';
+      message += eodSection;
+      hasContent = true;
+    }
+  }
+
+  if (!hasContent) {
+    log.debug('No 4-hour batch items or EOD content');
+    return;
+  }
+
+  await sendSlackDM(message);
+  log.info({ count: pending.length, dms: dms.length, mentions: mentions.length, eod: hour >= 17 }, 'Sent 4-hour batch notification');
+
+  // Mark as notified
+  pending.forEach(conv => {
+    followupsDb.markNotified(db, conv.id);
+    followupsDb.logNotification(db, conv.id, '4h-batch');
+  });
 }
 
 /**
@@ -259,14 +335,14 @@ async function checkDaily() {
   });
 
   if (pending.length === 0 && awaiting.length === 0) {
-    console.log('  No items for daily digest');
+    log.debug('No items for daily digest');
     return;
   }
 
   const message = buildDailyDigest(pending, awaiting);
 
   await sendSlackDM(message);
-  console.log(`  ✓ Sent daily digest (${pending.length} pending, ${awaiting.length} awaiting)`);
+  log.info({ pending: pending.length, awaiting: awaiting.length }, 'Sent daily digest');
 
   lastDailyDigest = today;
 
@@ -306,7 +382,7 @@ async function checkEscalations() {
   });
 
   await sendSlackDM(message);
-  console.log(`  ✓ Sent escalation notification (${escalated.length} items)`);
+  log.warn({ count: escalated.length, items: escalated.map(c => ({ id: c.id, type: c.type, from: c.from_name || c.from_user })) }, 'Sent escalation notification');
 
   escalated.forEach(conv => {
     followupsDb.markNotified(db, conv.id);
@@ -318,8 +394,7 @@ async function checkEscalations() {
  * Main check loop
  */
 async function runChecks() {
-  const timestamp = new Date().toISOString().replace('T', ' ').substring(0, 19);
-  console.log(`[${timestamp}] Running follow-up checks...`);
+  log.info('Running follow-up checks');
 
   try {
     await checkImmediate();
@@ -327,7 +402,7 @@ async function runChecks() {
     await checkDaily();
     await checkEscalations();
   } catch (error) {
-    console.error('  ✗ Error in checks:', error.message);
+    log.error({ err: error }, 'Error in checks');
   }
 }
 
@@ -335,12 +410,11 @@ async function runChecks() {
  * Main
  */
 async function main() {
-  console.log('👀 Follow-Up Checker started');
-  console.log(`   Check interval: ${CONFIG.checkInterval / 60000} minutes\n`);
+  log.info({ checkIntervalMin: CONFIG.checkInterval / 60000 }, 'Follow-Up Checker starting');
 
   // Initialize database
   db = followupsDb.initDatabase();
-  console.log('   ✓ Database initialized\n');
+  log.info('Database initialized');
 
   // Initial check
   await runChecks();
@@ -350,6 +424,6 @@ async function main() {
 }
 
 main().catch(error => {
-  console.error('Fatal error:', error);
+  log.fatal({ err: error }, 'Fatal error');
   process.exit(1);
 });

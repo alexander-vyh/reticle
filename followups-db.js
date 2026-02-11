@@ -317,15 +317,47 @@ function getWeeklyO3Summary(db, weekStartTs, weekEndTs) {
   ).all(weekStartTs, weekEndTs);
 }
 
+/**
+ * Update conversation state without overwriting other fields
+ * Used for flipping waiting_for when a reply is detected or a button is clicked
+ */
+function updateConversationState(db, id, lastSender, waitingFor) {
+  return db.prepare(`
+    UPDATE conversations
+    SET last_sender = ?, waiting_for = ?, last_activity = strftime('%s','now'), updated_at = strftime('%s','now')
+    WHERE id = ? AND resolved_at IS NULL
+  `).run(lastSender, waitingFor, id);
+}
+
+/**
+ * Count conversations resolved or flipped to their-response today
+ * Used for progress-first EOD summary framing
+ */
+function getResolvedToday(db, type) {
+  const startOfDay = new Date();
+  startOfDay.setHours(0, 0, 0, 0);
+  const epoch = Math.floor(startOfDay.getTime() / 1000);
+  let sql = `SELECT COUNT(*) as count FROM conversations
+    WHERE (resolved_at >= ? OR (waiting_for = 'their-response' AND updated_at >= ?))`;
+  const params = [epoch, epoch];
+  if (type) {
+    sql += ` AND type = ?`;
+    params.push(type);
+  }
+  return db.prepare(sql).get(...params).count;
+}
+
 module.exports = {
   initDatabase,
   trackConversation,
   resolveConversation,
+  updateConversationState,
   getPendingResponses,
   getAwaitingReplies,
   logNotification,
   markNotified,
   getStats,
+  getResolvedToday,
   // O3 helpers
   upsertO3Session,
   markO3Notified,

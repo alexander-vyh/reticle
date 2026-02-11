@@ -53,8 +53,8 @@
     }
 
     .countdown {
-      font-size: 36px;
-      font-weight: 200;
+      font-size: 24px;
+      font-weight: 300;
       color: white;
       font-variant-numeric: tabular-nums;
       margin-bottom: 4px;
@@ -77,8 +77,8 @@
     .shake { animation: shake 0.3s ease-in-out 3; }
 
     .title {
-      font-size: 14px;
-      font-weight: 600;
+      font-size: 16px;
+      font-weight: 700;
       color: white;
       margin-bottom: 2px;
       white-space: nowrap;
@@ -116,6 +116,13 @@
 
     .join-btn:hover { background: #45a049; }
     .join-btn:active { background: #3d8b40; }
+    .join-btn.urgent {
+      animation: glow 2s ease-in-out infinite;
+    }
+    @keyframes glow {
+      0%, 100% { box-shadow: 0 0 4px rgba(76, 175, 80, 0.3); }
+      50% { box-shadow: 0 0 16px rgba(76, 175, 80, 0.7); }
+    }
 
     .copy-btn {
       -webkit-app-region: no-drag;
@@ -133,6 +140,64 @@
     .copy-btn:hover { background: rgba(255, 255, 255, 0.2); color: white; }
     .copy-btn:active { background: rgba(255, 255, 255, 0.25); }
     .copy-btn.copied { color: #4CAF50; }
+
+    .no-link-warning {
+      display: inline-block;
+      font-size: 11px;
+      font-weight: 600;
+      color: #ffc107;
+      background: rgba(255, 193, 7, 0.15);
+      border-radius: 4px;
+      padding: 2px 8px;
+      margin-bottom: 8px;
+    }
+
+    .add-zoom-btn {
+      -webkit-app-region: no-drag;
+      background: #e67e22;
+      color: white;
+      border: none;
+      padding: 8px 20px;
+      border-radius: 6px;
+      font-size: 13px;
+      font-weight: 600;
+      cursor: pointer;
+      flex: 1;
+      transition: background 0.15s, opacity 0.15s;
+    }
+
+    .add-zoom-btn:hover { background: #d35400; }
+    .add-zoom-btn:active { background: #c0392b; }
+    .add-zoom-btn:disabled {
+      opacity: 0.6;
+      cursor: not-allowed;
+    }
+
+    .calendar-btn {
+      -webkit-app-region: no-drag;
+      background: rgba(255, 255, 255, 0.1);
+      color: rgba(255, 255, 255, 0.7);
+      border: none;
+      padding: 8px 10px;
+      border-radius: 6px;
+      font-size: 13px;
+      cursor: pointer;
+      transition: background 0.15s, color 0.15s;
+      flex-shrink: 0;
+    }
+
+    .calendar-btn:hover { background: rgba(255, 255, 255, 0.2); color: white; }
+    .calendar-btn:active { background: rgba(255, 255, 255, 0.25); }
+
+    .error-toast {
+      font-size: 11px;
+      color: #e74c3c;
+      margin-top: 4px;
+      padding: 2px 0;
+      display: none;
+    }
+
+    .error-toast.visible { display: block; }
 
     .dismiss-btn {
       -webkit-app-region: no-drag;
@@ -233,6 +298,22 @@
       configureAlertBehavior();
     });
 
+    // Start collapsed (for tenMin pill mode)
+    ipcRenderer.on('start-collapsed', () => {
+      collapsed = true;
+      document.body.classList.add('collapsed');
+    });
+
+    // Escalation from monitor via main process
+    ipcRenderer.on('alert-level-update', (event, data) => {
+      alertLevel = data.alertLevel;
+      if (data.meetings) {
+        meetings = data.meetings;
+        renderMeetings();
+      }
+      configureAlertBehavior();
+    });
+
     // Collapse/expand messages from main process
     ipcRenderer.on('collapse', () => {
       collapsed = true;
@@ -251,14 +332,36 @@
       meetings.forEach((meeting, idx) => {
         const div = document.createElement('div');
         div.className = 'meeting-group';
-        div.innerHTML = `
-          <div class="countdown" id="countdown-${idx}">--:--</div>
-          <div class="title">${escapeHtml(meeting.summary || 'Untitled Meeting')}</div>
-          <div class="attendees">${formatAttendees(meeting.attendees)}</div>
-          <div class="btn-row">
+        div.id = `meeting-${idx}`;
+
+        let buttonsHtml;
+        let warningHtml = '';
+
+        if (meeting.hasVideoLink) {
+          // Has video link: Join [Platform] (green) + Open in Calendar (gray)
+          buttonsHtml = `
             <button class="join-btn" onclick="joinMeeting(${idx})">${escapeHtml(meeting.joinLabel || 'Join Meeting')}</button>
             <button class="copy-btn" id="copy-btn-${idx}" onclick="copyLink(${idx})" title="Copy meeting link">Copy</button>
+            <button class="calendar-btn" onclick="openCalendar(${idx})" title="Open in Google Calendar">Cal</button>
+          `;
+        } else {
+          // No video link: warning + Add Zoom (orange) + Open in Calendar (gray)
+          warningHtml = `<div class="no-link-warning" id="warning-${idx}">⚠ No video link</div>`;
+          buttonsHtml = `
+            <button class="add-zoom-btn" id="add-zoom-${idx}" onclick="addZoom(${idx})">Add Zoom</button>
+            <button class="calendar-btn" onclick="openCalendar(${idx})" title="Open in Google Calendar">Cal</button>
+          `;
+        }
+
+        div.innerHTML = `
+          <div class="title">${escapeHtml(meeting.summary || 'Untitled Meeting')}</div>
+          <div class="countdown" id="countdown-${idx}">--:--</div>
+          <div class="attendees">${formatAttendees(meeting.attendees)}</div>
+          ${warningHtml}
+          <div class="btn-row" id="btn-row-${idx}">
+            ${buttonsHtml}
           </div>
+          <div class="error-toast" id="error-${idx}"></div>
         `;
         container.appendChild(div);
       });
@@ -324,7 +427,7 @@
         const sec = Math.floor((urgentMs % 60000) / 1000);
         pillCountdown.textContent = `${min}:${String(sec).padStart(2, '0')}`;
         pillCountdown.className = mostUrgent <= 5 ? 'pill-countdown urgent' : 'pill-countdown';
-        pillDot.className = mostUrgent <= 5 ? 'pill-dot yellow' : 'pill-dot yellow';
+        pillDot.className = mostUrgent <= 1 ? 'pill-dot red' : 'pill-dot yellow';
       }
 
       // Trigger shake at 1 minute and start time (wider window to ensure it fires)
@@ -339,15 +442,24 @@
 
     function configureAlertBehavior() {
       const dismissBtn = document.getElementById('dismissBtn');
+      const joinBtns = document.querySelectorAll('.join-btn');
+
+      // Remove previous urgent glow from all join buttons
+      joinBtns.forEach(btn => btn.classList.remove('urgent'));
 
       if (alertLevel === 'start') {
-        // Cannot dismiss at start time
         dismissBtn.classList.add('hidden');
+      } else if (alertLevel === 'oneMin') {
+        dismissBtn.classList.remove('hidden');
+        dismissBtn.textContent = 'Minimize';
+        // Add glow to join buttons
+        joinBtns.forEach(btn => btn.classList.add('urgent'));
       } else if (alertLevel === 'fiveMin') {
-        // Can collapse but it re-expands
+        dismissBtn.classList.remove('hidden');
         dismissBtn.textContent = 'Minimize';
       } else {
-        // 10min - fully dismissible
+        // tenMin
+        dismissBtn.classList.remove('hidden');
         dismissBtn.textContent = 'Dismiss';
       }
     }
@@ -373,6 +485,76 @@
         eventId: meeting.id
       });
     }
+
+    function openCalendar(idx) {
+      const meeting = meetings[idx];
+      if (meeting.calendarLink) {
+        ipcRenderer.send('open-calendar-link', { url: meeting.calendarLink });
+      }
+    }
+
+    function addZoom(idx) {
+      const meeting = meetings[idx];
+      const btn = document.getElementById(`add-zoom-${idx}`);
+      if (!btn || btn.disabled) return;
+
+      btn.disabled = true;
+      btn.textContent = 'Adding...';
+
+      // Clear any previous error
+      const errorEl = document.getElementById(`error-${idx}`);
+      if (errorEl) {
+        errorEl.classList.remove('visible');
+        errorEl.textContent = '';
+      }
+
+      ipcRenderer.send('add-conferencing', { eventId: meeting.id });
+    }
+
+    // Handle add-conferencing result from main process
+    ipcRenderer.on('add-conferencing-result', (event, data) => {
+      // Find the meeting index by eventId
+      const idx = meetings.findIndex(m => m.id === data.eventId);
+      if (idx === -1) return;
+
+      if (data.success) {
+        // Update meeting data in-place
+        meetings[idx].hasVideoLink = true;
+        meetings[idx].platform = data.platform;
+        meetings[idx].url = data.url;
+        meetings[idx].joinLabel = data.joinLabel;
+
+        // Remove warning badge
+        const warning = document.getElementById(`warning-${idx}`);
+        if (warning) warning.remove();
+
+        // Replace button row with Join + Copy + Cal
+        const btnRow = document.getElementById(`btn-row-${idx}`);
+        btnRow.innerHTML = `
+          <button class="join-btn" onclick="joinMeeting(${idx})">${escapeHtml(data.joinLabel)}</button>
+          <button class="copy-btn" id="copy-btn-${idx}" onclick="copyLink(${idx})" title="Copy meeting link">Copy</button>
+          <button class="calendar-btn" onclick="openCalendar(${idx})" title="Open in Google Calendar">Cal</button>
+        `;
+      } else {
+        // Re-enable Add Zoom button
+        const btn = document.getElementById(`add-zoom-${idx}`);
+        if (btn) {
+          btn.disabled = false;
+          btn.textContent = 'Add Zoom';
+        }
+
+        // Show error toast
+        const errorEl = document.getElementById(`error-${idx}`);
+        if (errorEl) {
+          errorEl.textContent = data.error || 'Failed to add conferencing';
+          errorEl.classList.add('visible');
+          setTimeout(() => {
+            errorEl.classList.remove('visible');
+            errorEl.textContent = '';
+          }, 5000);
+        }
+      }
+    });
 
     function dismiss() {
       ipcRenderer.send('dismiss', { alertLevel });
@@ -428,13 +610,10 @@
 
     function formatAttendees(attendees) {
       if (!attendees || attendees.length === 0) return '';
-      const names = attendees
-        .filter(a => !a.self)
-        .map(a => escapeHtml(a.displayName || a.email.split('@')[0]))
-        .slice(0, 3);
+      // Attendees arrive as plain strings (pre-mapped by the monitor)
+      const names = attendees.map(a => escapeHtml(a)).slice(0, 3);
       if (names.length === 0) return '';
-      const others = attendees.filter(a => !a.self);
-      const suffix = others.length > 3 ? ` +${others.length - 3} more` : '';
+      const suffix = attendees.length > 3 ? ` +${attendees.length - 3} more` : '';
       return `with ${names.join(', ')}${suffix}`;
     }
 
