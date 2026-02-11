@@ -166,8 +166,8 @@ function sendMacOSNotification(title, message) {
 function getGmailClient() {
   const { google } = require('googleapis');
 
-  const credentials = JSON.parse(fs.readFileSync(process.env.HOME + '/.openclaw/gmail-credentials.json'));
-  const token = JSON.parse(fs.readFileSync(process.env.HOME + '/.openclaw/gmail-token.json'));
+  const credentials = JSON.parse(fs.readFileSync(config.gmailCredentialsPath));
+  const token = JSON.parse(fs.readFileSync(config.gmailTokenPath));
   const { client_secret, client_id, redirect_uris } = credentials.installed;
   const oAuth2Client = new google.auth.OAuth2(client_id, client_secret, redirect_uris[0]);
   oAuth2Client.setCredentials(token);

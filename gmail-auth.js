@@ -9,8 +9,9 @@ const { google } = require('googleapis');
 const http = require('http');
 const url = require('url');
 
-const CREDENTIALS_PATH = process.env.HOME + '/.openclaw/gmail-credentials.json';
-const TOKEN_PATH = process.env.HOME + '/.openclaw/gmail-token.json';
+const config = require('./lib/config');
+const CREDENTIALS_PATH = config.gmailCredentialsPath;
+const TOKEN_PATH = config.gmailTokenPath;
 const SCOPES = [
   'https://www.googleapis.com/auth/gmail.modify',
   'https://www.googleapis.com/auth/gmail.settings.basic'

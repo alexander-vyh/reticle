@@ -12,8 +12,8 @@ const { URL } = require('url');
 const { execSync } = require('child_process');
 
 const config = require('./lib/config');
-const CREDENTIALS_PATH = process.env.HOME + '/.openclaw/gmail-credentials.json';
-const TOKEN_PATH = process.env.HOME + '/.openclaw/gmail-token.json';
+const CREDENTIALS_PATH = config.gmailCredentialsPath;
+const TOKEN_PATH = config.gmailTokenPath;
 const GMAIL_ACCOUNT = config.gmailAccount;
 
 // Parse --correlation-id from args (passed by gmail-monitor)
