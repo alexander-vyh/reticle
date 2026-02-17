@@ -11,6 +11,8 @@ const { execSync } = require('child_process');
 const crypto = require('crypto');
 const emailCache = require('./email-cache');
 const followupsDb = require('./followups-db');
+const { parseSenderEmail, formatRuleDescription } = require('./lib/email-utils');
+const { parseRuleRefinement } = require('./lib/ai');
 const log = require('./lib/logger')('slack-events');
 
 const path = require('path');
@@ -32,6 +34,9 @@ let pendingMessages = {};
 let ws = null;
 let reconnectTimeout = null;
 let followupsDbConn = null;
+
+// Active "Match differently" thread conversations: threadTs → { emailMeta, ruleType, currentConditions, ruleId, channel }
+const ruleRefinementThreads = new Map();
 
 /**
  * Make Slack API call
@@ -387,6 +392,12 @@ async function handleEvent(event, db) {
     return;
   }
 
+  // Intercept thread replies for "Match differently" rule refinement conversations
+  if (event.type === 'message' && event.thread_ts && ruleRefinementThreads.has(event.thread_ts)) {
+    const handled = await handleRuleRefinementReply(event);
+    if (handled) return;
+  }
+
   const eventType = event.type === 'message' ? 'message' : event.type;
   log.info({ eventType, channel: event.channel }, 'Event received');
 
@@ -557,6 +568,279 @@ async function sendEmailContent(channel, userId, emailId) {
   }
 }
 
+// ── Email Classification Helpers ──────────────────────────────────────
+
+/**
+ * Get email metadata from cache or fetch from Gmail API on cache miss.
+ */
+async function getEmailMeta(emailId) {
+  const cached = emailCache.getCachedEmail(emailId);
+  if (cached) return cached;
+
+  // Cache miss — fetch from Gmail API
+  try {
+    const gmail = getGmailClient();
+    const res = await gmail.users.messages.get({ userId: 'me', id: emailId, format: 'metadata', metadataHeaders: ['From', 'To', 'Cc', 'Subject', 'Date'] });
+    const headers = res.data.payload.headers;
+    const meta = {
+      id: emailId,
+      from: headers.find(h => h.name === 'From')?.value || '',
+      to: headers.find(h => h.name === 'To')?.value || '',
+      cc: headers.find(h => h.name === 'Cc')?.value || '',
+      subject: headers.find(h => h.name === 'Subject')?.value || '',
+      date: headers.find(h => h.name === 'Date')?.value || ''
+    };
+    emailCache.cacheEmail(emailId, meta);
+    return meta;
+  } catch (error) {
+    log.error({ err: error, emailId }, 'Failed to fetch email metadata');
+    return null;
+  }
+}
+
+/**
+ * Post an ephemeral message (only visible to user).
+ */
+async function postEphemeral(channel, userId, text, blocks) {
+  const body = { channel, user: userId, text };
+  if (blocks) body.blocks = blocks;
+  return slackAPI('chat.postEphemeral', {}, 'POST', body);
+}
+
+/**
+ * Post a message (optionally in a thread).
+ */
+async function postThreadMessage(channel, text, threadTs, blocks) {
+  const body = { channel, text, unfurl_links: false };
+  if (threadTs) body.thread_ts = threadTs;
+  if (blocks) body.blocks = blocks;
+  return slackAPI('chat.postMessage', {}, 'POST', body);
+}
+
+/**
+ * Decode overflow menu short code → { actionType, emailId }
+ * Codes: as=archive sender, ds=delete sender, ls=alert sender, dm=demote sender, ad=archive domain
+ */
+function decodeClassifyAction(value) {
+  const [code, emailId] = value.split('|');
+  const actionMap = { as: 'archive', ds: 'delete', ls: 'alert', dm: 'demote', ad: 'archive' };
+  return { actionType: actionMap[code], isDomain: code === 'ad', emailId };
+}
+
+/**
+ * Map overflow action type to the immediate action on the current email.
+ * 'archive'/'demote' → archive the email, 'delete' → trash it, 'alert' → no immediate action needed
+ */
+function immediateActionForType(actionType) {
+  if (actionType === 'archive' || actionType === 'demote') return 'archive';
+  if (actionType === 'delete') return 'delete';
+  return null; // 'alert' has no immediate destructive action
+}
+
+/**
+ * Build the rule confirmation blocks with action buttons.
+ */
+function buildRuleConfirmationBlocks(ruleType, description, ruleId, extra) {
+  const label = ruleType.charAt(0).toUpperCase() + ruleType.slice(1);
+  const elements = [];
+
+  if (extra?.suggested) {
+    // Suggested compound rule — needs explicit acceptance
+    elements.push(
+      { type: 'button', text: { type: 'plain_text', text: 'Yes, apply this rule' }, action_id: 'accept_suggested_rule', value: String(ruleId), style: 'primary' },
+      { type: 'button', text: { type: 'plain_text', text: 'No, just match sender' }, action_id: 'accept_default_rule', value: `${ruleId}|${extra.defaultRuleArgs}` },
+      { type: 'button', text: { type: 'plain_text', text: 'Match differently...' }, action_id: 'match_differently', value: String(ruleId) }
+    );
+  } else {
+    // Default rule — already applied
+    elements.push(
+      { type: 'button', text: { type: 'plain_text', text: 'Undo rule' }, action_id: 'undo_rule', value: String(ruleId) },
+      { type: 'button', text: { type: 'plain_text', text: 'Match differently...' }, action_id: 'match_differently', value: String(ruleId) }
+    );
+  }
+
+  return [
+    { type: 'section', text: { type: 'mrkdwn', text: extra?.suggested
+        ? `📋 Suggested rule: ${label} when ${description}\n${extra.reason}`
+        : `✓ Rule created: ${label} when ${description}` } },
+    { type: 'actions', elements }
+  ];
+}
+
+/**
+ * Handle the classify_email overflow menu selection.
+ */
+async function handleClassifyAction(action, channel, userId, messageTs) {
+  const selectedValue = action.selected_option?.value;
+  if (!selectedValue) return;
+
+  const { actionType, isDomain, emailId } = decodeClassifyAction(selectedValue);
+  const cid = `cls_${crypto.randomBytes(4).toString('hex')}`;
+  log.info({ cid, actionType, isDomain, emailId }, 'Classify action');
+
+  // Get email metadata
+  const meta = await getEmailMeta(emailId);
+  if (!meta) {
+    await postMessage(channel, '✗ Could not load email metadata');
+    return;
+  }
+
+  const { email: senderEmail, domain: senderDomain } = parseSenderEmail(meta.from);
+
+  // Self-domain protection
+  if (isDomain && config.filterPatterns?.companyDomain && senderDomain === config.filterPatterns.companyDomain) {
+    await postMessage(channel, `⚠️ Cannot ${actionType} emails from your own domain (@${senderDomain})`);
+    return;
+  }
+
+  // 1. Immediate action on current email (independent of rule creation)
+  const immediateAction = immediateActionForType(actionType);
+  if (immediateAction === 'archive') {
+    try { await archiveEmailAction(emailId); } catch (e) { log.warn({ err: e, emailId }, 'Immediate archive failed'); }
+  } else if (immediateAction === 'delete') {
+    try { await deleteEmailAction(emailId); } catch (e) { log.warn({ err: e, emailId }, 'Immediate delete failed'); }
+  }
+
+  // 2. Domain actions require confirmation
+  if (isDomain) {
+    const confirmBlocks = [
+      { type: 'section', text: { type: 'mrkdwn', text: `⚠️ This will ${actionType} *ALL* emails from @${senderDomain}` } },
+      { type: 'actions', elements: [
+        { type: 'button', text: { type: 'plain_text', text: 'Confirm' }, action_id: 'confirm_domain_rule', value: `${actionType}|${senderDomain}|${meta.from}|${meta.subject}`, style: 'danger' },
+        { type: 'button', text: { type: 'plain_text', text: 'Cancel' }, action_id: 'cancel_domain_rule', value: 'cancel' }
+      ]}
+    ];
+    const actionLabel = immediateAction === 'archive' ? '✓ Archived this email\n' : immediateAction === 'delete' ? '✓ Trashed this email\n' : '';
+    await postMessage(channel, `${actionLabel}⚠️ Confirm domain rule for @${senderDomain}`);
+    await postThreadMessage(channel, `Confirm domain rule`, null, confirmBlocks);
+    return;
+  }
+
+  // 3. Sender-level actions — check if smart inference applies
+  const myEmail = config.gmailAccount?.toLowerCase() || '';
+  const allRecipients = `${meta.to || ''} ${meta.cc || ''}`.toLowerCase();
+  const sentToDL = allRecipients && !allRecipients.includes(myEmail) && allRecipients.includes('@');
+
+  if (sentToDL) {
+    // Smart inference: suggest compound rule with TO condition
+    const toMatch = extractDistributionList(allRecipients, myEmail);
+    // Don't create the rule yet — propose it
+    const suggestedConditions = { ruleType: actionType, matchFrom: senderEmail, matchTo: toMatch };
+    const description = `FROM ${senderEmail} AND TO ${toMatch}`;
+    // Create the rule provisionally to get an ID, but we could also just pass args
+    const ruleId = followupsDb.createRule(followupsDbConn, {
+      ruleType: actionType, matchFrom: senderEmail, matchTo: toMatch,
+      sourceEmail: meta.from, sourceSubject: meta.subject
+    });
+    // Immediately deactivate — it's a proposal, not yet accepted
+    followupsDb.deactivateRule(followupsDbConn, ruleId);
+
+    const defaultRuleArgs = JSON.stringify({ ruleType: actionType, matchFrom: senderEmail, sourceEmail: meta.from, sourceSubject: meta.subject });
+    const actionLabel = immediateAction === 'archive' ? '✓ Archived this email\n' : immediateAction === 'delete' ? '✓ Trashed this email\n' : '';
+    const blocks = buildRuleConfirmationBlocks(actionType, description, ruleId, {
+      suggested: true,
+      reason: '_(More targeted — this was sent to a distribution list, not directly to you)_',
+      defaultRuleArgs: Buffer.from(defaultRuleArgs).toString('base64').substring(0, 60)
+    });
+    // Prepend immediate action confirmation
+    if (actionLabel) {
+      blocks.unshift({ type: 'section', text: { type: 'mrkdwn', text: actionLabel.trim() } });
+    }
+    const resp = await postThreadMessage(channel, `Suggested rule: ${description}`, null, blocks);
+    // Store context for potential "Match differently" thread
+    if (resp?.ts) {
+      storeRefinementContext(resp.ts, channel, meta, actionType, { matchFrom: senderEmail, matchTo: toMatch }, ruleId);
+    }
+  } else {
+    // Default: simple sender rule — create immediately
+    const ruleId = followupsDb.createRule(followupsDbConn, {
+      ruleType: actionType, matchFrom: senderEmail,
+      sourceEmail: meta.from, sourceSubject: meta.subject
+    });
+    const description = formatRuleDescription(followupsDb.getRuleById(followupsDbConn, ruleId));
+    const actionLabel = immediateAction === 'archive' ? '✓ Archived this email\n' : immediateAction === 'delete' ? '✓ Trashed this email\n' : '';
+    const blocks = buildRuleConfirmationBlocks(actionType, description, ruleId);
+    if (actionLabel) {
+      blocks.unshift({ type: 'section', text: { type: 'mrkdwn', text: actionLabel.trim() } });
+    }
+    const resp = await postThreadMessage(channel, `Rule created: ${actionType} when ${description}`, null, blocks);
+    if (resp?.ts) {
+      storeRefinementContext(resp.ts, channel, meta, actionType, { matchFrom: senderEmail }, ruleId);
+    }
+    log.info({ cid, ruleId, description }, 'Default rule created');
+  }
+}
+
+/**
+ * Extract the most likely distribution list address from recipients.
+ */
+function extractDistributionList(recipients, myEmail) {
+  // Split on commas, find addresses that aren't the user's
+  const addresses = recipients.match(/[\w.+-]+@[\w.-]+/g) || [];
+  const dlCandidates = addresses.filter(a => a.toLowerCase() !== myEmail);
+  return dlCandidates[0] || '';
+}
+
+/**
+ * Store context for a "Match differently" thread conversation.
+ */
+function storeRefinementContext(threadTs, channel, emailMeta, ruleType, currentConditions, ruleId) {
+  ruleRefinementThreads.set(threadTs, { emailMeta, ruleType, currentConditions, ruleId, channel });
+  // Auto-expire after 1 hour
+  setTimeout(() => ruleRefinementThreads.delete(threadTs), 60 * 60 * 1000);
+}
+
+/**
+ * Handle thread replies in rule refinement conversations.
+ */
+async function handleRuleRefinementReply(event) {
+  const threadTs = event.thread_ts;
+  const ctx = ruleRefinementThreads.get(threadTs);
+  if (!ctx) return false; // Not a refinement thread
+
+  const userText = event.text;
+  log.info({ threadTs, userText }, 'Rule refinement reply');
+
+  const result = await parseRuleRefinement({
+    emailMeta: { from: ctx.emailMeta.from, to: ctx.emailMeta.to, cc: ctx.emailMeta.cc, subject: ctx.emailMeta.subject },
+    currentRule: ctx.currentConditions,
+    userInstruction: userText
+  });
+
+  if (!result) {
+    await postThreadMessage(ctx.channel, "I couldn't parse that — try being more specific, e.g., \"only when subject mentions role audit\" or \"remove the To condition\"", threadTs);
+    return true;
+  }
+
+  // Build description and propose
+  const description = formatRuleDescription({
+    match_from: result.matchFrom, match_from_domain: result.matchFromDomain,
+    match_to: result.matchTo, match_subject_contains: result.matchSubjectContains
+  });
+
+  // Create the proposed rule (deactivated until confirmed)
+  const newRuleId = followupsDb.createRule(followupsDbConn, {
+    ruleType: ctx.ruleType, ...result,
+    sourceEmail: ctx.emailMeta.from, sourceSubject: ctx.emailMeta.subject
+  });
+  followupsDb.deactivateRule(followupsDbConn, newRuleId);
+
+  // Update context with new proposal
+  ctx.currentConditions = result;
+  ctx.ruleId = newRuleId;
+
+  const label = ctx.ruleType.charAt(0).toUpperCase() + ctx.ruleType.slice(1);
+  const blocks = [
+    { type: 'section', text: { type: 'mrkdwn', text: `Updated rule: ${label} when ${description}` } },
+    { type: 'actions', elements: [
+      { type: 'button', text: { type: 'plain_text', text: 'Apply this rule' }, action_id: 'apply_refined_rule', value: String(newRuleId), style: 'primary' },
+      { type: 'button', text: { type: 'plain_text', text: 'Try again' }, action_id: 'try_again_refine', value: threadTs }
+    ]}
+  ];
+  await postThreadMessage(ctx.channel, `Updated rule: ${description}`, threadTs, blocks);
+  return true;
+}
+
 /**
  * Handle interactive button clicks
  */
@@ -625,6 +909,153 @@ async function handleInteractive(payload) {
           result = { success: true, message: '✓ Opening in Gmail...' };
           break;
 
+        // ── Email Classification Actions ──────────────────────────
+
+        case 'classify_email':
+          await handleClassifyAction(action, channel, userId, payload.message?.ts);
+          log.info({ cid, actionId, success: true, durationMs: Date.now() - startTime }, 'Classify action completed');
+          return;
+
+        case 'accept_suggested_rule': {
+          // User accepted the compound rule proposal — reactivate it
+          const ruleId = parseInt(action.value);
+          if (followupsDbConn) {
+            // Reactivate the previously deactivated proposed rule
+            followupsDb.createRule(followupsDbConn, (() => {
+              const r = followupsDb.getRuleById(followupsDbConn, ruleId);
+              if (!r) return { ruleType: 'archive' }; // fallback
+              return { ruleType: r.rule_type, matchFrom: r.match_from, matchFromDomain: r.match_from_domain, matchTo: r.match_to, matchSubjectContains: r.match_subject_contains, sourceEmail: r.source_email, sourceSubject: r.source_subject };
+            })());
+            const rule = followupsDb.getRuleById(followupsDbConn, ruleId);
+            const desc = rule ? formatRuleDescription(rule) : 'unknown';
+            result = { success: true, message: `✓ Rule created: ${rule?.rule_type || 'archive'} when ${desc}` };
+          }
+          break;
+        }
+
+        case 'accept_default_rule': {
+          // User rejected compound suggestion, wants simple sender-only rule
+          const parts = action.value.split('|');
+          const proposedRuleId = parseInt(parts[0]);
+          try {
+            const argsJson = Buffer.from(parts[1] || '', 'base64').toString();
+            const args = JSON.parse(argsJson);
+            if (followupsDbConn) {
+              // Deactivate the compound proposal
+              followupsDb.deactivateRule(followupsDbConn, proposedRuleId);
+              // Create the simple sender rule
+              const newId = followupsDb.createRule(followupsDbConn, args);
+              const rule = followupsDb.getRuleById(followupsDbConn, newId);
+              const desc = rule ? formatRuleDescription(rule) : 'unknown';
+              result = { success: true, message: `✓ Rule created: ${rule?.rule_type || 'archive'} when ${desc}` };
+            }
+          } catch (e) {
+            log.warn({ err: e }, 'Failed to parse default rule args');
+            result = { success: false, message: '✗ Failed to create rule' };
+          }
+          break;
+        }
+
+        case 'undo_rule': {
+          const ruleId = parseInt(action.value);
+          if (followupsDbConn) {
+            const rule = followupsDb.getRuleById(followupsDbConn, ruleId);
+            followupsDb.deactivateRule(followupsDbConn, ruleId);
+            result = { success: true, message: `✓ Rule removed. Emails${rule?.match_from ? ` from ${rule.match_from}` : ''} will appear normally.` };
+          }
+          break;
+        }
+
+        case 'match_differently': {
+          // Start a "Match differently" thread conversation
+          const ruleId = parseInt(action.value);
+          const ctx = [...ruleRefinementThreads.values()].find(c => c.ruleId === ruleId);
+          if (ctx) {
+            const meta = ctx.emailMeta;
+            const currentDesc = formatRuleDescription({
+              match_from: ctx.currentConditions.matchFrom, match_from_domain: ctx.currentConditions.matchFromDomain,
+              match_to: ctx.currentConditions.matchTo, match_subject_contains: ctx.currentConditions.matchSubjectContains
+            });
+            const prompt = [
+              'How should I match future emails like this?',
+              '',
+              'This email:',
+              `  From: ${meta.from}`,
+              meta.to ? `  To: ${meta.to}` : null,
+              `  Subject: ${meta.subject}`,
+              '',
+              `Current rule: ${ctx.ruleType.charAt(0).toUpperCase() + ctx.ruleType.slice(1)} when ${currentDesc}`,
+              '',
+              'Tell me what to change — e.g., "only when subject mentions role audit", "from any sender to this DL", "remove the To condition"'
+            ].filter(x => x !== null).join('\n');
+
+            // Find the thread this confirmation was posted in
+            const msgTs = payload.message?.ts || payload.container?.message_ts;
+            await postThreadMessage(channel, prompt, msgTs);
+            // Update the refinement thread context to use this message's thread
+            if (msgTs) {
+              ruleRefinementThreads.set(msgTs, ctx);
+            }
+          } else {
+            await postMessage(channel, 'Session expired — click the overflow menu again to start over.');
+          }
+          log.info({ cid, actionId, ruleId, success: true, durationMs: Date.now() - startTime }, 'Match differently started');
+          return;
+        }
+
+        case 'apply_refined_rule': {
+          // User accepted an AI-refined rule
+          const ruleId = parseInt(action.value);
+          if (followupsDbConn) {
+            // Reactivate it
+            const rule = followupsDb.getRuleById(followupsDbConn, ruleId);
+            if (rule) {
+              followupsDb.createRule(followupsDbConn, {
+                ruleType: rule.rule_type, matchFrom: rule.match_from, matchFromDomain: rule.match_from_domain,
+                matchTo: rule.match_to, matchSubjectContains: rule.match_subject_contains,
+                sourceEmail: rule.source_email, sourceSubject: rule.source_subject
+              });
+              const desc = formatRuleDescription(rule);
+              result = { success: true, message: `✓ Rule created: ${rule.rule_type} when ${desc}` };
+              // Deactivate any older rule for the same refinement thread
+              const threadTs = payload.message?.thread_ts || payload.container?.thread_ts;
+              if (threadTs) {
+                const ctx = ruleRefinementThreads.get(threadTs);
+                if (ctx && ctx.ruleId !== ruleId) {
+                  followupsDb.deactivateRule(followupsDbConn, ctx.ruleId);
+                }
+                ruleRefinementThreads.delete(threadTs);
+              }
+            } else {
+              result = { success: false, message: '✗ Rule not found' };
+            }
+          }
+          break;
+        }
+
+        case 'try_again_refine':
+          // User wants to try another refinement — just prompt them
+          await postThreadMessage(channel, 'Tell me how you\'d like to adjust the rule:', action.value);
+          log.info({ cid, actionId, success: true, durationMs: Date.now() - startTime }, 'Try again prompt sent');
+          return;
+
+        case 'confirm_domain_rule': {
+          // User confirmed a domain-level rule
+          const [ruleType, domain, sourceEmail, sourceSubject] = (action.value || '').split('|');
+          if (followupsDbConn && ruleType && domain) {
+            const ruleId = followupsDb.createRule(followupsDbConn, {
+              ruleType, matchFromDomain: domain,
+              sourceEmail: sourceEmail || null, sourceSubject: sourceSubject || null
+            });
+            result = { success: true, message: `✓ Rule created: ${ruleType} when FROM DOMAIN @${domain}` };
+          }
+          break;
+        }
+
+        case 'cancel_domain_rule':
+          result = { success: true, message: '✓ Domain rule cancelled.' };
+          break;
+
         default:
           result = { success: false, message: '✗ Unknown action' };
       }
@@ -662,8 +1093,8 @@ async function getFullEmailContent(emailId) {
     const { google } = require('googleapis');
     const fs = require('fs');
 
-    const credentials = JSON.parse(fs.readFileSync(process.env.HOME + '/.openclaw/gmail-credentials.json'));
-    const token = JSON.parse(fs.readFileSync(process.env.HOME + '/.openclaw/gmail-token.json'));
+    const credentials = JSON.parse(fs.readFileSync(config.gmailCredentialsPath));
+    const token = JSON.parse(fs.readFileSync(config.gmailTokenPath));
 
     const { client_secret, client_id, redirect_uris } = credentials.installed;
     const oAuth2Client = new google.auth.OAuth2(client_id, client_secret, redirect_uris[0]);
@@ -707,8 +1138,8 @@ async function getFullEmailContent(emailId) {
 function getGmailClient() {
   const { google } = require('googleapis');
 
-  const credentials = JSON.parse(fs.readFileSync(process.env.HOME + '/.openclaw/gmail-credentials.json'));
-  const token = JSON.parse(fs.readFileSync(process.env.HOME + '/.openclaw/gmail-token.json'));
+  const credentials = JSON.parse(fs.readFileSync(config.gmailCredentialsPath));
+  const token = JSON.parse(fs.readFileSync(config.gmailTokenPath));
   const { client_secret, client_id, redirect_uris } = credentials.installed;
   const oAuth2Client = new google.auth.OAuth2(client_id, client_secret, redirect_uris[0]);
   oAuth2Client.setCredentials(token);

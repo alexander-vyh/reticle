@@ -38,6 +38,8 @@ function cacheEmail(emailId, emailData) {
     const cacheData = {
       id: emailId,
       from: emailData.from,
+      to: emailData.to || '',
+      cc: emailData.cc || '',
       subject: emailData.subject,
       date: emailData.date,
       body: emailData.body,

@@ -106,8 +106,8 @@ async function getFullEmail(emailId) {
     const { google } = require('googleapis');
     const fs = require('fs');
 
-    const credentials = JSON.parse(fs.readFileSync(process.env.HOME + '/.openclaw/gmail-credentials.json'));
-    const token = JSON.parse(fs.readFileSync(process.env.HOME + '/.openclaw/gmail-token.json'));
+    const credentials = JSON.parse(fs.readFileSync(config.gmailCredentialsPath));
+    const token = JSON.parse(fs.readFileSync(config.gmailTokenPath));
 
     const { client_secret, client_id, redirect_uris } = credentials.installed;
     const oAuth2Client = new google.auth.OAuth2(client_id, client_secret, redirect_uris[0]);
@@ -209,6 +209,19 @@ async function handleAction(action, user, channel) {
         } catch (error) {
           return { text: '✗ Unsubscribe failed' };
         }
+
+      // Classification actions — handled by Socket Mode, passthrough for webhook
+      case 'classify_email':
+        return { text: '✓ Classification received (processing via Socket Mode)' };
+      case 'accept_suggested_rule':
+      case 'accept_default_rule':
+      case 'undo_rule':
+      case 'match_differently':
+      case 'apply_refined_rule':
+      case 'try_again_refine':
+      case 'confirm_domain_rule':
+      case 'cancel_domain_rule':
+        return { text: '✓ Action received (processing via Socket Mode)' };
 
       default:
         return { text: '✗ Unknown action' };
