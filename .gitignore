@@ -36,6 +36,9 @@ followup-checker.pid
 openclaw.db
 openclaw.db-*
 
+# Tray app build output
+tray/dist/
+
 # Git worktrees
 .worktrees/
 

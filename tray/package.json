@@ -1,0 +1,35 @@
+{
+  "name": "claudia-tray",
+  "version": "1.0.0",
+  "description": "Claudia menu bar service manager",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "build": "electron-builder --mac --dir",
+    "dist": "electron-builder --mac"
+  },
+  "devDependencies": {
+    "electron": "^40.1.0",
+    "electron-builder": "^26.0.0"
+  },
+  "build": {
+    "appId": "ai.openclaw.claudia-tray",
+    "productName": "Claudia",
+    "mac": {
+      "category": "public.app-category.utilities",
+      "type": "development",
+      "target": "dir",
+      "extendInfo": {
+        "LSUIElement": true
+      }
+    },
+    "files": [
+      "main.js",
+      "service-manager.js",
+      "icons.js"
+    ],
+    "directories": {
+      "output": "dist"
+    }
+  }
+}
