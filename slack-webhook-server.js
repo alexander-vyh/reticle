@@ -210,6 +210,19 @@ async function handleAction(action, user, channel) {
           return { text: '✗ Unsubscribe failed' };
         }
 
+      // Classification actions — handled by Socket Mode, passthrough for webhook
+      case 'classify_email':
+        return { text: '✓ Classification received (processing via Socket Mode)' };
+      case 'accept_suggested_rule':
+      case 'accept_default_rule':
+      case 'undo_rule':
+      case 'match_differently':
+      case 'apply_refined_rule':
+      case 'try_again_refine':
+      case 'confirm_domain_rule':
+      case 'cancel_domain_rule':
+        return { text: '✓ Action received (processing via Socket Mode)' };
+
       default:
         return { text: '✗ Unknown action' };
     }

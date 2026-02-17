@@ -15,6 +15,10 @@ const DB_PATH = path.join(process.env.HOME, '.openclaw/workspace/followups.db');
 function initDatabase() {
   const db = new Database(DB_PATH);
 
+  // WAL mode for concurrent reader/writer access across processes
+  db.pragma('journal_mode = WAL');
+  db.pragma('busy_timeout = 5000');
+
   db.exec(`
     CREATE TABLE IF NOT EXISTS conversations (
       id TEXT PRIMARY KEY,
@@ -68,7 +72,50 @@ function initDatabase() {
 
     CREATE INDEX IF NOT EXISTS idx_o3_report ON o3_sessions(report_email);
     CREATE INDEX IF NOT EXISTS idx_o3_start ON o3_sessions(scheduled_start);
+
+    CREATE TABLE IF NOT EXISTS email_rules (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      rule_type TEXT NOT NULL,              -- 'archive', 'delete', 'alert', 'demote'
+      match_from TEXT,                      -- sender email (lowercase), NULL = any
+      match_from_domain TEXT,               -- sender domain (lowercase), NULL = any
+      match_to TEXT,                        -- recipient/DL address (lowercase), NULL = any
+      match_subject_contains TEXT,          -- subject substring (lowercase), NULL = any
+      source_email TEXT,                    -- original 'from' header that triggered creation
+      source_subject TEXT,                  -- original subject
+      created_at INTEGER NOT NULL DEFAULT (strftime('%s','now')),
+      hit_count INTEGER NOT NULL DEFAULT 0,
+      last_hit_at INTEGER,
+      active INTEGER NOT NULL DEFAULT 1
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_email_rules_from
+      ON email_rules(match_from) WHERE active = 1;
+    CREATE INDEX IF NOT EXISTS idx_email_rules_domain
+      ON email_rules(match_from_domain) WHERE active = 1;
   `);
+
+  // COALESCE-based unique index: SQLite treats NULL != NULL, so we normalize.
+  // Created outside the main exec() because pre-existing duplicate rows would
+  // cause CREATE UNIQUE INDEX to fail on upgrade — deduplicate first if needed.
+  try {
+    db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_email_rules_unique
+      ON email_rules(rule_type, COALESCE(match_from,''), COALESCE(match_from_domain,''),
+                     COALESCE(match_to,''), COALESCE(match_subject_contains,''))`);
+  } catch (e) {
+    if (e.code === 'SQLITE_CONSTRAINT_UNIQUE') {
+      // Deduplicate: keep the row with the highest hit_count for each condition combo
+      db.exec(`DELETE FROM email_rules WHERE id NOT IN (
+        SELECT MIN(id) FROM email_rules
+        GROUP BY rule_type, COALESCE(match_from,''), COALESCE(match_from_domain,''),
+                 COALESCE(match_to,''), COALESCE(match_subject_contains,'')
+      )`);
+      db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_email_rules_unique
+        ON email_rules(rule_type, COALESCE(match_from,''), COALESCE(match_from_domain,''),
+                       COALESCE(match_to,''), COALESCE(match_subject_contains,''))`);
+    } else {
+      throw e;
+    }
+  }
 
   return db;
 }
@@ -347,6 +394,96 @@ function getResolvedToday(db, type) {
   return db.prepare(sql).get(...params).count;
 }
 
+// ── Email Rules CRUD ──────────────────────────────────────────────────
+
+/**
+ * Create or re-activate an email classification rule (upsert).
+ * All match values are lowercased at write time.
+ */
+function createRule(db, { ruleType, matchFrom, matchFromDomain, matchTo, matchSubjectContains, sourceEmail, sourceSubject }) {
+  const mf = matchFrom ? matchFrom.toLowerCase() : null;
+  const mfd = matchFromDomain ? matchFromDomain.toLowerCase() : null;
+  const mt = matchTo ? matchTo.toLowerCase() : null;
+  const msc = matchSubjectContains ? matchSubjectContains.toLowerCase() : null;
+
+  // Upsert: the COALESCE-based unique index handles NULL deduplication
+  db.prepare(`
+    INSERT INTO email_rules (rule_type, match_from, match_from_domain, match_to, match_subject_contains, source_email, source_subject)
+    VALUES (@ruleType, @mf, @mfd, @mt, @msc, @sourceEmail, @sourceSubject)
+    ON CONFLICT(rule_type, COALESCE(match_from,''), COALESCE(match_from_domain,''),
+                COALESCE(match_to,''), COALESCE(match_subject_contains,''))
+    DO UPDATE SET active = 1, created_at = strftime('%s','now')
+  `).run({ ruleType, mf, mfd, mt, msc, sourceEmail: sourceEmail || null, sourceSubject: sourceSubject || null });
+
+  // Always look up the canonical row ID
+  const row = db.prepare(`
+    SELECT id FROM email_rules
+    WHERE rule_type = @ruleType
+      AND COALESCE(match_from,'') = COALESCE(@mf,'')
+      AND COALESCE(match_from_domain,'') = COALESCE(@mfd,'')
+      AND COALESCE(match_to,'') = COALESCE(@mt,'')
+      AND COALESCE(match_subject_contains,'') = COALESCE(@msc,'')
+  `).get({ ruleType, mf, mfd, mt, msc });
+  return row.id;
+}
+
+/**
+ * Get all active rules, ordered by specificity (most conditions first).
+ */
+function getActiveRules(db) {
+  return db.prepare(`
+    SELECT *,
+      (CASE WHEN match_from IS NOT NULL THEN 1 ELSE 0 END +
+       CASE WHEN match_from_domain IS NOT NULL THEN 1 ELSE 0 END +
+       CASE WHEN match_to IS NOT NULL THEN 1 ELSE 0 END +
+       CASE WHEN match_subject_contains IS NOT NULL THEN 1 ELSE 0 END) AS specificity
+    FROM email_rules
+    WHERE active = 1
+    ORDER BY specificity DESC,
+             CASE WHEN match_from IS NOT NULL THEN 0 ELSE 1 END,
+             created_at ASC
+  `).all();
+}
+
+/**
+ * Atomically increment hit count and update last_hit_at.
+ */
+function recordRuleHit(db, ruleId) {
+  return db.prepare(`
+    UPDATE email_rules
+    SET hit_count = hit_count + 1, last_hit_at = strftime('%s','now')
+    WHERE id = ?
+  `).run(ruleId);
+}
+
+/**
+ * Deactivate a rule (soft delete).
+ */
+function deactivateRule(db, ruleId) {
+  return db.prepare(`UPDATE email_rules SET active = 0 WHERE id = ?`).run(ruleId);
+}
+
+/**
+ * Get rule by ID (for undo confirmation display).
+ */
+function getRuleById(db, ruleId) {
+  return db.prepare('SELECT * FROM email_rules WHERE id = ?').get(ruleId);
+}
+
+/**
+ * Get summary: total active count + top 5 rules by hit_count.
+ */
+function getRulesSummary(db) {
+  const total = db.prepare('SELECT COUNT(*) as count FROM email_rules WHERE active = 1').get().count;
+  const top = db.prepare(`
+    SELECT * FROM email_rules
+    WHERE active = 1 AND hit_count > 0
+    ORDER BY hit_count DESC
+    LIMIT 5
+  `).all();
+  return { total, top };
+}
+
 module.exports = {
   initDatabase,
   trackConversation,
@@ -366,5 +503,12 @@ module.exports = {
   getO3SessionsForReport,
   getLastO3ForReport,
   getWeeklyO3Summary,
+  // Email rules
+  createRule,
+  getActiveRules,
+  recordRuleHit,
+  deactivateRule,
+  getRuleById,
+  getRulesSummary,
   DB_PATH
 };

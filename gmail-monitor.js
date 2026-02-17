@@ -10,6 +10,7 @@ const https = require('https');
 const path = require('path');
 const emailCache = require('./email-cache');
 const followupsDb = require('./followups-db');
+const { parseSenderEmail, formatRuleDescription } = require('./lib/email-utils');
 const log = require('./lib/logger')('gmail-monitor');
 const config = require('./lib/config');
 
@@ -73,8 +74,39 @@ const URGENT_KEYWORDS = [
 /**
  * Create Block Kit blocks for urgent email with action buttons
  */
+/**
+ * Build context-aware overflow menu options for email classification.
+ * @param {'urgent'|'batch'} context - Current email context
+ * @param {string} emailId - Gmail message ID
+ * @param {string} senderDomain - Extracted sender domain
+ */
+function buildClassifyOverflow(context, emailId, senderDomain) {
+  // Short codes: as=archive sender, ds=delete sender, ls=alert sender,
+  //              dm=demote sender, ad=archive domain
+  const options = context === 'urgent'
+    ? [
+        { text: { type: 'plain_text', text: "Don't alert from this sender" }, value: `dm|${emailId}` },
+        { text: { type: 'plain_text', text: "Don't show from this sender" }, value: `as|${emailId}` },
+        { text: { type: 'plain_text', text: 'Auto-delete from this sender' }, value: `ds|${emailId}` },
+        { text: { type: 'plain_text', text: `Don't show from @${senderDomain}` }, value: `ad|${emailId}` }
+      ]
+    : [
+        { text: { type: 'plain_text', text: "Don't show from this sender" }, value: `as|${emailId}` },
+        { text: { type: 'plain_text', text: 'Auto-delete from this sender' }, value: `ds|${emailId}` },
+        { text: { type: 'plain_text', text: 'Always alert from this sender' }, value: `ls|${emailId}` },
+        { text: { type: 'plain_text', text: `Don't show from @${senderDomain}` }, value: `ad|${emailId}` }
+      ];
+
+  return {
+    type: 'overflow',
+    action_id: 'classify_email',
+    options
+  };
+}
+
 function createUrgentEmailBlocks(from, subject, reason, date, emailId, threadId) {
   const value = threadId ? `${emailId}|${threadId}` : emailId;
+  const { domain: senderDomain } = parseSenderEmail(from);
   return [
     {
       type: "section",
@@ -135,7 +167,8 @@ function createUrgentEmailBlocks(from, subject, reason, date, emailId, threadId)
           text: { type: "plain_text", text: "Unsubscribe" },
           action_id: "unsubscribe_email",
           value: value
-        }
+        },
+        buildClassifyOverflow('urgent', emailId, senderDomain)
       ]
     }
   ];
@@ -332,6 +365,53 @@ function sendSlackMessage(channel, message, blocks = null) {
     req.write(data);
     req.end();
   });
+}
+
+// ── User-trained rules (loaded from DB each check cycle) ──────────────
+let userRules = [];
+
+function loadUserRules() {
+  if (!followupsDbConn) return;
+  try {
+    userRules = followupsDb.getActiveRules(followupsDbConn);
+    if (userRules.length > 0) {
+      log.info({ count: userRules.length }, 'Loaded user email rules');
+    }
+  } catch (error) {
+    log.error({ err: error }, 'Failed to load user rules');
+    userRules = [];
+  }
+}
+
+/**
+ * Apply user-trained classification rules.
+ * Most-specific rule wins (already sorted by getActiveRules).
+ * Returns { action, reason, ruleId } or null if no rule matches.
+ */
+function applyUserRules(email) {
+  if (userRules.length === 0) return null;
+
+  const from = email.from.toLowerCase();
+  const { email: senderEmail, domain: senderDomain } = parseSenderEmail(email.from);
+  const subject = email.subject.toLowerCase();
+  const to = (email.to || '').toLowerCase();
+  const cc = (email.cc || '').toLowerCase();
+  const recipients = `${to} ${cc}`;
+
+  for (const rule of userRules) {
+    // All non-null conditions must match (AND logic)
+    if (rule.match_from && senderEmail !== rule.match_from) continue;
+    if (rule.match_from_domain && senderDomain !== rule.match_from_domain) continue;
+    if (rule.match_to && !recipients.includes(rule.match_to)) continue;
+    if (rule.match_subject_contains && !subject.includes(rule.match_subject_contains)) continue;
+
+    // Record the hit (fire-and-forget — don't block on DB write)
+    try { followupsDb.recordRuleHit(followupsDbConn, rule.id); } catch { /* ignore */ }
+
+    return { action: rule.rule_type, reason: `Learned: ${formatRuleDescription(rule)}`, ruleId: rule.id };
+  }
+
+  return null;
 }
 
 /**
@@ -770,6 +850,7 @@ async function sendBatchSummary() {
   for (const email of emailsToShow) {
     const safeFrom = sanitize(email.from);
     const safeSubject = sanitize(email.subject);
+    const { domain: senderDomain } = parseSenderEmail(email.from);
 
     // Email info section
     blocks.push({
@@ -836,7 +917,8 @@ async function sendBatchSummary() {
           text: { type: "plain_text", text: "Unsubscribe" },
           action_id: "unsubscribe_email",
           value: batchValue
-        }
+        },
+        buildClassifyOverflow('batch', email.id, senderDomain)
       ]
     });
   }
@@ -954,15 +1036,41 @@ async function checkEmails() {
 
   log.info({ count: emails.length }, 'Found unread emails');
 
+  // Reload user-trained rules each cycle (sub-ms for small table)
+  loadUserRules();
+
   let urgentCount = 0;
 
   for (const email of emails) {
     const emailDate = new Date(email.date).getTime();
     if (emailDate < lastCheck) continue; // Already processed
 
-    // Apply rule-based filtering first
-    const filter = applyRuleBasedFilter(email);
     const fromShort = email.from.length > 50 ? email.from.substring(0, 47) + '...' : email.from;
+
+    // Apply user-trained rules first (highest priority)
+    const userRule = applyUserRules(email);
+    if (userRule) {
+      if (userRule.action === 'archive') {
+        log.info({ from: fromShort, reason: userRule.reason }, 'Archiving email (user rule)');
+        if (archiveEmail(email.id)) filteringStats.archived++;
+        continue;
+      }
+      if (userRule.action === 'delete') {
+        log.info({ from: fromShort, reason: userRule.reason }, 'Deleting email (user rule)');
+        if (deleteEmail(email.id)) filteringStats.deleted++;
+        continue;
+      }
+      if (userRule.action === 'demote') {
+        log.info({ from: fromShort, reason: userRule.reason }, 'Demoting to batch (user rule)');
+        batchQueue.push({ from: email.from, subject: email.subject, date: email.date, id: email.id, threadId: email.threadId });
+        trackEmailConversation(followupsDbConn, email, 'incoming', { urgency: 'batch', demoted: true });
+        continue;
+      }
+      // 'alert' action: force urgent — skip urgency check, handled below after hardcoded filters
+    }
+
+    // Apply hardcoded rule-based filtering
+    const filter = applyRuleBasedFilter(email);
 
     if (filter.action === 'archive') {
       log.info({ from: fromShort, reason: filter.reason }, 'Archiving email');
@@ -986,8 +1094,10 @@ async function checkEmails() {
       // Continue processing (don't skip) - email stays in inbox and will be checked for urgency
     }
 
-    // Email passed filters - check urgency
-    const urgency = checkUrgency(email);
+    // If user rule said 'alert', force urgent — bypass normal urgency check
+    const urgency = (userRule && userRule.action === 'alert')
+      ? { urgent: true, reason: userRule.reason }
+      : checkUrgency(email);
 
     log.info({
       from: fromShort,
@@ -1118,12 +1228,27 @@ async function maybeSendHealthCheck() {
   lastHealthCheckHour = currentHour;
 
   const uptimeHrs = Math.round(process.uptime() / 3600);
+
+  // Build learned-rules summary
+  let rulesLine = '';
+  try {
+    if (followupsDbConn) {
+      const rulesSummary = followupsDb.getRulesSummary(followupsDbConn);
+      if (rulesSummary.total > 0) {
+        const topLines = rulesSummary.top.map((r, i) =>
+          `    ${i + 1}. ${r.rule_type.charAt(0).toUpperCase() + r.rule_type.slice(1)} ${formatRuleDescription(r)} (${r.hit_count} hits)`
+        );
+        rulesLine = `\n  📋 Learned Rules: ${rulesSummary.total} active\n${topLines.join('\n')}`;
+      }
+    }
+  } catch { /* don't break health check for rules summary */ }
+
   const summary = [
     `*Gmail Monitor Health Check*`,
     `Uptime: ${uptimeHrs}h | PID: ${process.pid}`,
     `Since last health check: ${dailyStats.checksRun} checks, ${dailyStats.emailsSeen} emails scanned`,
     `  Archived: ${dailyStats.archived} | Deleted: ${dailyStats.deleted} | Urgent: ${dailyStats.urgent} | Batches sent: ${dailyStats.batchesSent}`,
-    `  Queue: ${batchQueue.length} emails pending for next batch`
+    `  Queue: ${batchQueue.length} emails pending for next batch${rulesLine}`
   ].join('\n');
 
   try {
