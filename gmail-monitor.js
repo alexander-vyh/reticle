@@ -793,12 +793,8 @@ function trackEmailConversation(db, email, direction, metadata) {
     const lastSender = direction === 'incoming' ? 'them' : 'me';
     const waitingFor = direction === 'incoming' ? 'my-response' : 'their-response';
 
-    // Extract sender name from "Name <email@domain.com>" format
-    let fromName = email.from;
-    const match = email.from.match(/^(.+?)\s*<(.+?)>$/);
-    if (match) {
-      fromName = match[1].replace(/"/g, '');
-    }
+    // Extract sender display name using shared utility
+    const fromName = parseSenderEmail(email.from).display;
 
     followupsDb.trackConversation(db, {
       id: threadId,
