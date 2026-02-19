@@ -199,7 +199,7 @@ async function checkImmediate() {
 function buildEODSection(db) {
   const now = Math.floor(Date.now() / 1000);
   const pendingEmails = claudiaDb.getPendingResponses(db, accountId, { type: 'email' });
-  const respondedTodayCountCount = claudiaDb.getResolvedToday(db, accountId, 'email').length;
+  const respondedTodayCount = claudiaDb.getResolvedToday(db, accountId, 'email').length;
 
   // Split pending into urgent vs non-urgent by parsing metadata
   const urgent = [];

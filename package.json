@@ -17,7 +17,7 @@
     "husky": "^9.1.7"
   },
   "scripts": {
-    "test": "node test-claudia-db.js && npm test --prefix tray",
+    "test": "node test-heartbeat.js && node test-startup-validation.js && node test-claudia-db.js && npm test --prefix tray",
     "prepare": "husky"
   }
 }
