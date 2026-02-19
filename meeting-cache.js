@@ -4,8 +4,8 @@
 const fs = require('fs');
 const path = require('path');
 
-const DEFAULT_CACHE_PATH = path.join(process.env.HOME, '.openclaw/workspace/meeting-cache.json');
-const DEFAULT_STATE_PATH = path.join(process.env.HOME, '.openclaw/workspace/alert-state.json');
+const DEFAULT_CACHE_PATH = path.join(process.env.CLAUDIA_DATA_DIR || path.join(process.env.HOME, '.claudia', 'data'), 'meeting-cache.json');
+const DEFAULT_STATE_PATH = path.join(process.env.CLAUDIA_DATA_DIR || path.join(process.env.HOME, '.claudia', 'data'), 'alert-state.json');
 const CACHE_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 const OVERLAP_THRESHOLD_MS = 2 * 60 * 1000;
 
