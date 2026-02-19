@@ -33,9 +33,9 @@ followups.db
 followups.db-*
 followup-checker.pid
 
-# OpenClaw database
-openclaw.db
-openclaw.db-*
+# Claudia database
+claudia.db
+claudia.db-*
 
 # Tray app build output
 tray/dist/
