@@ -12,7 +12,6 @@ gmail-last-check.txt
 gmail-batch-queue.json
 gmail-heartbeat.json
 slack-events-state.json
-slack-monitor-state.json
 
 # Cache
 email-cache/
@@ -27,12 +26,6 @@ email-cache/
 *.swp
 .DS_Store
 
-# Follow-ups database
-follow-ups.db
-followups.db
-followups.db-*
-followup-checker.pid
-
 # Claudia database
 claudia.db
 claudia.db-*
@@ -46,7 +39,6 @@ tray/dist/
 # Meeting alerts
 meeting-cache.json
 alert-state.json
-meeting-alerts.pid
 
 # Serena
 .serena/
