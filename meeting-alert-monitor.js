@@ -12,6 +12,8 @@ const meetingCache = require('./meeting-cache');
 const linkParser = require('./meeting-link-parser');
 const platformLauncher = require('./platform-launcher');
 const log = require('./lib/logger')('meeting-alerts');
+const heartbeat = require('./lib/heartbeat');
+const { validatePrerequisites } = require('./lib/startup-validation');
 
 const CONFIG = {
   pollInterval: 2 * 60 * 1000,       // 2 minutes
@@ -29,6 +31,9 @@ const CONFIG = {
 
 let calendar = null;
 let activePopups = {};  // groupKey -> child process
+let o3Db = null;
+let accountId = null;
+let errorCount = 0;
 
 const SOUNDS = {
   fiveMin: '/System/Library/Sounds/Blow.aiff',
@@ -680,6 +685,14 @@ async function main() {
     lookAheadHours: CONFIG.lookAheadHours
   }, 'Meeting Alert Monitor starting');
 
+  const validation = validatePrerequisites('meeting-alerts', [
+    { type: 'file', path: config.calendarTokenPath, description: 'Calendar token' }
+  ]);
+  if (validation.errors.length > 0) {
+    log.fatal({ errors: validation.errors }, 'Startup validation failed');
+    process.exit(1);
+  }
+
   try {
     calendar = await calendarAuth.getCalendarClient();
     log.info('Calendar authorized successfully');
@@ -689,8 +702,6 @@ async function main() {
   }
 
   // Initialize followups database (for O3 tracking)
-  let o3Db;
-  let accountId;
   try {
     o3Db = claudiaDb.initDatabase();
     const primaryAccount = claudiaDb.upsertAccount(o3Db, {
@@ -721,10 +732,24 @@ async function main() {
 
   // Set up polling interval for calendar sync
   setInterval(async () => {
-    const syncedEvents = await syncCalendar();
-    meetingCache.cleanupAlertState(syncedEvents);
-    await checkO3Notifications(syncedEvents, o3Db, accountId);
-    checkWeeklySummary(o3Db);
+    try {
+      const syncedEvents = await syncCalendar();
+      meetingCache.cleanupAlertState(syncedEvents);
+      await checkO3Notifications(syncedEvents, o3Db, accountId);
+      checkWeeklySummary(o3Db);
+      heartbeat.write('meeting-alerts', {
+        checkInterval: CONFIG.pollInterval,
+        status: 'ok',
+        metrics: { upcomingMeetings: syncedEvents.length }
+      });
+    } catch (error) {
+      log.error({ err: error }, 'Poll cycle error');
+      heartbeat.write('meeting-alerts', {
+        checkInterval: CONFIG.pollInterval,
+        status: 'error',
+        errors: { lastError: error.message, lastErrorAt: Date.now(), countSinceStart: ++errorCount }
+      });
+    }
   }, CONFIG.pollInterval);
 
   // Set up alert checking interval
@@ -738,11 +763,18 @@ async function main() {
   // Immediate alert check
   checkAlerts(events);
   await checkO3Notifications(events, o3Db, accountId);
+
+  heartbeat.write('meeting-alerts', {
+    checkInterval: CONFIG.pollInterval,
+    status: 'ok',
+    metrics: { upcomingMeetings: events.length }
+  });
 }
 
 // Graceful shutdown - kill all popup children
 function shutdown(signal) {
   log.info({ signal }, 'Received signal, shutting down');
+  heartbeat.write('meeting-alerts', { checkInterval: CONFIG.pollInterval, status: 'shutting-down' });
 
   for (const [groupKey, child] of Object.entries(activePopups)) {
     try {
@@ -753,6 +785,7 @@ function shutdown(signal) {
   }
 
   activePopups = {};
+  if (o3Db) try { o3Db.close(); } catch {}
   process.exit(0);
 }
 
