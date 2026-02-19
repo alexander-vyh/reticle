@@ -151,3 +151,53 @@ assert.strictEqual(allActions.length, 3);
 console.log('PASS: getRecentActions filtered by account');
 
 console.log('\n--- Task 1 action_log tests passed ---');
+
+// --- Test: upsertEmail + getEmailByGmailId + getEmailsByThread ---
+const email = claudiaDb.upsertEmail(db, acct.id, {
+  gmail_id: '19c748749068b21d',
+  thread_id: 'thread-abc',
+  from_addr: 'noreply@okta.com',
+  from_name: 'Okta',
+  to_addrs: ['alexanderv@example.com'],
+  subject: 'Okta rate limit warning',
+  date: Math.floor(Date.now() / 1000),
+  direction: 'inbound',
+  snippet: 'Your org has exceeded...'
+});
+assert.ok(email.id);
+assert.strictEqual(email.gmail_id, '19c748749068b21d');
+console.log('PASS: upsertEmail');
+
+const byGmail = claudiaDb.getEmailByGmailId(db, acct.id, '19c748749068b21d');
+assert.strictEqual(byGmail.id, email.id);
+console.log('PASS: getEmailByGmailId');
+
+// Second email in same thread
+claudiaDb.upsertEmail(db, acct.id, {
+  gmail_id: '19c748749068b22e',
+  thread_id: 'thread-abc',
+  from_addr: 'alexanderv@example.com',
+  to_addrs: ['noreply@okta.com'],
+  subject: 'Re: Okta rate limit warning',
+  date: Math.floor(Date.now() / 1000) + 60,
+  direction: 'outbound'
+});
+
+const thread = claudiaDb.getEmailsByThread(db, acct.id, 'thread-abc');
+assert.strictEqual(thread.length, 2);
+console.log('PASS: getEmailsByThread');
+
+// Upsert same gmail_id updates existing
+const updated = claudiaDb.upsertEmail(db, acct.id, {
+  gmail_id: '19c748749068b21d',
+  thread_id: 'thread-abc',
+  from_addr: 'noreply@okta.com',
+  subject: 'Okta rate limit warning (updated)',
+  date: Math.floor(Date.now() / 1000),
+  direction: 'inbound'
+});
+assert.strictEqual(updated.id, email.id);
+assert.strictEqual(updated.subject, 'Okta rate limit warning (updated)');
+console.log('PASS: upsertEmail idempotent');
+
+console.log('\n--- Task 2 email tests passed ---');

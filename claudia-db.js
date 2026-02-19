@@ -321,6 +321,47 @@ function getRecentActions(db, { accountId, actor, action, since, limit = 100 } =
   return db.prepare(sql).all(...params);
 }
 
+// --- Emails ---
+
+function upsertEmail(db, accountId, { gmail_id, thread_id = null, from_addr, from_name = null,
+    to_addrs = null, cc_addrs = null, subject = null, date, direction, snippet = null, metadata = null }) {
+  if (gmail_id) {
+    const existing = db.prepare('SELECT * FROM emails WHERE account_id = ? AND gmail_id = ?').get(accountId, gmail_id);
+    if (existing) {
+      db.prepare(`UPDATE emails SET
+        thread_id = COALESCE(?, thread_id), from_addr = ?, from_name = COALESCE(?, from_name),
+        to_addrs = COALESCE(?, to_addrs), cc_addrs = COALESCE(?, cc_addrs),
+        subject = COALESCE(?, subject), date = ?, direction = ?,
+        snippet = COALESCE(?, snippet), metadata = COALESCE(?, metadata)
+        WHERE id = ?`
+      ).run(
+        thread_id, from_addr, from_name,
+        to_addrs ? JSON.stringify(to_addrs) : null, cc_addrs ? JSON.stringify(cc_addrs) : null,
+        subject, date, direction, snippet,
+        metadata ? JSON.stringify(metadata) : null, existing.id
+      );
+      return db.prepare('SELECT * FROM emails WHERE id = ?').get(existing.id);
+    }
+  }
+  const id = generateId();
+  db.prepare(`INSERT INTO emails (id, account_id, gmail_id, thread_id, from_addr, from_name,
+    to_addrs, cc_addrs, subject, date, direction, snippet, metadata)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+  ).run(id, accountId, gmail_id, thread_id, from_addr, from_name,
+    to_addrs ? JSON.stringify(to_addrs) : null, cc_addrs ? JSON.stringify(cc_addrs) : null,
+    subject, date, direction, snippet, metadata ? JSON.stringify(metadata) : null);
+  return db.prepare('SELECT * FROM emails WHERE id = ?').get(id);
+}
+
+function getEmailByGmailId(db, accountId, gmailId) {
+  return db.prepare('SELECT * FROM emails WHERE account_id = ? AND gmail_id = ?').get(accountId, gmailId);
+}
+
+function getEmailsByThread(db, accountId, threadId) {
+  return db.prepare('SELECT * FROM emails WHERE account_id = ? AND thread_id = ? ORDER BY date ASC')
+    .all(accountId, threadId);
+}
+
 module.exports = {
   DB_PATH,
   ENTITY_TYPES,
@@ -335,4 +376,7 @@ module.exports = {
   logAction,
   getEntityHistory,
   getRecentActions,
+  upsertEmail,
+  getEmailByGmailId,
+  getEmailsByThread,
 };
