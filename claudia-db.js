@@ -540,10 +540,63 @@ function confirmUnsubscribe(db, unsubscribeId) {
   ).run(unsubscribeId);
 }
 
+// --- Email Rules ---
+
+const ALLOWED_RULE_TYPES = ['archive', 'alert', 'demote', 'flag'];
+
+function createRule(db, accountId, { rule_type, match_from = null, match_from_domain = null,
+    match_to = null, match_subject_contains = null, source_email = null, source_subject = null, metadata = null }) {
+  if (rule_type === 'delete') {
+    throw new Error('Delete rules are not allowed. Use archive, alert, demote, or flag.');
+  }
+  const mf = match_from ? match_from.toLowerCase() : null;
+  const mfd = match_from_domain ? match_from_domain.toLowerCase() : null;
+  const mt = match_to ? match_to.toLowerCase() : null;
+  const msc = match_subject_contains ? match_subject_contains.toLowerCase() : null;
+
+  const result = db.prepare(`INSERT INTO email_rules
+    (account_id, rule_type, match_from, match_from_domain, match_to, match_subject_contains, source_email, source_subject, metadata)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT (account_id, rule_type, COALESCE(match_from,''), COALESCE(match_from_domain,''),
+                 COALESCE(match_to,''), COALESCE(match_subject_contains,''))
+    DO UPDATE SET active = 1, source_email = COALESCE(excluded.source_email, email_rules.source_email),
+                  source_subject = COALESCE(excluded.source_subject, email_rules.source_subject)`
+  ).run(accountId, rule_type, mf, mfd, mt, msc, source_email, source_subject,
+    metadata ? JSON.stringify(metadata) : null);
+  return db.prepare('SELECT * FROM email_rules WHERE id = ?').get(result.lastInsertRowid);
+}
+
+function getActiveRules(db, accountId) {
+  return db.prepare('SELECT * FROM email_rules WHERE account_id = ? AND active = 1').all(accountId);
+}
+
+function recordRuleHit(db, ruleId) {
+  db.prepare(
+    "UPDATE email_rules SET hit_count = hit_count + 1, last_hit_at = strftime('%s','now') WHERE id = ?"
+  ).run(ruleId);
+}
+
+function deactivateRule(db, ruleId) {
+  db.prepare('UPDATE email_rules SET active = 0 WHERE id = ?').run(ruleId);
+}
+
+function getRuleById(db, ruleId) {
+  return db.prepare('SELECT * FROM email_rules WHERE id = ?').get(ruleId);
+}
+
+function getRulesSummary(db, accountId) {
+  const total = db.prepare('SELECT COUNT(*) as c FROM email_rules WHERE account_id = ? AND active = 1').get(accountId).c;
+  const top = db.prepare(
+    'SELECT * FROM email_rules WHERE account_id = ? AND active = 1 ORDER BY hit_count DESC LIMIT 10'
+  ).all(accountId);
+  return { total, top };
+}
+
 module.exports = {
   DB_PATH,
   ENTITY_TYPES,
   RELATIONSHIPS,
+  ALLOWED_RULE_TYPES,
   initDatabase,
   upsertAccount,
   getAccount,
@@ -568,4 +621,10 @@ module.exports = {
   checkUnsubscribed,
   incrementEmailsSince,
   confirmUnsubscribe,
+  createRule,
+  getActiveRules,
+  recordRuleHit,
+  deactivateRule,
+  getRuleById,
+  getRulesSummary,
 };
