@@ -354,3 +354,54 @@ assert.throws(() => {
 console.log('PASS: delete rules blocked');
 
 console.log('\n--- Task 5 email_rules tests passed ---');
+
+// --- Test: upsertO3Session ---
+const o3Start = Math.floor(Date.now() / 1000);
+claudiaDb.upsertO3Session(db, acct.id, {
+  id: 'cal-event-1',
+  report_name: 'Jane Smith',
+  report_email: 'jane@example.com',
+  scheduled_start: o3Start,
+  scheduled_end: o3Start + 1800,
+  created_at: o3Start - 86400
+});
+
+const session = claudiaDb.getO3Session(db, 'cal-event-1');
+assert.strictEqual(session.report_name, 'Jane Smith');
+assert.strictEqual(session.account_id, acct.id);
+console.log('PASS: upsertO3Session + getO3Session');
+
+// --- Test: markO3Notified ---
+claudiaDb.markO3Notified(db, 'cal-event-1', 'prep_sent_afternoon');
+const notified = claudiaDb.getO3Session(db, 'cal-event-1');
+assert.strictEqual(notified.prep_sent_afternoon, 1);
+console.log('PASS: markO3Notified');
+
+// --- Test: getLastO3ForReport ---
+const last = claudiaDb.getLastO3ForReport(db, 'jane@example.com', o3Start + 1);
+assert.strictEqual(last.id, 'cal-event-1');
+console.log('PASS: getLastO3ForReport');
+
+// --- Test: logNotification + markNotified (uses conv from Task 3) ---
+claudiaDb.trackConversation(db, acct.id, {
+  id: 'email:notif-test',
+  type: 'email',
+  subject: 'Notification test',
+  from_user: 'test@example.com',
+  from_name: 'Test',
+  last_sender: 'them',
+  waiting_for: 'my-response'
+});
+claudiaDb.logNotification(db, acct.id, 'email:notif-test', 'immediate');
+const notifCount = db.prepare('SELECT COUNT(*) as c FROM notification_log WHERE conversation_id = ?')
+  .get('email:notif-test').c;
+assert.strictEqual(notifCount, 1);
+console.log('PASS: logNotification');
+
+claudiaDb.markNotified(db, 'email:notif-test');
+const notifConv = db.prepare('SELECT * FROM conversations WHERE id = ?').get('email:notif-test');
+assert.ok(notifConv.notified_at);
+console.log('PASS: markNotified');
+
+console.log('\n--- Task 6 O3 + notification tests passed ---');
+console.log('\n=== ALL CLAUDIA-DB TESTS PASSED ===');
