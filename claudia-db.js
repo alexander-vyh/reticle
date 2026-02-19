@@ -592,6 +592,63 @@ function getRulesSummary(db, accountId) {
   return { total, top };
 }
 
+// --- O3 Sessions ---
+
+function upsertO3Session(db, accountId, { id, report_name, report_email, scheduled_start, scheduled_end, created_at }) {
+  db.prepare(`INSERT INTO o3_sessions (id, account_id, report_name, report_email, scheduled_start, scheduled_end, created_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(id) DO UPDATE SET
+      report_name = excluded.report_name,
+      report_email = excluded.report_email,
+      scheduled_start = excluded.scheduled_start,
+      scheduled_end = excluded.scheduled_end`
+  ).run(id, accountId, report_name, report_email, scheduled_start, scheduled_end, created_at || Math.floor(Date.now() / 1000));
+}
+
+function getO3Session(db, id) {
+  return db.prepare('SELECT * FROM o3_sessions WHERE id = ?').get(id);
+}
+
+function markO3Notified(db, sessionId, field) {
+  const allowed = ['prep_sent_afternoon', 'prep_sent_before', 'post_nudge_sent', 'lattice_logged'];
+  if (!allowed.includes(field)) throw new Error(`Invalid O3 notification field: ${field}`);
+  db.prepare(`UPDATE o3_sessions SET ${field} = 1 WHERE id = ?`).run(sessionId);
+}
+
+function getLastO3ForReport(db, reportEmail, beforeTimestamp) {
+  return db.prepare(
+    'SELECT * FROM o3_sessions WHERE report_email = ? AND scheduled_start < ? ORDER BY scheduled_start DESC LIMIT 1'
+  ).get(reportEmail, beforeTimestamp);
+}
+
+function getO3SessionsForReport(db, reportEmail) {
+  return db.prepare('SELECT * FROM o3_sessions WHERE report_email = ? ORDER BY scheduled_start DESC').all(reportEmail);
+}
+
+function getWeeklyO3Summary(db, weekStart, weekEnd) {
+  return db.prepare(
+    'SELECT * FROM o3_sessions WHERE scheduled_start >= ? AND scheduled_start < ? ORDER BY scheduled_start ASC'
+  ).all(weekStart, weekEnd);
+}
+
+function markO3LatticeLogged(db, sessionId) {
+  db.prepare("UPDATE o3_sessions SET lattice_logged = 1 WHERE id = ?").run(sessionId);
+}
+
+// --- Notifications ---
+
+function logNotification(db, accountId, conversationId, notificationType, channel = 'slack') {
+  db.prepare(`INSERT INTO notification_log (account_id, conversation_id, notification_type, channel)
+    VALUES (?, ?, ?, ?)`
+  ).run(accountId, conversationId, notificationType, channel);
+}
+
+function markNotified(db, conversationId) {
+  db.prepare(
+    "UPDATE conversations SET notified_at = strftime('%s','now'), updated_at = strftime('%s','now') WHERE id = ?"
+  ).run(conversationId);
+}
+
 module.exports = {
   DB_PATH,
   ENTITY_TYPES,
@@ -627,4 +684,13 @@ module.exports = {
   deactivateRule,
   getRuleById,
   getRulesSummary,
+  upsertO3Session,
+  getO3Session,
+  markO3Notified,
+  getLastO3ForReport,
+  getO3SessionsForReport,
+  getWeeklyO3Summary,
+  markO3LatticeLogged,
+  logNotification,
+  markNotified,
 };
