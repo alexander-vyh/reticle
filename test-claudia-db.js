@@ -1,0 +1,153 @@
+'use strict';
+
+const assert = require('assert');
+const path = require('path');
+const fs = require('fs');
+const os = require('os');
+
+// Use a temp DB for tests
+const TEST_DB_PATH = path.join(os.tmpdir(), `claudia-test-${Date.now()}.db`);
+process.env.CLAUDIA_DB_PATH = TEST_DB_PATH;
+
+const claudiaDb = require('./claudia-db');
+
+// Cleanup on exit
+process.on('exit', () => {
+  try { fs.unlinkSync(TEST_DB_PATH); } catch {}
+  try { fs.unlinkSync(TEST_DB_PATH + '-wal'); } catch {}
+  try { fs.unlinkSync(TEST_DB_PATH + '-shm'); } catch {}
+});
+
+const db = claudiaDb.initDatabase();
+
+// --- Test: Database initializes with all tables ---
+const tables = db.prepare(
+  "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name"
+).all().map(r => r.name);
+assert.deepStrictEqual(tables, [
+  'accounts', 'action_log', 'conversations', 'email_rules',
+  'emails', 'entity_links', 'notification_log', 'o3_sessions', 'unsubscribes'
+]);
+console.log('PASS: all 9 tables created');
+
+// --- Test: upsertAccount + getAccount ---
+const acct = claudiaDb.upsertAccount(db, {
+  email: 'alexanderv@example.com',
+  provider: 'gmail',
+  display_name: 'Alexander (Work)',
+  is_primary: 1
+});
+assert.ok(acct.id);
+assert.strictEqual(acct.email, 'alexanderv@example.com');
+
+const fetched = claudiaDb.getAccount(db, 'alexanderv@example.com');
+assert.strictEqual(fetched.id, acct.id);
+assert.strictEqual(fetched.is_primary, 1);
+console.log('PASS: upsertAccount + getAccount');
+
+// --- Test: getPrimaryAccount ---
+const primary = claudiaDb.getPrimaryAccount(db);
+assert.strictEqual(primary.email, 'alexanderv@example.com');
+console.log('PASS: getPrimaryAccount');
+
+// --- Test: upsert is idempotent ---
+const acct2 = claudiaDb.upsertAccount(db, {
+  email: 'alexanderv@example.com',
+  display_name: 'Alexander V'
+});
+assert.strictEqual(acct2.id, acct.id);
+assert.strictEqual(acct2.display_name, 'Alexander V');
+console.log('PASS: upsert idempotent');
+
+console.log('\n--- Task 1 accounts tests passed ---');
+
+// --- Test: link + getLinked ---
+claudiaDb.link(db, {
+  sourceType: 'email', sourceId: 'email-1',
+  targetType: 'conversation', targetId: 'conv-1',
+  relationship: 'belongs_to'
+});
+
+const linked = claudiaDb.getLinked(db, 'email', 'email-1');
+assert.strictEqual(linked.length, 1);
+assert.strictEqual(linked[0].target_type, 'conversation');
+assert.strictEqual(linked[0].target_id, 'conv-1');
+console.log('PASS: link + getLinked (forward)');
+
+// Reverse lookup
+const reverse = claudiaDb.getLinked(db, 'conversation', 'conv-1');
+assert.strictEqual(reverse.length, 1);
+assert.strictEqual(reverse[0].source_type, 'email');
+console.log('PASS: getLinked (reverse)');
+
+// Filtered lookup
+claudiaDb.link(db, {
+  sourceType: 'email', sourceId: 'email-1',
+  targetType: 'todo', targetId: 'todo-1',
+  relationship: 'triggered'
+});
+const filtered = claudiaDb.getLinked(db, 'email', 'email-1', {
+  targetType: 'todo'
+});
+assert.strictEqual(filtered.length, 1);
+assert.strictEqual(filtered[0].relationship, 'triggered');
+console.log('PASS: getLinked (filtered)');
+
+// Duplicate link is idempotent (upsert)
+claudiaDb.link(db, {
+  sourceType: 'email', sourceId: 'email-1',
+  targetType: 'conversation', targetId: 'conv-1',
+  relationship: 'belongs_to'
+});
+const afterDup = claudiaDb.getLinked(db, 'email', 'email-1');
+assert.strictEqual(afterDup.length, 2); // still 2, not 3
+console.log('PASS: duplicate link is idempotent');
+
+// Invalid entity type throws
+assert.throws(() => {
+  claudiaDb.link(db, {
+    sourceType: 'bogus', sourceId: 'x',
+    targetType: 'email', targetId: 'y',
+    relationship: 'belongs_to'
+  });
+}, /Unknown entity type/);
+console.log('PASS: invalid entity type throws');
+
+// unlink
+claudiaDb.unlink(db, 'email', 'email-1', 'todo', 'todo-1', 'triggered');
+const afterUnlink = claudiaDb.getLinked(db, 'email', 'email-1');
+assert.strictEqual(afterUnlink.length, 1);
+console.log('PASS: unlink');
+
+console.log('\n--- Task 1 entity_links tests passed ---');
+
+// --- Test: logAction + getEntityHistory + getRecentActions ---
+claudiaDb.logAction(db, {
+  accountId: acct.id, actor: 'system', entityType: 'email', entityId: 'email-1',
+  action: 'received', context: { from: 'test@example.com' }
+});
+claudiaDb.logAction(db, {
+  accountId: acct.id, actor: 'rule:5', entityType: 'email', entityId: 'email-1',
+  action: 'archived', context: { rule: 'zoom-filter' }, outcome: { labels_removed: ['INBOX'] }
+});
+claudiaDb.logAction(db, {
+  accountId: acct.id, actor: 'user', entityType: 'email', entityId: 'email-1',
+  action: 'moved_to_inbox', context: { reason: 'user override' }
+});
+
+const history = claudiaDb.getEntityHistory(db, 'email', 'email-1');
+assert.strictEqual(history.length, 3);
+assert.strictEqual(history[0].action, 'received');
+assert.strictEqual(history[2].action, 'moved_to_inbox');
+console.log('PASS: logAction + getEntityHistory');
+
+const userActions = claudiaDb.getRecentActions(db, { actor: 'user' });
+assert.strictEqual(userActions.length, 1);
+assert.strictEqual(userActions[0].action, 'moved_to_inbox');
+console.log('PASS: getRecentActions filtered by actor');
+
+const allActions = claudiaDb.getRecentActions(db, { accountId: acct.id });
+assert.strictEqual(allActions.length, 3);
+console.log('PASS: getRecentActions filtered by account');
+
+console.log('\n--- Task 1 action_log tests passed ---');
