@@ -13,6 +13,8 @@ const claudiaDb = require('./claudia-db');
 const { parseSenderEmail, formatRuleDescription } = require('./lib/email-utils');
 const log = require('./lib/logger')('gmail-monitor');
 const config = require('./lib/config');
+const heartbeat = require('./lib/heartbeat');
+const { validatePrerequisites } = require('./lib/startup-validation');
 
 // Configuration
 const CONFIG = {
@@ -23,8 +25,7 @@ const CONFIG = {
   batchTimes: [9, 12, 15, 18], // Hours to send batched summaries (9am, 12pm, 3pm, 6pm)
   healthCheckHour: 8, // Daily health summary at 8 AM
   historyFile: path.join(__dirname, 'gmail-last-check.txt'),
-  batchQueueFile: path.join(__dirname, 'gmail-batch-queue.json'),
-  heartbeatFile: path.join(__dirname, 'gmail-heartbeat.json')
+  batchQueueFile: path.join(__dirname, 'gmail-batch-queue.json')
 };
 
 // Batch queue for non-urgent emails
@@ -54,6 +55,7 @@ let lastHealthCheckHour = -1;
 
 // Follow-ups database connection
 let followupsDbConn = null;
+let errorCount = 0;
 let accountId = null;
 
 // Sent-mail detection: use wider window on first run to cover restart gaps
@@ -1032,6 +1034,11 @@ async function checkEmails() {
   if (emails.length === 0) {
     log.info('No unread emails in last 10 minutes');
     saveLastCheckTime();
+    heartbeat.write('gmail-monitor', {
+      checkInterval: CONFIG.checkInterval,
+      status: 'ok',
+      metrics: { batchQueueSize: batchQueue.length, dailyStats }
+    });
     return;
   }
 
@@ -1187,7 +1194,14 @@ async function checkEmails() {
 
   saveBatchQueue();
   saveLastCheckTime();
-  writeHeartbeat();
+  heartbeat.write('gmail-monitor', {
+    checkInterval: CONFIG.checkInterval,
+    status: 'ok',
+    metrics: {
+      batchQueueSize: batchQueue.length,
+      dailyStats
+    }
+  });
 
   // Check if it's time to send batch summary
   if (shouldSendBatch()) {
@@ -1201,24 +1215,6 @@ async function checkEmails() {
 
   // Detect replies in sent mail and flip conversation state
   await checkSentEmails();
-}
-
-/**
- * Write heartbeat file with current state
- */
-function writeHeartbeat() {
-  try {
-    const heartbeat = {
-      lastCheck: Date.now(),
-      pid: process.pid,
-      uptime: Math.round(process.uptime()),
-      batchQueueSize: batchQueue.length,
-      dailyStats
-    };
-    fs.writeFileSync(CONFIG.heartbeatFile, JSON.stringify(heartbeat));
-  } catch (e) {
-    log.warn({ err: e }, 'Failed to write heartbeat');
-  }
 }
 
 /**
@@ -1285,6 +1281,17 @@ async function main() {
     log.info({ count: batchQueue.length }, 'Loaded batch queue from previous session');
   }
 
+  // Validate prerequisites before starting
+  const validation = validatePrerequisites('gmail-monitor', [
+    { type: 'file', path: config.gmailCredentialsPath, description: 'Gmail credentials' },
+    { type: 'file', path: config.gmailTokenPath, description: 'Gmail token' },
+    { type: 'database', path: claudiaDb.DB_PATH, description: 'Claudia database' }
+  ]);
+  if (validation.errors.length > 0) {
+    log.fatal({ errors: validation.errors }, 'Startup validation failed');
+    process.exit(1);
+  }
+
   // Initialize follow-ups database
   try {
     followupsDbConn = claudiaDb.initDatabase();
@@ -1309,9 +1316,23 @@ async function main() {
       await checkEmails();
     } catch (error) {
       log.error({ err: error }, 'Check error');
+      heartbeat.write('gmail-monitor', {
+        checkInterval: CONFIG.checkInterval,
+        status: 'error',
+        errors: { lastError: error.message, lastErrorAt: Date.now(), countSinceStart: ++errorCount }
+      });
     }
   }, CONFIG.checkInterval);
 }
+
+function shutdown(signal) {
+  log.info({ signal }, 'Shutting down gracefully');
+  heartbeat.write('gmail-monitor', { checkInterval: CONFIG.checkInterval, status: 'shutting-down' });
+  if (followupsDbConn) try { followupsDbConn.close(); } catch {}
+  process.exit(0);
+}
+process.on('SIGTERM', () => shutdown('SIGTERM'));
+process.on('SIGINT', () => shutdown('SIGINT'));
 
 main().catch(error => {
   log.fatal({ err: error }, 'Fatal error');
