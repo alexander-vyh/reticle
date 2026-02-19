@@ -5,7 +5,7 @@ const fs = require('fs');
 const path = require('path');
 const { execFile, spawn } = require('child_process');
 const https = require('https');
-const followupsDb = require('./followups-db');
+const claudiaDb = require('./claudia-db');
 const slack = require('./lib/slack');
 const calendarAuth = require('./calendar-auth');
 const meetingCache = require('./meeting-cache');
@@ -146,13 +146,13 @@ async function sendAfternoonPrep(db, event, report) {
   const startTime = new Date(startMs).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
 
   // Days since last O3
-  const lastO3 = followupsDb.getLastO3ForReport(db, report.email, Math.floor(startMs / 1000));
+  const lastO3 = claudiaDb.getLastO3ForReport(db, report.email, Math.floor(startMs / 1000));
   const daysSinceLast = lastO3
     ? Math.round((startMs / 1000 - lastO3.scheduled_start) / 86400)
     : null;
 
   // Open follow-ups for this person
-  const pendingFollowups = followupsDb.getPendingResponses(db, { type: null })
+  const pendingFollowups = claudiaDb.getPendingResponses(db, accountId, { type: null })
     .filter(c => c.from_user && c.from_user.toLowerCase().includes(report.email.split('@')[0]));
 
   const daysSinceText = daysSinceLast !== null ? `${daysSinceLast} days since last O3` : 'First tracked O3';
@@ -172,7 +172,7 @@ async function sendAfternoonPrep(db, event, report) {
 
   try {
     await slack.sendSlackDM(`Tomorrow's O3 prep: ${report.name} at ${startTime}`, blocks);
-    followupsDb.markO3Notified(db, event.id, 'prep_sent_afternoon');
+    claudiaDb.markO3Notified(db, event.id, 'prep_sent_afternoon');
     log.info({ reportName: report.name, reportEmail: report.email, eventId: event.id }, 'O3 afternoon prep sent');
   } catch (err) {
     log.error({ err, reportName: report.name, eventId: event.id }, 'O3 afternoon prep failed');
@@ -189,13 +189,13 @@ async function sendPreMeetingPrep(db, event, report) {
   const minutesUntil = Math.round((startMs - Date.now()) / 60000);
 
   // Last O3
-  const lastO3 = followupsDb.getLastO3ForReport(db, report.email, Math.floor(startMs / 1000));
+  const lastO3 = claudiaDb.getLastO3ForReport(db, report.email, Math.floor(startMs / 1000));
   const lastO3Text = lastO3
     ? new Date(lastO3.scheduled_start * 1000).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
     : 'None tracked';
 
   // Open follow-ups
-  const pendingFollowups = followupsDb.getPendingResponses(db, { type: null })
+  const pendingFollowups = claudiaDb.getPendingResponses(db, accountId, { type: null })
     .filter(c => c.from_user && c.from_user.toLowerCase().includes(report.email.split('@')[0]));
 
   // Meeting link
@@ -221,7 +221,7 @@ async function sendPreMeetingPrep(db, event, report) {
 
   try {
     await slack.sendSlackDM(`O3 with ${report.name} in ~${minutesUntil}min`, blocks);
-    followupsDb.markO3Notified(db, event.id, 'prep_sent_before');
+    claudiaDb.markO3Notified(db, event.id, 'prep_sent_before');
     log.info({ reportName: report.name, reportEmail: report.email, eventId: event.id }, 'O3 pre-meeting prep sent');
   } catch (err) {
     log.error({ err, reportName: report.name, eventId: event.id }, 'O3 pre-meeting prep failed');
@@ -266,7 +266,7 @@ async function sendPostMeetingNudge(db, event, report) {
 
   try {
     await slack.sendSlackDM(`O3 with ${report.name} — log in Lattice`, blocks);
-    followupsDb.markO3Notified(db, event.id, 'post_nudge_sent');
+    claudiaDb.markO3Notified(db, event.id, 'post_nudge_sent');
     log.info({ reportName: report.name, reportEmail: report.email, eventId: event.id }, 'O3 post-meeting nudge sent');
   } catch (err) {
     log.error({ err, reportName: report.name, eventId: event.id }, 'O3 post-meeting nudge failed');
@@ -290,7 +290,7 @@ async function checkO3Notifications(events, db) {
     const endMs = new Date(event.end.dateTime).getTime();
 
     // Upsert the O3 session
-    followupsDb.upsertO3Session(db, {
+    claudiaDb.upsertO3Session(db, accountId, {
       id: event.id,
       report_name: report.name,
       report_email: report.email,
@@ -298,7 +298,7 @@ async function checkO3Notifications(events, db) {
       scheduled_end: Math.floor(endMs / 1000)
     });
 
-    const session = followupsDb.getO3Session(db, event.id);
+    const session = claudiaDb.getO3Session(db, event.id);
 
     // --- Afternoon-before prep ---
     // If the O3 is tomorrow and we haven't sent afternoon prep yet
@@ -385,7 +385,7 @@ async function sendWeeklySummary(db) {
   sunday.setHours(23, 59, 59, 0);
   const weekEnd = Math.floor(sunday.getTime() / 1000);
 
-  const sessions = followupsDb.getWeeklyO3Summary(db, weekStart, weekEnd);
+  const sessions = claudiaDb.getWeeklyO3Summary(db, weekStart, weekEnd);
 
   // Group by report
   const byReport = {};
@@ -690,9 +690,17 @@ async function main() {
 
   // Initialize followups database (for O3 tracking)
   let o3Db;
+  let accountId;
   try {
-    o3Db = followupsDb.initDatabase();
-    log.info('O3 database initialized');
+    o3Db = claudiaDb.initDatabase();
+    const primaryAccount = claudiaDb.upsertAccount(o3Db, {
+      email: CONFIG.gmailAccount,
+      provider: 'gmail',
+      display_name: 'Primary',
+      is_primary: 1
+    });
+    accountId = primaryAccount.id;
+    log.info('Claudia DB initialized');
   } catch (err) {
     log.error({ err }, 'O3 database init failed');
     // Non-fatal — O3 features will be disabled

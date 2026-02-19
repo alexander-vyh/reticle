@@ -16,6 +16,9 @@ jobs:
         with:
           node-version: 22
 
+      - name: Install root dependencies
+        run: npm install
+
       - name: Install tray dependencies
         run: npm install --prefix tray
 
