@@ -82,6 +82,10 @@ function initDatabase() {
       account_id    TEXT NOT NULL REFERENCES accounts(id),
       type          TEXT NOT NULL,
       subject       TEXT,
+      from_user     TEXT,
+      from_name     TEXT,
+      channel_id    TEXT,
+      channel_name  TEXT,
       participants  TEXT,
       state         TEXT NOT NULL DEFAULT 'active',
       waiting_for   TEXT,
@@ -368,11 +372,11 @@ function trackConversation(db, accountId, conversation) {
   const now = Math.floor(Date.now() / 1000);
   const stmt = db.prepare(`
     INSERT INTO conversations (
-      id, account_id, type, subject, participants, state, waiting_for,
-      urgency, first_seen, last_activity, metadata
+      id, account_id, type, subject, from_user, from_name, channel_id, channel_name,
+      participants, state, waiting_for, urgency, first_seen, last_activity, metadata
     ) VALUES (
-      @id, @account_id, @type, @subject, @participants, 'active', @waiting_for,
-      @urgency, @first_seen, @last_activity, @metadata
+      @id, @account_id, @type, @subject, @from_user, @from_name, @channel_id, @channel_name,
+      @participants, 'active', @waiting_for, @urgency, @first_seen, @last_activity, @metadata
     )
     ON CONFLICT(id) DO UPDATE SET
       subject = COALESCE(@subject, conversations.subject),
@@ -386,6 +390,10 @@ function trackConversation(db, accountId, conversation) {
     account_id: accountId,
     type: conversation.type,
     subject: conversation.subject || null,
+    from_user: conversation.from_user || null,
+    from_name: conversation.from_name || null,
+    channel_id: conversation.channel_id || null,
+    channel_name: conversation.channel_name || null,
     participants: conversation.from_user || null,
     waiting_for: conversation.waiting_for,
     urgency: (conversation.metadata && conversation.metadata.urgency) || 'normal',

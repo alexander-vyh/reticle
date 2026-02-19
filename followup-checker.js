@@ -5,7 +5,7 @@
  */
 
 const https = require('https');
-const followupsDb = require('./followups-db');
+const claudiaDb = require('./claudia-db');
 const log = require('./lib/logger')('followup-checker');
 
 const config = require('./lib/config');
@@ -46,6 +46,7 @@ const CONFIG = {
 };
 
 let db = null;
+let accountId = null;
 let lastDailyDigest = null;
 let last4hCheck = null;
 
@@ -194,8 +195,8 @@ async function checkImmediate() {
  */
 function buildEODSection(db) {
   const now = Math.floor(Date.now() / 1000);
-  const pendingEmails = followupsDb.getPendingResponses(db, { type: 'email' });
-  const respondedToday = followupsDb.getResolvedToday(db, 'email');
+  const pendingEmails = claudiaDb.getPendingResponses(db, accountId, { type: 'email' });
+  const respondedTodayCountCount = claudiaDb.getResolvedToday(db, accountId, 'email').length;
 
   // Split pending into urgent vs non-urgent by parsing metadata
   const urgent = [];
@@ -211,12 +212,12 @@ function buildEODSection(db) {
   }
 
   // Conditional suppression: skip if no urgent unreplied and <= 5 total unreplied
-  if (urgent.length === 0 && pendingEmails.length <= 5 && respondedToday === 0) {
+  if (urgent.length === 0 && pendingEmails.length <= 5 && respondedTodayCount === 0) {
     return null;
   }
 
   let section = `\n\n📊 *End of Day — Email*\n`;
-  section += `Responded to ${respondedToday} today.`;
+  section += `Responded to ${respondedTodayCount} today.`;
   if (pendingEmails.length > 0) {
     section += ` Carrying ${pendingEmails.length} to tomorrow.`;
   }
@@ -255,7 +256,7 @@ async function check4Hour() {
   const now = Math.floor(Date.now() / 1000);
 
   // Get items older than 4 hours that haven't been notified recently
-  const pending = followupsDb.getPendingResponses(db, {
+  const pending = claudiaDb.getPendingResponses(db, accountId, {
     olderThan: CONFIG.thresholds.batch4h.slackDm
   }).filter(conv => {
     // Only notify if we haven't notified in the last 4 hours
@@ -312,8 +313,8 @@ async function check4Hour() {
 
   // Mark as notified
   pending.forEach(conv => {
-    followupsDb.markNotified(db, conv.id);
-    followupsDb.logNotification(db, conv.id, '4h-batch');
+    claudiaDb.markNotified(db, conv.id);
+    claudiaDb.logNotification(db, accountId, conv.id, '4h-batch');
   });
 }
 
@@ -331,8 +332,8 @@ async function checkDaily() {
   const today = now.toISOString().split('T')[0];
   if (lastDailyDigest === today) return;
 
-  const pending = followupsDb.getPendingResponses(db);
-  const awaiting = followupsDb.getAwaitingReplies(db, {
+  const pending = claudiaDb.getPendingResponses(db, accountId);
+  const awaiting = claudiaDb.getAwaitingReplies(db, accountId, {
     olderThan: CONFIG.thresholds.daily.email
   });
 
@@ -350,7 +351,7 @@ async function checkDaily() {
 
   // Mark as notified
   pending.forEach(conv => {
-    followupsDb.logNotification(db, conv.id, 'daily-digest');
+    claudiaDb.logNotification(db, accountId, conv.id, 'daily-digest');
   });
 }
 
@@ -360,7 +361,7 @@ async function checkDaily() {
 async function checkEscalations() {
   const now = Math.floor(Date.now() / 1000);
 
-  const escalated = followupsDb.getPendingResponses(db).filter(conv => {
+  const escalated = claudiaDb.getPendingResponses(db, accountId).filter(conv => {
     const age = now - conv.last_activity;
     const threshold = CONFIG.thresholds.escalation[conv.type];
 
@@ -387,8 +388,8 @@ async function checkEscalations() {
   log.warn({ count: escalated.length, items: escalated.map(c => ({ id: c.id, type: c.type, from: c.from_name || c.from_user })) }, 'Sent escalation notification');
 
   escalated.forEach(conv => {
-    followupsDb.markNotified(db, conv.id);
-    followupsDb.logNotification(db, conv.id, 'escalation');
+    claudiaDb.markNotified(db, conv.id);
+    claudiaDb.logNotification(db, accountId, conv.id, 'escalation');
   });
 }
 
@@ -415,8 +416,15 @@ async function main() {
   log.info({ checkIntervalMin: CONFIG.checkInterval / 60000 }, 'Follow-Up Checker starting');
 
   // Initialize database
-  db = followupsDb.initDatabase();
-  log.info('Database initialized');
+  db = claudiaDb.initDatabase();
+  const primaryAccount = claudiaDb.upsertAccount(db, {
+    email: config.gmailAccount,
+    provider: 'gmail',
+    display_name: 'Primary',
+    is_primary: 1
+  });
+  accountId = primaryAccount.id;
+  log.info('Claudia DB initialized');
 
   // Initial check
   await runChecks();
