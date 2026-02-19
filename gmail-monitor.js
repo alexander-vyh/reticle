@@ -421,12 +421,13 @@ function applyUserRules(email) {
 function applyRuleBasedFilter(email) {
   const from = email.from.toLowerCase();
   const subject = email.subject.toLowerCase();
+  const to = (email.to || '').toLowerCase();
 
   // De-duplicate: archive DW-forwarded copies of emails that also arrive directly
   if (from.includes('via digital workplace')) {
     const dwDuplicateSenders = [
       'datadog', 'cursor', 'google workspace alerts', "'google'",
-      'slack', 'atlassian', 'warmly', 'otter.ai'
+      'slack', 'atlassian', 'warmly', 'otter.ai', 'pagerduty', 'lotame'
     ];
     if (dwDuplicateSenders.some(s => from.includes(s))) {
       return { action: 'archive', reason: 'DW duplicate (direct copy exists)' };
@@ -434,12 +435,14 @@ function applyRuleBasedFilter(email) {
   }
 
   // Auto-archive rules (noise, but keep in archive)
-  if (from.includes("' via it") && !from.includes('@' + config.filterPatterns.companyDomain)) {
-    return { action: 'archive', reason: 'Kantata via IT notification' };
+  // Archive IT group forwards only if addressed solely to the IT list (not also to user)
+  if (from.includes('via it') && to.includes('it@' + config.filterPatterns.companyDomain) &&
+      !to.includes(CONFIG.gmailAccount)) {
+    return { action: 'archive', reason: 'IT group-only notification' };
   }
 
-  if (from.includes('no-reply@zoom.us') && subject.includes('has joined')) {
-    return { action: 'archive', reason: 'Zoom join notification' };
+  if (from.includes('no-reply@zoom.us')) {
+    return { action: 'archive', reason: 'Zoom notification' };
   }
 
   // Archive automated Role Group Audit notifications (DW automation)
@@ -499,10 +502,9 @@ function applyRuleBasedFilter(email) {
     return { action: 'archive', reason: 'Atlassian admin notification' };
   }
 
-  // Archive Vanta Trust Center access requests (automated vendor requests)
-  if (from.includes('no-reply@vanta.com') &&
-      subject.includes('would like access to your trust center')) {
-    return { action: 'archive', reason: 'Vanta Trust Center request' };
+  // Archive Vanta automated emails (Trust Center requests, marketing)
+  if (from.includes('vanta.com')) {
+    return { action: 'archive', reason: 'Vanta notification' };
   }
 
   // Archive MxToolBox blacklist summaries
@@ -520,66 +522,68 @@ function applyRuleBasedFilter(email) {
     return { action: 'archive', reason: 'CISA bulletin' };
   }
 
-  // Delete Slack email notification summaries (redundant with Slack itself)
+  // Archive Slack email notification summaries (redundant with Slack itself)
   if (from.includes('feedback@slack.com') || (from.includes('slack') && subject.match(/notifications in .* for /i))) {
-    return { action: 'delete', reason: 'Slack email digest' };
+    return { action: 'archive', reason: 'Slack email digest' };
   }
 
-  // Delete GCP alerts (managed elsewhere)
+  // Archive GCP alerts (managed in GCP console)
   if (from.includes('alerting-noreply@google.com') && subject.includes('[alert')) {
-    return { action: 'delete', reason: 'GCP alerts (handled in GCP console)' };
+    return { action: 'archive', reason: 'GCP alerts (handled in GCP console)' };
   }
 
-  // Auto-delete/unsubscribe rules (spam/marketing)
+  // Archive marketing/vendor noise
   if (from.match(/@(cio\.com|grouptogether\.com)/)) {
-    return { action: 'delete', reason: 'External marketing' };
+    return { action: 'archive', reason: 'External marketing' };
   }
 
   if (subject.match(/webcast|webinar|newsletter/i) && !from.includes('@' + config.filterPatterns.companyDomain)) {
-    return { action: 'delete', reason: 'Marketing content' };
+    return { action: 'archive', reason: 'Marketing content' };
   }
 
-  // Product marketing / vendor spam (unsubscribed or unwanted)
   if (from.includes('hello@warmly.ai') || from.includes('warmly.ai')) {
-    return { action: 'delete', reason: 'Warmly marketing' };
+    return { action: 'archive', reason: 'Warmly marketing' };
   }
   if (from.includes('@dtdg.co') && subject.match(/digest/i)) {
-    return { action: 'delete', reason: 'Datadog digest' };
+    return { action: 'archive', reason: 'Datadog digest' };
   }
   if (from.includes('team@mail.cursor.com')) {
-    return { action: 'delete', reason: 'Cursor marketing' };
+    return { action: 'archive', reason: 'Cursor marketing' };
   }
   if (from.includes('otter.ai')) {
-    return { action: 'delete', reason: 'Otter.ai notifications' };
+    return { action: 'archive', reason: 'Otter.ai notifications' };
   }
   if (from.includes('brighttalk.com')) {
-    return { action: 'delete', reason: 'BrightTALK marketing' };
+    return { action: 'archive', reason: 'BrightTALK marketing' };
   }
   if (from.includes('tropicapp.io')) {
-    return { action: 'delete', reason: 'Tropic marketing' };
+    return { action: 'archive', reason: 'Tropic marketing' };
   }
   if (from.includes('commvault.com') && !from.includes('@' + config.filterPatterns.companyDomain)) {
-    return { action: 'delete', reason: 'Commvault marketing' };
+    return { action: 'archive', reason: 'Commvault marketing' };
   }
   if (from.includes('stoneflymail')) {
-    return { action: 'delete', reason: 'Cold outreach spam' };
+    return { action: 'archive', reason: 'Cold outreach' };
   }
   if (from.includes('brightenergywellness')) {
-    return { action: 'delete', reason: 'Spam' };
+    return { action: 'archive', reason: 'Cold outreach' };
   }
   if (from.includes('trycomp.ai')) {
-    return { action: 'delete', reason: 'Comp AI marketing' };
+    return { action: 'archive', reason: 'Comp AI marketing' };
   }
 
-  // Vendor cold outreach / sales spam
+  // Vendor cold outreach
   if (from.includes('akeyless.io')) {
-    return { action: 'delete', reason: 'Vendor outreach (Akeyless)' };
+    return { action: 'archive', reason: 'Vendor outreach (Akeyless)' };
   }
   if (from.includes('lumos.com')) {
-    return { action: 'delete', reason: 'Vendor outreach (Lumos)' };
+    return { action: 'archive', reason: 'Vendor outreach (Lumos)' };
   }
   if (from.includes('mailboxmerchants.com')) {
-    return { action: 'delete', reason: 'Vendor outreach (Mailbox Merchants)' };
+    return { action: 'archive', reason: 'Vendor outreach (Mailbox Merchants)' };
+  }
+  if (from.includes('solarwinds.com')) {
+    return { action: 'archive', reason: 'Vendor outreach (SolarWinds)' };
   }
 
   // Keep for batch/AI review
@@ -1146,16 +1150,18 @@ async function checkEmails() {
       // Track in follow-ups database with urgency metadata
       trackEmailConversation(followupsDbConn, email, 'incoming', { urgency: 'urgent', reason: urgency.reason });
     } else {
-      // Add to batch queue for later summary
-      batchQueue.push({
-        from: email.from,
-        subject: email.subject,
-        date: email.date,
-        id: email.id,
-        threadId: email.threadId
-      });
-      // Track in follow-ups database with batch metadata
-      trackEmailConversation(followupsDbConn, email, 'incoming', { urgency: 'batch' });
+      // Add to batch queue for later summary (skip if already queued)
+      if (!batchQueue.some(e => e.id === email.id)) {
+        batchQueue.push({
+          from: email.from,
+          subject: email.subject,
+          date: email.date,
+          id: email.id,
+          threadId: email.threadId
+        });
+        // Track in follow-ups database with batch metadata
+        trackEmailConversation(followupsDbConn, email, 'incoming', { urgency: 'batch' });
+      }
     }
   }
 
