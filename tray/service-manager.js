@@ -1,6 +1,20 @@
 'use strict';
 
 const { execSync } = require('child_process');
+const fs = require('fs');
+const path = require('path');
+const os = require('os');
+
+const HEARTBEAT_DIR = path.join(os.homedir(), '.config', 'claudia', 'heartbeats');
+
+// Map launchd labels to heartbeat service names
+const HEARTBEAT_NAMES = {
+  'ai.openclaw.gmail-monitor': 'gmail-monitor',
+  'ai.openclaw.slack-monitor': 'slack-monitor',
+  'ai.openclaw.slack-events': 'slack-events',
+  'com.openclaw.meeting-alerts': 'meeting-alerts',
+  'ai.openclaw.gateway': null,  // Gateway doesn't write heartbeats (yet)
+};
 
 const SERVICES = [
   { label: 'Gmail Monitor',      launchdLabel: 'ai.claudia.gmail-monitor' },
@@ -37,21 +51,54 @@ function getUID() {
   return cachedUID;
 }
 
+function readHeartbeat(launchdLabel) {
+  const name = HEARTBEAT_NAMES[launchdLabel];
+  if (!name) return null;
+  try {
+    const raw = fs.readFileSync(path.join(HEARTBEAT_DIR, `${name}.json`), 'utf8');
+    return JSON.parse(raw);
+  } catch {
+    return null;
+  }
+}
+
+function evaluateHeartbeat(hb) {
+  if (!hb) return { health: 'unknown', detail: null, errorCount: 0 };
+  if (hb.status === 'startup-failed') {
+    return { health: 'startup-failed', detail: hb.errors ? hb.errors.lastError : 'Unknown error', errorCount: 0 };
+  }
+  if (hb.status === 'error' || hb.status === 'degraded') {
+    return { health: hb.status, detail: hb.errors ? hb.errors.lastError : null, errorCount: hb.errors ? hb.errors.countSinceStart : 0 };
+  }
+  if (hb.status === 'shutting-down') {
+    return { health: 'shutting-down', detail: null, errorCount: 0 };
+  }
+  const age = Date.now() - hb.lastCheck;
+  if (age > hb.checkInterval * 3) {
+    return { health: 'unresponsive', detail: `No heartbeat for ${Math.round(age / 60000)}m`, errorCount: 0 };
+  }
+  return { health: 'healthy', detail: null, errorCount: hb.errors ? hb.errors.countSinceStart : 0 };
+}
+
 function getStatuses() {
   let output;
   try {
     output = execSync('launchctl list', { encoding: 'utf8', timeout: 5000 });
   } catch (e) {
-    return SERVICES.map(s => ({ ...s, status: 'unknown', pid: null, exitCode: null }));
+    return SERVICES.map(s => ({ ...s, status: 'unknown', pid: null, exitCode: null, heartbeat: null, heartbeatHealth: null }));
   }
   const parsed = parseLaunchctlList(output);
   return SERVICES.map(svc => {
     const entry = parsed[svc.launchdLabel];
+    const hb = readHeartbeat(svc.launchdLabel);
+    const hbHealth = evaluateHeartbeat(hb);
     return {
       ...svc,
       status: statusFromEntry(entry),
       pid: entry ? entry.pid : null,
-      exitCode: entry ? entry.exitCode : null
+      exitCode: entry ? entry.exitCode : null,
+      heartbeat: hb,
+      heartbeatHealth: hbHealth
     };
   });
 }
@@ -68,4 +115,4 @@ function restartService(launchdLabel) {
   execSync(`launchctl kickstart -k gui/${getUID()}/${launchdLabel}`, { timeout: 5000 });
 }
 
-module.exports = { SERVICES, parseLaunchctlList, statusFromEntry, getStatuses, startService, stopService, restartService };
+module.exports = { SERVICES, parseLaunchctlList, statusFromEntry, getStatuses, startService, stopService, restartService, readHeartbeat, evaluateHeartbeat };
