@@ -10,7 +10,7 @@ const WebSocket = require('ws');
 const { execSync } = require('child_process');
 const crypto = require('crypto');
 const emailCache = require('./email-cache');
-const followupsDb = require('./followups-db');
+const claudiaDb = require('./claudia-db');
 const { parseSenderEmail, formatRuleDescription } = require('./lib/email-utils');
 const { parseRuleRefinement } = require('./lib/ai');
 const log = require('./lib/logger')('slack-events');
@@ -34,6 +34,7 @@ let pendingMessages = {};
 let ws = null;
 let reconnectTimeout = null;
 let followupsDbConn = null;
+let accountId = null;
 
 // Active "Match differently" thread conversations: threadTs → { emailMeta, ruleType, currentConditions, ruleId, channel }
 const ruleRefinementThreads = new Map();
@@ -182,14 +183,12 @@ function trackSlackConversation(db, event, direction) {
     const lastSender = direction === 'incoming' ? 'them' : 'me';
     const waitingFor = direction === 'incoming' ? 'my-response' : 'their-response';
 
-    followupsDb.trackConversation(db, {
+    claudiaDb.trackConversation(db, accountId, {
       id: conversationId,
       type: conversationType,
       subject: event.text ? event.text.substring(0, 100) : null,
       from_user: event.user,
       from_name: event.username || event.user,
-      channel_id: event.channel_type === 'im' ? null : event.channel,
-      channel_name: null, // Will be enriched later if needed
       last_activity: Math.floor(parseFloat(event.ts)),
       last_sender: lastSender,
       waiting_for: waitingFor,
@@ -728,14 +727,15 @@ async function handleClassifyAction(action, channel, userId, messageTs) {
     const suggestedConditions = { ruleType: actionType, matchFrom: senderEmail, matchTo: toMatch };
     const description = `FROM ${senderEmail} AND TO ${toMatch}`;
     // Create the rule provisionally to get an ID, but we could also just pass args
-    const ruleId = followupsDb.createRule(followupsDbConn, {
-      ruleType: actionType, matchFrom: senderEmail, matchTo: toMatch,
-      sourceEmail: meta.from, sourceSubject: meta.subject
+    const ruleRow = claudiaDb.createRule(followupsDbConn, accountId, {
+      rule_type: actionType, match_from: senderEmail, match_to: toMatch,
+      source_email: meta.from, source_subject: meta.subject
     });
+    const ruleId = ruleRow.id;
     // Immediately deactivate — it's a proposal, not yet accepted
-    followupsDb.deactivateRule(followupsDbConn, ruleId);
+    claudiaDb.deactivateRule(followupsDbConn, ruleId);
 
-    const defaultRuleArgs = JSON.stringify({ ruleType: actionType, matchFrom: senderEmail, sourceEmail: meta.from, sourceSubject: meta.subject });
+    const defaultRuleArgs = JSON.stringify({ rule_type: actionType, match_from: senderEmail, source_email: meta.from, source_subject: meta.subject });
     const actionLabel = immediateAction === 'archive' ? '✓ Archived this email\n' : immediateAction === 'delete' ? '✓ Trashed this email\n' : '';
     const blocks = buildRuleConfirmationBlocks(actionType, description, ruleId, {
       suggested: true,
@@ -753,11 +753,12 @@ async function handleClassifyAction(action, channel, userId, messageTs) {
     }
   } else {
     // Default: simple sender rule — create immediately
-    const ruleId = followupsDb.createRule(followupsDbConn, {
-      ruleType: actionType, matchFrom: senderEmail,
-      sourceEmail: meta.from, sourceSubject: meta.subject
+    const ruleRow2 = claudiaDb.createRule(followupsDbConn, accountId, {
+      rule_type: actionType, match_from: senderEmail,
+      source_email: meta.from, source_subject: meta.subject
     });
-    const description = formatRuleDescription(followupsDb.getRuleById(followupsDbConn, ruleId));
+    const ruleId = ruleRow2.id;
+    const description = formatRuleDescription(claudiaDb.getRuleById(followupsDbConn, ruleId));
     const actionLabel = immediateAction === 'archive' ? '✓ Archived this email\n' : immediateAction === 'delete' ? '✓ Trashed this email\n' : '';
     const blocks = buildRuleConfirmationBlocks(actionType, description, ruleId);
     if (actionLabel) {
@@ -819,11 +820,13 @@ async function handleRuleRefinementReply(event) {
   });
 
   // Create the proposed rule (deactivated until confirmed)
-  const newRuleId = followupsDb.createRule(followupsDbConn, {
-    ruleType: ctx.ruleType, ...result,
-    sourceEmail: ctx.emailMeta.from, sourceSubject: ctx.emailMeta.subject
+  const newRuleRow = claudiaDb.createRule(followupsDbConn, accountId, {
+    rule_type: ctx.ruleType, match_from: result.matchFrom, match_from_domain: result.matchFromDomain,
+    match_to: result.matchTo, match_subject_contains: result.matchSubjectContains,
+    source_email: ctx.emailMeta.from, source_subject: ctx.emailMeta.subject
   });
-  followupsDb.deactivateRule(followupsDbConn, newRuleId);
+  const newRuleId = newRuleRow.id;
+  claudiaDb.deactivateRule(followupsDbConn, newRuleId);
 
   // Update context with new proposal
   ctx.currentConditions = result;
@@ -891,7 +894,7 @@ async function handleInteractive(payload) {
         case 'mark_replied':
           // Flip conversation state — still waiting for their reply back
           if (threadId && followupsDbConn) {
-            followupsDb.updateConversationState(followupsDbConn, `email:${threadId}`, 'me', 'their-response');
+            claudiaDb.updateConversationState(followupsDbConn, `email:${threadId}`, 'me', 'their-response');
           }
           result = { success: true, message: '✓ Marked as replied' };
           break;
@@ -899,7 +902,7 @@ async function handleInteractive(payload) {
         case 'mark_no_response_needed':
           // Resolve outright — this email doesn't need a reply
           if (threadId && followupsDbConn) {
-            followupsDb.resolveConversation(followupsDbConn, `email:${threadId}`);
+            claudiaDb.resolveConversation(followupsDbConn, `email:${threadId}`);
           }
           result = { success: true, message: '✓ Marked as no reply needed' };
           break;
@@ -921,12 +924,12 @@ async function handleInteractive(payload) {
           const ruleId = parseInt(action.value);
           if (followupsDbConn) {
             // Reactivate the previously deactivated proposed rule
-            followupsDb.createRule(followupsDbConn, (() => {
-              const r = followupsDb.getRuleById(followupsDbConn, ruleId);
-              if (!r) return { ruleType: 'archive' }; // fallback
-              return { ruleType: r.rule_type, matchFrom: r.match_from, matchFromDomain: r.match_from_domain, matchTo: r.match_to, matchSubjectContains: r.match_subject_contains, sourceEmail: r.source_email, sourceSubject: r.source_subject };
+            claudiaDb.createRule(followupsDbConn, accountId, (() => {
+              const r = claudiaDb.getRuleById(followupsDbConn, ruleId);
+              if (!r) return { rule_type: 'archive' }; // fallback
+              return { rule_type: r.rule_type, match_from: r.match_from, match_from_domain: r.match_from_domain, match_to: r.match_to, match_subject_contains: r.match_subject_contains, source_email: r.source_email, source_subject: r.source_subject };
             })());
-            const rule = followupsDb.getRuleById(followupsDbConn, ruleId);
+            const rule = claudiaDb.getRuleById(followupsDbConn, ruleId);
             const desc = rule ? formatRuleDescription(rule) : 'unknown';
             result = { success: true, message: `✓ Rule created: ${rule?.rule_type || 'archive'} when ${desc}` };
           }
@@ -942,10 +945,9 @@ async function handleInteractive(payload) {
             const args = JSON.parse(argsJson);
             if (followupsDbConn) {
               // Deactivate the compound proposal
-              followupsDb.deactivateRule(followupsDbConn, proposedRuleId);
+              claudiaDb.deactivateRule(followupsDbConn, proposedRuleId);
               // Create the simple sender rule
-              const newId = followupsDb.createRule(followupsDbConn, args);
-              const rule = followupsDb.getRuleById(followupsDbConn, newId);
+              const rule = claudiaDb.createRule(followupsDbConn, accountId, args);
               const desc = rule ? formatRuleDescription(rule) : 'unknown';
               result = { success: true, message: `✓ Rule created: ${rule?.rule_type || 'archive'} when ${desc}` };
             }
@@ -959,8 +961,8 @@ async function handleInteractive(payload) {
         case 'undo_rule': {
           const ruleId = parseInt(action.value);
           if (followupsDbConn) {
-            const rule = followupsDb.getRuleById(followupsDbConn, ruleId);
-            followupsDb.deactivateRule(followupsDbConn, ruleId);
+            const rule = claudiaDb.getRuleById(followupsDbConn, ruleId);
+            claudiaDb.deactivateRule(followupsDbConn, ruleId);
             result = { success: true, message: `✓ Rule removed. Emails${rule?.match_from ? ` from ${rule.match_from}` : ''} will appear normally.` };
           }
           break;
@@ -1008,12 +1010,12 @@ async function handleInteractive(payload) {
           const ruleId = parseInt(action.value);
           if (followupsDbConn) {
             // Reactivate it
-            const rule = followupsDb.getRuleById(followupsDbConn, ruleId);
+            const rule = claudiaDb.getRuleById(followupsDbConn, ruleId);
             if (rule) {
-              followupsDb.createRule(followupsDbConn, {
-                ruleType: rule.rule_type, matchFrom: rule.match_from, matchFromDomain: rule.match_from_domain,
-                matchTo: rule.match_to, matchSubjectContains: rule.match_subject_contains,
-                sourceEmail: rule.source_email, sourceSubject: rule.source_subject
+              claudiaDb.createRule(followupsDbConn, accountId, {
+                rule_type: rule.rule_type, match_from: rule.match_from, match_from_domain: rule.match_from_domain,
+                match_to: rule.match_to, match_subject_contains: rule.match_subject_contains,
+                source_email: rule.source_email, source_subject: rule.source_subject
               });
               const desc = formatRuleDescription(rule);
               result = { success: true, message: `✓ Rule created: ${rule.rule_type} when ${desc}` };
@@ -1022,7 +1024,7 @@ async function handleInteractive(payload) {
               if (threadTs) {
                 const ctx = ruleRefinementThreads.get(threadTs);
                 if (ctx && ctx.ruleId !== ruleId) {
-                  followupsDb.deactivateRule(followupsDbConn, ctx.ruleId);
+                  claudiaDb.deactivateRule(followupsDbConn, ctx.ruleId);
                 }
                 ruleRefinementThreads.delete(threadTs);
               }
@@ -1043,9 +1045,9 @@ async function handleInteractive(payload) {
           // User confirmed a domain-level rule
           const [ruleType, domain, sourceEmail, sourceSubject] = (action.value || '').split('|');
           if (followupsDbConn && ruleType && domain) {
-            const ruleId = followupsDb.createRule(followupsDbConn, {
-              ruleType, matchFromDomain: domain,
-              sourceEmail: sourceEmail || null, sourceSubject: sourceSubject || null
+            claudiaDb.createRule(followupsDbConn, accountId, {
+              rule_type: ruleType, match_from_domain: domain,
+              source_email: sourceEmail || null, source_subject: sourceSubject || null
             });
             result = { success: true, message: `✓ Rule created: ${ruleType} when FROM DOMAIN @${domain}` };
           }
@@ -1075,7 +1077,7 @@ async function handleInteractive(payload) {
 
       // Resolve email conversation in follow-ups when archived/deleted/unsubscribed
       if (followupsDbConn && threadId && ['archive_email', 'delete_email', 'unsubscribe_email'].includes(actionId)) {
-        followupsDb.resolveConversation(followupsDbConn, `email:${threadId}`);
+        claudiaDb.resolveConversation(followupsDbConn, `email:${threadId}`);
       }
     } catch (error) {
       const durationMs = Date.now() - startTime;
@@ -1299,8 +1301,15 @@ async function main() {
 
   // Initialize follow-ups database
   try {
-    followupsDbConn = followupsDb.initDatabase();
-    log.info('Follow-ups tracking initialized');
+    followupsDbConn = claudiaDb.initDatabase();
+    const primaryAccount = claudiaDb.upsertAccount(followupsDbConn, {
+      email: CONFIG.gmailAccount,
+      provider: 'gmail',
+      display_name: 'Primary',
+      is_primary: 1
+    });
+    accountId = primaryAccount.id;
+    log.info('Claudia DB initialized');
   } catch (error) {
     log.error({ err: error }, 'Failed to init follow-ups DB');
   }
