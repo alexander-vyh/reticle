@@ -9,7 +9,7 @@ const fs = require('fs');
 const https = require('https');
 const path = require('path');
 const emailCache = require('./email-cache');
-const followupsDb = require('./followups-db');
+const claudiaDb = require('./claudia-db');
 const { parseSenderEmail, formatRuleDescription } = require('./lib/email-utils');
 const log = require('./lib/logger')('gmail-monitor');
 const config = require('./lib/config');
@@ -54,6 +54,7 @@ let lastHealthCheckHour = -1;
 
 // Follow-ups database connection
 let followupsDbConn = null;
+let accountId = null;
 
 // Sent-mail detection: use wider window on first run to cover restart gaps
 let sentMailFirstRun = true;
@@ -373,7 +374,7 @@ let userRules = [];
 function loadUserRules() {
   if (!followupsDbConn) return;
   try {
-    userRules = followupsDb.getActiveRules(followupsDbConn);
+    userRules = claudiaDb.getActiveRules(followupsDbConn, accountId);
     if (userRules.length > 0) {
       log.info({ count: userRules.length }, 'Loaded user email rules');
     }
@@ -406,7 +407,7 @@ function applyUserRules(email) {
     if (rule.match_subject_contains && !subject.includes(rule.match_subject_contains)) continue;
 
     // Record the hit (fire-and-forget — don't block on DB write)
-    try { followupsDb.recordRuleHit(followupsDbConn, rule.id); } catch { /* ignore */ }
+    try { claudiaDb.recordRuleHit(followupsDbConn, rule.id); } catch { /* ignore */ }
 
     return { action: rule.rule_type, reason: `Learned: ${formatRuleDescription(rule)}`, ruleId: rule.id };
   }
@@ -800,7 +801,7 @@ function trackEmailConversation(db, email, direction, metadata) {
     // Extract sender display name using shared utility
     const fromName = parseSenderEmail(email.from).display;
 
-    followupsDb.trackConversation(db, {
+    claudiaDb.trackConversation(db, accountId, {
       id: threadId,
       type: 'email',
       subject: email.subject,
@@ -983,7 +984,7 @@ async function checkSentEmails() {
     }
 
     // Get all pending email conversations
-    const pending = followupsDb.getPendingResponses(followupsDbConn, { type: 'email' });
+    const pending = claudiaDb.getPendingResponses(followupsDbConn, accountId, { type: 'email' });
     if (pending.length === 0) {
       log.debug('No pending email conversations to match against');
       return;
@@ -1005,7 +1006,7 @@ async function checkSentEmails() {
       // Idempotency: skip if already flipped
       if (conv.waiting_for === 'their-response') continue;
 
-      followupsDb.updateConversationState(followupsDbConn, conv.id, 'me', 'their-response');
+      claudiaDb.updateConversationState(followupsDbConn, conv.id, 'me', 'their-response');
       flipped++;
     }
 
@@ -1235,7 +1236,7 @@ async function maybeSendHealthCheck() {
   let rulesLine = '';
   try {
     if (followupsDbConn) {
-      const rulesSummary = followupsDb.getRulesSummary(followupsDbConn);
+      const rulesSummary = claudiaDb.getRulesSummary(followupsDbConn, accountId);
       if (rulesSummary.total > 0) {
         const topLines = rulesSummary.top.map((r, i) =>
           `    ${i + 1}. ${r.rule_type.charAt(0).toUpperCase() + r.rule_type.slice(1)} ${formatRuleDescription(r)} (${r.hit_count} hits)`
@@ -1286,8 +1287,15 @@ async function main() {
 
   // Initialize follow-ups database
   try {
-    followupsDbConn = followupsDb.initDatabase();
-    log.info('Follow-ups tracking initialized');
+    followupsDbConn = claudiaDb.initDatabase();
+    const primaryAccount = claudiaDb.upsertAccount(followupsDbConn, {
+      email: CONFIG.gmailAccount,
+      provider: 'gmail',
+      display_name: 'Primary',
+      is_primary: 1
+    });
+    accountId = primaryAccount.id;
+    log.info('Claudia DB initialized');
   } catch (error) {
     log.error({ err: error }, 'Failed to init follow-ups DB');
   }
