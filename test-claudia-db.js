@@ -307,3 +307,50 @@ assert.strictEqual(check3.confirmed, true);
 console.log('PASS: confirmUnsubscribe');
 
 console.log('\n--- Task 4 unsubscribe tests passed ---');
+
+// --- Test: createRule ---
+const rule = claudiaDb.createRule(db, acct.id, {
+  rule_type: 'archive',
+  match_from: 'noreply@zoom.us',
+  source_email: 'noreply@zoom.us',
+  source_subject: 'Meeting reminder'
+});
+assert.ok(rule.id);
+assert.strictEqual(rule.rule_type, 'archive');
+console.log('PASS: createRule');
+
+// --- Test: getActiveRules ---
+const rules = claudiaDb.getActiveRules(db, acct.id);
+assert.ok(rules.length >= 1);
+assert.strictEqual(rules[0].match_from, 'noreply@zoom.us');
+console.log('PASS: getActiveRules');
+
+// --- Test: recordRuleHit ---
+claudiaDb.recordRuleHit(db, rule.id);
+claudiaDb.recordRuleHit(db, rule.id);
+const hitRule = claudiaDb.getRuleById(db, rule.id);
+assert.strictEqual(hitRule.hit_count, 2);
+console.log('PASS: recordRuleHit');
+
+// --- Test: deactivateRule ---
+claudiaDb.deactivateRule(db, rule.id);
+const deactivated = claudiaDb.getRuleById(db, rule.id);
+assert.strictEqual(deactivated.active, 0);
+const activeRules = claudiaDb.getActiveRules(db, acct.id);
+assert.strictEqual(activeRules.filter(r => r.match_from === 'noreply@zoom.us').length, 0);
+console.log('PASS: deactivateRule');
+
+// --- Test: getRulesSummary ---
+// Re-create for summary test
+claudiaDb.createRule(db, acct.id, { rule_type: 'archive', match_from_domain: 'example.com' });
+const summary = claudiaDb.getRulesSummary(db, acct.id);
+assert.ok(summary.total >= 1);
+console.log('PASS: getRulesSummary');
+
+// --- Test: no delete rules allowed ---
+assert.throws(() => {
+  claudiaDb.createRule(db, acct.id, { rule_type: 'delete', match_from: 'spam@bad.com' });
+}, /delete rules are not allowed/i);
+console.log('PASS: delete rules blocked');
+
+console.log('\n--- Task 5 email_rules tests passed ---');
