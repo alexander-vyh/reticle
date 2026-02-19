@@ -3,11 +3,11 @@
 const { execSync } = require('child_process');
 
 const SERVICES = [
-  { label: 'Meeting Alerts', launchdLabel: 'com.openclaw.meeting-alerts' },
-  { label: 'Gmail Monitor',  launchdLabel: 'ai.openclaw.gmail-monitor' },
-  { label: 'Slack Monitor',  launchdLabel: 'ai.openclaw.slack-monitor' },
-  { label: 'Slack Events',   launchdLabel: 'ai.openclaw.slack-events' },
-  { label: 'Gateway',        launchdLabel: 'ai.openclaw.gateway' },
+  { label: 'Gmail Monitor',      launchdLabel: 'ai.claudia.gmail-monitor' },
+  { label: 'Slack Events',       launchdLabel: 'ai.claudia.slack-events' },
+  { label: 'Meeting Alerts',     launchdLabel: 'ai.claudia.meeting-alerts' },
+  { label: 'Follow-up Checker',  launchdLabel: 'ai.claudia.followup-checker' },
+  { label: 'Gateway',            launchdLabel: 'ai.openclaw.gateway' },
 ];
 
 function parseLaunchctlList(output) {
