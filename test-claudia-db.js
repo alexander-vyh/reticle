@@ -201,3 +201,71 @@ assert.strictEqual(updated.subject, 'Okta rate limit warning (updated)');
 console.log('PASS: upsertEmail idempotent');
 
 console.log('\n--- Task 2 email tests passed ---');
+
+// --- Test: trackConversation ---
+const now = Math.floor(Date.now() / 1000);
+claudiaDb.trackConversation(db, acct.id, {
+  id: 'email:thread-1',
+  type: 'email',
+  subject: 'Q1 Budget Review',
+  from_user: 'boss@example.com',
+  from_name: 'Boss',
+  last_sender: 'them',
+  waiting_for: 'my-response',
+  metadata: { urgency: 'high' }
+});
+
+const conv = db.prepare('SELECT * FROM conversations WHERE id = ?').get('email:thread-1');
+assert.strictEqual(conv.type, 'email');
+assert.strictEqual(conv.subject, 'Q1 Budget Review');
+assert.strictEqual(conv.waiting_for, 'my-response');
+assert.strictEqual(conv.account_id, acct.id);
+console.log('PASS: trackConversation');
+
+// --- Test: updateConversationState ---
+claudiaDb.updateConversationState(db, 'email:thread-1', 'me', 'their-response');
+const updated2 = db.prepare('SELECT * FROM conversations WHERE id = ?').get('email:thread-1');
+assert.strictEqual(updated2.waiting_for, 'their-response');
+console.log('PASS: updateConversationState');
+
+// --- Test: getPendingResponses ---
+// Flip back to my-response for this test
+claudiaDb.updateConversationState(db, 'email:thread-1', 'them', 'my-response');
+const pending = claudiaDb.getPendingResponses(db, acct.id, { type: 'email' });
+assert.strictEqual(pending.length, 1);
+assert.strictEqual(pending[0].id, 'email:thread-1');
+console.log('PASS: getPendingResponses');
+
+// --- Test: resolveConversation ---
+claudiaDb.resolveConversation(db, 'email:thread-1');
+const resolved = db.prepare('SELECT * FROM conversations WHERE id = ?').get('email:thread-1');
+assert.ok(resolved.resolved_at);
+assert.strictEqual(resolved.state, 'resolved');
+console.log('PASS: resolveConversation');
+
+// --- Test: getAwaitingReplies ---
+claudiaDb.trackConversation(db, acct.id, {
+  id: 'email:thread-2',
+  type: 'email',
+  subject: 'Pending question',
+  from_user: 'me@example.com',
+  from_name: 'Me',
+  last_sender: 'me',
+  waiting_for: 'their-response'
+});
+const awaiting = claudiaDb.getAwaitingReplies(db, acct.id, {});
+assert.ok(awaiting.length >= 1);
+console.log('PASS: getAwaitingReplies');
+
+// --- Test: getResolvedToday ---
+// Includes both explicitly resolved AND flipped-to-their-response today
+const resolvedToday = claudiaDb.getResolvedToday(db, acct.id, 'email');
+assert.ok(resolvedToday.length >= 1);
+console.log('PASS: getResolvedToday');
+
+// --- Test: getStats ---
+const stats = claudiaDb.getStats(db, acct.id);
+assert.ok(stats.total >= 1);
+console.log('PASS: getStats');
+
+console.log('\n--- Task 3 conversation tests passed ---');

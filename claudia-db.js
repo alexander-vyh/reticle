@@ -362,6 +362,139 @@ function getEmailsByThread(db, accountId, threadId) {
     .all(accountId, threadId);
 }
 
+// --- Conversations ---
+
+function trackConversation(db, accountId, conversation) {
+  const now = Math.floor(Date.now() / 1000);
+  const stmt = db.prepare(`
+    INSERT INTO conversations (
+      id, account_id, type, subject, participants, state, waiting_for,
+      urgency, first_seen, last_activity, metadata
+    ) VALUES (
+      @id, @account_id, @type, @subject, @participants, 'active', @waiting_for,
+      @urgency, @first_seen, @last_activity, @metadata
+    )
+    ON CONFLICT(id) DO UPDATE SET
+      subject = COALESCE(@subject, conversations.subject),
+      last_activity = @last_activity,
+      waiting_for = @waiting_for,
+      updated_at = strftime('%s', 'now')
+  `);
+
+  return stmt.run({
+    id: conversation.id,
+    account_id: accountId,
+    type: conversation.type,
+    subject: conversation.subject || null,
+    participants: conversation.from_user || null,
+    waiting_for: conversation.waiting_for,
+    urgency: (conversation.metadata && conversation.metadata.urgency) || 'normal',
+    first_seen: conversation.first_seen || now,
+    last_activity: conversation.last_activity || now,
+    metadata: conversation.metadata ? JSON.stringify(conversation.metadata) : null
+  });
+}
+
+function updateConversationState(db, id, lastSender, waitingFor) {
+  return db.prepare(`
+    UPDATE conversations
+    SET waiting_for = ?, last_activity = strftime('%s','now'), updated_at = strftime('%s','now')
+    WHERE id = ? AND state = 'active'
+  `).run(waitingFor, id);
+}
+
+function resolveConversation(db, id) {
+  return db.prepare(`
+    UPDATE conversations
+    SET state = 'resolved', resolved_at = strftime('%s', 'now'), updated_at = strftime('%s', 'now')
+    WHERE id = ? AND resolved_at IS NULL
+  `).run(id);
+}
+
+function getPendingResponses(db, accountId, options = {}) {
+  const { type = null, olderThan = null, limit = null } = options;
+
+  let query = `
+    SELECT * FROM conversations
+    WHERE account_id = ? AND waiting_for = 'my-response' AND state = 'active'
+  `;
+  const params = [accountId];
+
+  if (type) {
+    query += ` AND type = ?`;
+    params.push(type);
+  }
+  if (olderThan) {
+    const threshold = Math.floor(Date.now() / 1000) - olderThan;
+    query += ` AND last_activity < ?`;
+    params.push(threshold);
+  }
+  query += ` ORDER BY last_activity ASC`;
+  if (limit) {
+    query += ` LIMIT ?`;
+    params.push(limit);
+  }
+
+  return db.prepare(query).all(...params);
+}
+
+function getAwaitingReplies(db, accountId, options = {}) {
+  const { type = null, olderThan = null, limit = null } = options;
+
+  let query = `
+    SELECT * FROM conversations
+    WHERE account_id = ? AND waiting_for = 'their-response' AND state = 'active'
+  `;
+  const params = [accountId];
+
+  if (type) {
+    query += ` AND type = ?`;
+    params.push(type);
+  }
+  if (olderThan) {
+    const threshold = Math.floor(Date.now() / 1000) - olderThan;
+    query += ` AND last_activity < ?`;
+    params.push(threshold);
+  }
+  query += ` ORDER BY last_activity ASC`;
+  if (limit) {
+    query += ` LIMIT ?`;
+    params.push(limit);
+  }
+
+  return db.prepare(query).all(...params);
+}
+
+function getResolvedToday(db, accountId, type) {
+  const startOfDay = new Date();
+  startOfDay.setHours(0, 0, 0, 0);
+  const epoch = Math.floor(startOfDay.getTime() / 1000);
+  let sql = `SELECT * FROM conversations
+    WHERE account_id = ? AND (resolved_at >= ? OR (waiting_for = 'their-response' AND updated_at >= ?))`;
+  const params = [accountId, epoch, epoch];
+  if (type) {
+    sql += ` AND type = ?`;
+    params.push(type);
+  }
+  return db.prepare(sql).all(...params);
+}
+
+function getStats(db, accountId) {
+  const rows = db.prepare(`
+    SELECT
+      type,
+      waiting_for,
+      COUNT(*) as count,
+      AVG(strftime('%s', 'now') - last_activity) as avg_age_seconds
+    FROM conversations
+    WHERE account_id = ? AND state = 'active'
+    GROUP BY type, waiting_for
+  `).all(accountId);
+
+  const total = rows.reduce((sum, r) => sum + r.count, 0);
+  return { total, breakdown: rows };
+}
+
 module.exports = {
   DB_PATH,
   ENTITY_TYPES,
@@ -379,4 +512,11 @@ module.exports = {
   upsertEmail,
   getEmailByGmailId,
   getEmailsByThread,
+  trackConversation,
+  updateConversationState,
+  resolveConversation,
+  getPendingResponses,
+  getAwaitingReplies,
+  getResolvedToday,
+  getStats,
 };
