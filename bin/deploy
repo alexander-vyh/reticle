@@ -1,0 +1,213 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Claudia Deploy Script
+# Usage: bin/deploy [--skip-pull] [--skip-install]
+
+CLAUDIA_HOME="$HOME/.claudia"
+REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+PLIST_DIR="$HOME/Library/LaunchAgents"
+UID_VAL=$(id -u)
+
+# Colors
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+RED='\033[0;31m'
+NC='\033[0m' # No Color
+
+info()  { echo -e "${GREEN}==>${NC} $1"; }
+warn()  { echo -e "${YELLOW}==>${NC} $1"; }
+error() { echo -e "${RED}==>${NC} $1"; }
+
+# Parse flags
+SKIP_PULL=false
+SKIP_INSTALL=false
+for arg in "$@"; do
+  case $arg in
+    --skip-pull) SKIP_PULL=true ;;
+    --skip-install) SKIP_INSTALL=true ;;
+  esac
+done
+
+# --- Step 1: Create directory structure ---
+info "Ensuring ~/.claudia/ directory structure..."
+mkdir -p "$CLAUDIA_HOME"/{app,data,logs,config}
+
+# --- Step 2: First-run migration ---
+# Config: ~/.config/claudia/ → ~/.claudia/config/
+if [ -d "$HOME/.config/claudia" ] && [ ! -f "$CLAUDIA_HOME/config/secrets.json" ]; then
+  info "Migrating config from ~/.config/claudia/ to ~/.claudia/config/..."
+  cp -n "$HOME/.config/claudia/"* "$CLAUDIA_HOME/config/" 2>/dev/null || true
+  warn "Old config left in place at ~/.config/claudia/ (remove manually when ready)"
+fi
+
+# Database: ~/.openclaw/workspace/claudia.db → ~/.claudia/data/
+if [ -f "$HOME/.openclaw/workspace/claudia.db" ] && [ ! -f "$CLAUDIA_HOME/data/claudia.db" ]; then
+  info "Migrating database from ~/.openclaw/workspace/ to ~/.claudia/data/..."
+  cp "$HOME/.openclaw/workspace/claudia.db" "$CLAUDIA_HOME/data/claudia.db"
+  # Copy WAL/SHM files if they exist
+  cp "$HOME/.openclaw/workspace/claudia.db-wal" "$CLAUDIA_HOME/data/claudia.db-wal" 2>/dev/null || true
+  cp "$HOME/.openclaw/workspace/claudia.db-shm" "$CLAUDIA_HOME/data/claudia.db-shm" 2>/dev/null || true
+  warn "Old database left in place at ~/.openclaw/workspace/ (remove manually when ready)"
+fi
+
+# --- Step 3: Pull latest ---
+if [ "$SKIP_PULL" = false ]; then
+  info "Pulling latest from main..."
+  cd "$REPO_DIR"
+  git pull origin main
+fi
+
+# --- Step 4: Install dependencies in repo ---
+if [ "$SKIP_INSTALL" = false ]; then
+  info "Installing dependencies in repo..."
+  cd "$REPO_DIR"
+  npm install --silent
+fi
+
+# --- Step 5: Sync code to ~/.claudia/app/ ---
+info "Syncing code to ~/.claudia/app/..."
+rsync -a --delete \
+  --exclude='.git' \
+  --exclude='node_modules' \
+  --exclude='tray' \
+  --exclude='docs' \
+  --exclude='sounds' \
+  --exclude='scripts' \
+  --exclude='bin' \
+  --exclude='test-*.js' \
+  --exclude='*.log' \
+  --exclude='*.sh' \
+  --exclude='*.pid' \
+  --exclude='*.db' \
+  --exclude='*.db-*' \
+  --exclude='.gitignore' \
+  --exclude='.github' \
+  --exclude='.claude' \
+  --exclude='.serena' \
+  --exclude='.worktrees' \
+  --exclude='.gastown-ignore' \
+  --exclude='CLAUDE.md' \
+  --exclude='email-cache' \
+  --exclude='*-state.json' \
+  --exclude='*-heartbeat.json' \
+  --exclude='*-batch-queue.json' \
+  --exclude='*-last-check.txt' \
+  "$REPO_DIR/" "$CLAUDIA_HOME/app/"
+
+# --- Step 6: Install production dependencies ---
+if [ "$SKIP_INSTALL" = false ]; then
+  info "Installing production dependencies in ~/.claudia/app/..."
+  cd "$CLAUDIA_HOME/app"
+  npm install --omit=dev --silent
+fi
+
+# --- Step 7: Generate and load launchd plists ---
+info "Generating launchd plists..."
+
+# Service definitions: label|js_file
+SERVICES=(
+  "gmail-monitor|gmail-monitor.js"
+  "slack-events|slack-events-monitor.js"
+  "meeting-alerts|meeting-alert-monitor.js"
+  "followup-checker|followup-checker.js"
+)
+
+for svc in "${SERVICES[@]}"; do
+  IFS='|' read -r label jsfile <<< "$svc"
+  plist_label="ai.claudia.$label"
+  plist_path="$PLIST_DIR/$plist_label.plist"
+
+  cat > "$plist_path" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>$plist_label</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/opt/homebrew/bin/node</string>
+    <string>$CLAUDIA_HOME/app/$jsfile</string>
+  </array>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>StandardOutPath</key>
+  <string>$CLAUDIA_HOME/logs/$label.log</string>
+  <key>StandardErrorPath</key>
+  <string>$CLAUDIA_HOME/logs/$label-error.log</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>HOME</key>
+    <string>$HOME</string>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+  </dict>
+  <key>ThrottleInterval</key>
+  <integer>10</integer>
+</dict>
+</plist>
+PLIST
+done
+
+# --- Step 8: Unload old openclaw plists ---
+OLD_LABELS=(
+  "ai.openclaw.gmail-monitor"
+  "ai.openclaw.slack-monitor"
+  "ai.openclaw.slack-events"
+  "com.openclaw.meeting-alerts"
+)
+
+for old_label in "${OLD_LABELS[@]}"; do
+  old_plist="$PLIST_DIR/$old_label.plist"
+  if [ -f "$old_plist" ]; then
+    warn "Removing old plist: $old_label"
+    launchctl bootout "gui/$UID_VAL/$old_label" 2>/dev/null || true
+    rm -f "$old_plist"
+  fi
+done
+
+# --- Step 9: Load new plists and start services ---
+info "Loading services..."
+for svc in "${SERVICES[@]}"; do
+  IFS='|' read -r label jsfile <<< "$svc"
+  plist_label="ai.claudia.$label"
+  plist_path="$PLIST_DIR/$plist_label.plist"
+
+  # Bootout if already loaded (ignore errors)
+  launchctl bootout "gui/$UID_VAL/$plist_label" 2>/dev/null || true
+  sleep 0.5
+
+  # Bootstrap (load + start)
+  launchctl bootstrap "gui/$UID_VAL" "$plist_path"
+done
+
+# --- Step 10: Report status ---
+sleep 2
+info "Service status:"
+echo ""
+for svc in "${SERVICES[@]}"; do
+  IFS='|' read -r label jsfile <<< "$svc"
+  plist_label="ai.claudia.$label"
+
+  status_line=$(launchctl list 2>/dev/null | grep "$plist_label" || true)
+  if [ -n "$status_line" ]; then
+    pid_col=$(echo "$status_line" | awk '{print $1}')
+    exit_col=$(echo "$status_line" | awk '{print $2}')
+    if [ "$pid_col" != "-" ]; then
+      echo -e "  ${GREEN}running${NC}  $label (PID $pid_col)"
+    elif [ "$exit_col" = "0" ]; then
+      echo -e "  ${YELLOW}stopped${NC}  $label (exit 0)"
+    else
+      echo -e "  ${RED}error${NC}    $label (exit $exit_col)"
+    fi
+  else
+    echo -e "  ${RED}unloaded${NC} $label"
+  fi
+done
+
+echo ""
+info "Deploy complete!"

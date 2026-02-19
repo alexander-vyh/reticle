@@ -5,7 +5,7 @@ const path = require('path');
 const fs = require('fs');
 const crypto = require('crypto');
 
-const DB_DIR = path.join(process.env.HOME, '.openclaw', 'workspace');
+const DB_DIR = process.env.CLAUDIA_DATA_DIR || path.join(process.env.HOME, '.claudia', 'data');
 const DB_PATH = process.env.CLAUDIA_DB_PATH || path.join(DB_DIR, 'claudia.db');
 
 // --- Entity Type + Relationship Registries ---

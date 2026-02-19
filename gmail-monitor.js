@@ -183,7 +183,7 @@ function sendMacOSNotification(title, message) {
     const escapedTitle = title.replace(/"/g, '\\"').substring(0, 100);
     const escapedMessage = message.replace(/"/g, '\\"').substring(0, 200);
     execSync(
-      `terminal-notifier -title "${escapedTitle}" -message "${escapedMessage}" -sound default -sender ai.openclaw.notifications`,
+      `terminal-notifier -title "${escapedTitle}" -message "${escapedMessage}" -sound default -sender ai.claudia.notifications`,
       { stdio: 'pipe' }
     );
   } catch (error) {
