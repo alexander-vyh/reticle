@@ -1,5 +1,6 @@
 {
   "dependencies": {
+    "@anthropic-ai/sdk": "^0.78.0",
     "better-sqlite3": "^12.6.2",
     "body-parser": "^2.2.2",
     "crypto": "^1.0.1",
