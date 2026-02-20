@@ -9,10 +9,10 @@ const HEARTBEAT_DIR = path.join(os.homedir(), '.config', 'claudia', 'heartbeats'
 
 // Map launchd labels to heartbeat service names
 const HEARTBEAT_NAMES = {
-  'ai.openclaw.gmail-monitor': 'gmail-monitor',
-  'ai.openclaw.slack-monitor': 'slack-monitor',
-  'ai.openclaw.slack-events': 'slack-events',
-  'com.openclaw.meeting-alerts': 'meeting-alerts',
+  'ai.claudia.gmail-monitor': 'gmail-monitor',
+  'ai.claudia.slack-events': 'slack-events',
+  'ai.claudia.meeting-alerts': 'meeting-alerts',
+  'ai.claudia.followup-checker': 'followup-checker',
   'ai.openclaw.gateway': null,  // Gateway doesn't write heartbeats (yet)
 };
 
