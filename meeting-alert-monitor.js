@@ -141,7 +141,7 @@ async function findBestGap(windowStart, windowEnd, minMinutes, preference) {
  * Send afternoon-before prep notification.
  * Content: list of tomorrow's O3s + open follow-up count per person + days since last O3
  */
-async function sendAfternoonPrep(db, event, report) {
+async function sendAfternoonPrep(db, event, report, accountId) {
   const startMs = new Date(event.start.dateTime).getTime();
   const startTime = new Date(startMs).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
 
@@ -183,7 +183,7 @@ async function sendAfternoonPrep(db, event, report) {
  * Send pre-meeting prep notification (nearest gap before O3, within 3 hours).
  * Content: open follow-ups, last O3 date, join link
  */
-async function sendPreMeetingPrep(db, event, report) {
+async function sendPreMeetingPrep(db, event, report, accountId) {
   const startMs = new Date(event.start.dateTime).getTime();
   const startTime = new Date(startMs).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
   const minutesUntil = Math.round((startMs - Date.now()) / 60000);
@@ -278,7 +278,7 @@ async function sendPostMeetingNudge(db, event, report) {
  * Scans cached events, detects O3s, upserts to DB, fires gap-aware notifications.
  * Uses FreeBusy API for gap-finding (async).
  */
-async function checkO3Notifications(events, db) {
+async function checkO3Notifications(events, db, accountId) {
   if (!db) return;
   const now = Date.now();
 
@@ -319,7 +319,7 @@ async function checkO3Notifications(events, db) {
       if (now >= windowStart && now <= windowEnd) {
         const gap = await findBestGap(now, windowEnd, O3_CONFIG.minGapMinutes, 'after');
         if (gap && now >= gap.start) {
-          await sendAfternoonPrep(db, event, report);
+          await sendAfternoonPrep(db, event, report, accountId);
         }
       }
     }
@@ -330,7 +330,7 @@ async function checkO3Notifications(events, db) {
     if (!session.prep_sent_before && now >= threeHoursBefore && now < startMs) {
       const gap = await findBestGap(now, startMs, O3_CONFIG.minGapMinutes, 'before');
       if (gap && now >= gap.start) {
-        await sendPreMeetingPrep(db, event, report);
+        await sendPreMeetingPrep(db, event, report, accountId);
       }
     }
 
@@ -694,7 +694,7 @@ async function main() {
   try {
     o3Db = claudiaDb.initDatabase();
     const primaryAccount = claudiaDb.upsertAccount(o3Db, {
-      email: CONFIG.gmailAccount,
+      email: config.gmailAccount,
       provider: 'gmail',
       display_name: 'Primary',
       is_primary: 1
@@ -723,7 +723,7 @@ async function main() {
   setInterval(async () => {
     const syncedEvents = await syncCalendar();
     meetingCache.cleanupAlertState(syncedEvents);
-    await checkO3Notifications(syncedEvents, o3Db);
+    await checkO3Notifications(syncedEvents, o3Db, accountId);
     checkWeeklySummary(o3Db);
   }, CONFIG.pollInterval);
 
@@ -737,7 +737,7 @@ async function main() {
 
   // Immediate alert check
   checkAlerts(events);
-  await checkO3Notifications(events, o3Db);
+  await checkO3Notifications(events, o3Db, accountId);
 }
 
 // Graceful shutdown - kill all popup children
