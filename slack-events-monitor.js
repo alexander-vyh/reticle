@@ -1317,7 +1317,7 @@ async function main() {
 
   // Validate prerequisites before proceeding
   const validation = validatePrerequisites('slack-events', [
-    { type: 'file', path: path.join(os.homedir(), '.config', 'claudia', 'config.json'), description: 'Claudia config (Slack tokens)' },
+    { type: 'file', path: path.join(config.configDir, 'secrets.json'), description: 'Claudia secrets (Slack tokens)' },
     { type: 'database', path: claudiaDb.DB_PATH, description: 'Claudia database' }
   ]);
   if (validation.errors.length > 0) {
