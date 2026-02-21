@@ -19,6 +19,7 @@ const PROJECT_DIR = path.resolve(__dirname, '..');
 let tray = null;
 let previousStatuses = {};
 let iconCache = {};
+let spinInterval = null;
 
 function getIcon(name) {
   if (!iconCache[name]) iconCache[name] = icons[name]();
@@ -107,7 +108,8 @@ function buildMenu(statuses) {
 function refreshStatus() {
   const statuses = serviceManager.getStatuses();
 
-  tray.setImage(getAggregateIcon(statuses));
+  // Don't override the icon while spinning — animation owns the image
+  if (!spinInterval) tray.setImage(getAggregateIcon(statuses));
   const runningCount = statuses.filter(s => s.status === 'running').length;
   tray.setToolTip(`Claudia — ${runningCount}/${statuses.length} services running`);
   tray.setContextMenu(buildMenu(statuses));
@@ -127,6 +129,42 @@ function refreshStatus() {
 
   previousStatuses = {};
   for (const svc of statuses) previousStatuses[svc.launchdLabel] = svc.status;
+}
+
+const SPIN_FRAMES = 12;
+const SPIN_INTERVAL_MS = 80;
+const STAR_COLORS = { green: '#4CAF50', yellow: '#FFC107', red: '#F44336' };
+
+/**
+ * Start spinning the inner arcs in the tray icon.
+ * Call only when explicit activity is happening (deploy, restart).
+ * @param {'green'|'yellow'|'red'} status - Current status color name
+ */
+function startSpinning(status) {
+  if (spinInterval) return; // already spinning
+
+  const color = STAR_COLORS[status] || STAR_COLORS.yellow;
+  const frames = [];
+  for (let i = 0; i < SPIN_FRAMES; i++) {
+    frames.push(icons.frame(color, (360 / SPIN_FRAMES) * i));
+  }
+
+  let frameIdx = 0;
+  spinInterval = setInterval(() => {
+    if (tray) tray.setImage(frames[frameIdx]);
+    frameIdx = (frameIdx + 1) % SPIN_FRAMES;
+  }, SPIN_INTERVAL_MS);
+}
+
+/**
+ * Stop spinning and return to the static status icon.
+ */
+function stopSpinning() {
+  if (!spinInterval) return;
+  clearInterval(spinInterval);
+  spinInterval = null;
+  // Restore the static icon for current status
+  refreshStatus();
 }
 
 app.whenReady().then(() => {
