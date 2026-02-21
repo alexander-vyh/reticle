@@ -10,6 +10,7 @@ import struct
 
 import numpy as np
 import pytest
+from unittest.mock import patch, MagicMock
 
 
 def create_test_wav(path: str, duration: float = 1.0, sample_rate: int = 16000):
@@ -86,3 +87,46 @@ class TestLoadAudio:
             "run_diarization should call load_audio() to pre-load WAV, "
             "not pass the file path directly to pyannote"
         )
+
+
+class TestDiarizationFallback:
+    """Diarization failures should be non-fatal — return [] instead of crashing."""
+
+    def _ensure_postprocess_importable(self):
+        import sys
+        import os
+        scripts_dir = os.path.join(os.path.dirname(__file__), "..", "scripts")
+        if scripts_dir not in sys.path:
+            sys.path.insert(0, scripts_dir)
+
+    def test_run_diarization_returns_empty_on_pipeline_error(self, tmp_path):
+        """run_diarization should return [] when Pipeline.from_pretrained raises."""
+        self._ensure_postprocess_importable()
+        import postprocess
+
+        wav_path = str(tmp_path / "test.wav")
+        create_test_wav(wav_path, duration=1.0)
+
+        with patch.object(postprocess, "Pipeline", create=True) as mock_pipeline_cls:
+            mock_pipeline_cls.from_pretrained.side_effect = OSError(
+                "No HuggingFace token found"
+            )
+            result = postprocess.run_diarization(wav_path)
+
+        assert result == [], f"Expected empty list on pipeline error, got {result}"
+
+    def test_run_diarization_returns_empty_on_runtime_error(self, tmp_path):
+        """run_diarization should return [] on any runtime error during inference."""
+        self._ensure_postprocess_importable()
+        import postprocess
+
+        wav_path = str(tmp_path / "test.wav")
+        create_test_wav(wav_path, duration=1.0)
+
+        mock_pipeline = MagicMock()
+        with patch.object(postprocess, "Pipeline", create=True) as mock_pipeline_cls:
+            mock_pipeline_cls.from_pretrained.return_value = mock_pipeline
+            mock_pipeline.side_effect = RuntimeError("CUDA out of memory")
+            result = postprocess.run_diarization(wav_path)
+
+        assert result == [], f"Expected empty list on runtime error, got {result}"

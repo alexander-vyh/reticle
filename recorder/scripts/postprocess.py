@@ -146,15 +146,19 @@ def run_diarization(wav_path: str) -> list[dict]:
     import torch
 
     device = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
-    pipeline = Pipeline.from_pretrained(
-        "pyannote/speaker-diarization-3.1",
-        use_auth_token=True,
-    )
-    pipeline.to(device)
+    try:
+        pipeline = Pipeline.from_pretrained(
+            "pyannote/speaker-diarization-3.1",
+            token=True,
+        )
+        pipeline.to(device)
 
-    # Pre-load audio with scipy to avoid torchcodec/FFmpeg issues
-    audio = load_audio(wav_path)
-    diarization = pipeline(audio)
+        # Pre-load audio with scipy to avoid torchcodec/FFmpeg issues
+        audio = load_audio(wav_path)
+        diarization = pipeline(audio)
+    except Exception as e:
+        log.warning("Diarization failed (continuing without speaker labels): %s", e)
+        return []
 
     speaker_segments = []
     for turn, _, speaker in diarization.itertracks(yield_label=True):

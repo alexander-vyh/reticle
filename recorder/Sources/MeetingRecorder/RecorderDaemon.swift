@@ -317,6 +317,18 @@ final class RecorderDaemon {
             process.arguments?.append(contentsOf: ["--language", config.language])
         }
 
+        // Capture stdout for transcript path output
+        let stdoutPipe = Pipe()
+        process.standardOutput = stdoutPipe
+        stdoutPipe.fileHandleForReading.readabilityHandler = { [weak self] handle in
+            let data = handle.availableData
+            guard !data.isEmpty, let line = String(data: data, encoding: .utf8) else { return }
+            let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmed.isEmpty {
+                self?.logger.notice("PostProcess output: \(trimmed)")
+            }
+        }
+
         // Capture stderr for logging
         let stderrPipe = Pipe()
         process.standardError = stderrPipe
@@ -331,6 +343,7 @@ final class RecorderDaemon {
                 self?.logger.notice("Post-processing complete for meeting \(session.meetingId)")
             } else {
                 self?.logger.error("Post-processing failed with exit code \(proc.terminationStatus)")
+                fputs("[postproc] FAILED: meeting=\(session.meetingId) exit=\(proc.terminationStatus)\n", stderr)
             }
         }
 
