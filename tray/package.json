@@ -27,10 +27,14 @@
     "files": [
       "main.js",
       "service-manager.js",
-      "icons.js"
+      "icons.js",
+      "assets/**"
     ],
     "directories": {
       "output": "dist"
     }
+  },
+  "dependencies": {
+    "@resvg/resvg-js": "^2.6.2"
   }
 }
