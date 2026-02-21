@@ -99,7 +99,7 @@ rsync -a --delete \
 if [ "$SKIP_INSTALL" = false ]; then
   info "Installing production dependencies in ~/.claudia/app/..."
   cd "$CLAUDIA_HOME/app"
-  npm install --omit=dev --silent
+  npm install --omit=dev --ignore-scripts --silent
 fi
 
 # --- Step 7: Generate and load launchd plists ---
@@ -134,7 +134,16 @@ for svc in "${SERVICES[@]}"; do
   <key>RunAtLoad</key>
   <true/>
   <key>KeepAlive</key>
-  <true/>
+  <dict>
+    <key>SuccessfulExit</key>
+    <false/>
+    <key>NetworkState</key>
+    <true/>
+  </dict>
+  <key>ProcessType</key>
+  <string>Background</string>
+  <key>ExitTimeOut</key>
+  <integer>5</integer>
   <key>StandardOutPath</key>
   <string>$CLAUDIA_HOME/logs/$label.log</string>
   <key>StandardErrorPath</key>
@@ -147,7 +156,7 @@ for svc in "${SERVICES[@]}"; do
     <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
   </dict>
   <key>ThrottleInterval</key>
-  <integer>10</integer>
+  <integer>30</integer>
 </dict>
 </plist>
 PLIST

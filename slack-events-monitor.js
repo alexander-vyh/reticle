@@ -15,8 +15,11 @@ const { parseSenderEmail, formatRuleDescription } = require('./lib/email-utils')
 const { parseRuleRefinement } = require('./lib/ai');
 const log = require('./lib/logger')('slack-events');
 
+const os = require('os');
 const path = require('path');
 const config = require('./lib/config');
+const heartbeat = require('./lib/heartbeat');
+const { validatePrerequisites } = require('./lib/startup-validation');
 
 // Configuration
 const CONFIG = {
@@ -35,6 +38,7 @@ let ws = null;
 let reconnectTimeout = null;
 let followupsDbConn = null;
 let accountId = null;
+let errorCount = 0;
 
 // Active "Match differently" thread conversations: threadTs → { emailMeta, ruleType, currentConditions, ruleId, channel }
 const ruleRefinementThreads = new Map();
@@ -1227,6 +1231,7 @@ async function connectSocketMode(db) {
 
     ws.on('open', () => {
       log.info('Socket Mode connected');
+      heartbeat.write('slack-events', { checkInterval: 30000, status: 'ok' });
       if (reconnectTimeout) {
         clearTimeout(reconnectTimeout);
         reconnectTimeout = null;
@@ -1261,6 +1266,7 @@ async function connectSocketMode(db) {
         } else {
           log.warn({ envelopeType: envelope.type }, 'Unknown envelope type');
         }
+        heartbeat.write('slack-events', { checkInterval: 30000, status: 'ok' });
       } catch (error) {
         log.error({ err: error }, 'Error processing WebSocket message');
       }
@@ -1268,10 +1274,20 @@ async function connectSocketMode(db) {
 
     ws.on('error', (error) => {
       log.error({ err: error }, 'WebSocket error');
+      heartbeat.write('slack-events', {
+        checkInterval: 30000,
+        status: 'degraded',
+        errors: { lastError: 'WebSocket disconnected, reconnecting', lastErrorAt: Date.now(), countSinceStart: ++errorCount }
+      });
     });
 
     ws.on('close', () => {
       log.warn({ reconnectDelayMs: CONFIG.reconnectDelay }, 'Socket Mode disconnected, reconnecting');
+      heartbeat.write('slack-events', {
+        checkInterval: 30000,
+        status: 'degraded',
+        errors: { lastError: 'WebSocket disconnected, reconnecting', lastErrorAt: Date.now(), countSinceStart: ++errorCount }
+      });
       ws = null;
       reconnectTimeout = setTimeout(() => connectSocketMode(db), CONFIG.reconnectDelay);
     });
@@ -1298,6 +1314,16 @@ async function main() {
   // Get my user ID
   CONFIG.myUserId = await getMyUserId();
   log.info({ myUserId: CONFIG.myUserId }, 'Authenticated with Slack');
+
+  // Validate prerequisites before proceeding
+  const validation = validatePrerequisites('slack-events', [
+    { type: 'file', path: path.join(config.configDir, 'secrets.json'), description: 'Claudia secrets (Slack tokens)' },
+    { type: 'database', path: claudiaDb.DB_PATH, description: 'Claudia database' }
+  ]);
+  if (validation.errors.length > 0) {
+    log.fatal({ errors: validation.errors }, 'Startup validation failed');
+    process.exit(1);
+  }
 
   // Initialize follow-ups database
   try {
@@ -1329,6 +1355,7 @@ async function main() {
 
 // Handle graceful shutdown
 function shutdown(signal) {
+  heartbeat.write('slack-events', { checkInterval: 30000, status: 'shutting-down' });
   log.info({ signal }, 'Received signal, shutting down');
   saveState();
   if (ws) ws.close();

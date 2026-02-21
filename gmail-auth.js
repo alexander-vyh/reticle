@@ -17,14 +17,21 @@ const SCOPES = [
   'https://www.googleapis.com/auth/gmail.settings.basic'
 ];
 
+const CALLBACK_PORT = 3000;
+
 async function authorize() {
   const credentials = JSON.parse(fs.readFileSync(CREDENTIALS_PATH));
-  const { client_secret, client_id, redirect_uris } = credentials.installed;
+  const { client_secret, client_id } = credentials.installed;
+
+  // Google's installed-app OAuth accepts any port on localhost when
+  // the registered redirect_uri is "http://localhost", so we use a
+  // high port to avoid needing root privileges for port 80.
+  const redirectUri = `http://localhost:${CALLBACK_PORT}`;
 
   const oAuth2Client = new google.auth.OAuth2(
     client_id,
     client_secret,
-    redirect_uris[0]
+    redirectUri
   );
 
   // Check if we already have a token
@@ -52,7 +59,7 @@ function getNewToken(oAuth2Client) {
     // Start local server to receive callback
     const server = http.createServer(async (req, res) => {
       if (req.url.indexOf('/') > -1) {
-        const qs = new url.URL(req.url, 'http://localhost:3000').searchParams;
+        const qs = new url.URL(req.url, `http://localhost:${CALLBACK_PORT}`).searchParams;
         const code = qs.get('code');
 
         res.end('Authorization successful! You can close this window.');
@@ -71,7 +78,8 @@ function getNewToken(oAuth2Client) {
           }
         }
       }
-    }).listen(3000, () => {
+    }).listen(CALLBACK_PORT, () => {
+      console.log(`Listening on port ${CALLBACK_PORT} for OAuth callback...`);
       // Open browser
       require('child_process').execSync(`open "${authUrl}"`);
     });

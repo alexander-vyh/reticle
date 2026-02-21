@@ -10,16 +10,29 @@ const gotLock = app.requestSingleInstanceLock();
 if (!gotLock) { app.quit(); process.exit(0); }
 
 const STATUS_EMOJI = {
-  running: '🟢', stopped: '⚫', error: '🔴', unloaded: '⚪', unknown: '❓'
+  running: '🟢', stopped: '⚫', error: '🔴', unloaded: '⚪', unknown: '❓',
+  unresponsive: '🟡', degraded: '🟡', 'startup-failed': '🔴'
 };
 
-// Project root (where log files live) — resolve from app path or fallback
+function getEffectiveStatus(svc) {
+  if (svc.status !== 'running') return svc.status;
+  if (!svc.heartbeatHealth) return 'running';
+  const hh = svc.heartbeatHealth.health;
+  if (hh === 'healthy') return 'running';
+  if (hh === 'unresponsive' || hh === 'startup-failed' || hh === 'error') return hh;
+  if (hh === 'degraded') return 'degraded';
+  return 'running';
+}
+
+// Project root (where log files live) -- resolve from app path or fallback
 const PROJECT_DIR = path.resolve(__dirname, '..');
 
 let tray = null;
 let previousStatuses = {};
 let iconCache = {};
 let spinInterval = null;
+let lastNotificationTime = {};
+const NOTIFICATION_COOLDOWN = 15 * 60 * 1000; // 15 minutes
 
 function getIcon(name) {
   if (!iconCache[name]) iconCache[name] = icons[name]();
@@ -27,9 +40,10 @@ function getIcon(name) {
 }
 
 function getAggregateIcon(statuses) {
-  const running = statuses.filter(s => s.status === 'running').length;
-  if (running === statuses.length) return getIcon('green');
-  if (running === 0) return getIcon('red');
+  const effectives = statuses.map(s => getEffectiveStatus(s));
+  if (effectives.some(e => e === 'error' || e === 'stopped' || e === 'startup-failed')) return getIcon('red');
+  if (effectives.some(e => e === 'unresponsive' || e === 'degraded')) return getIcon('yellow');
+  if (effectives.every(e => e === 'running')) return getIcon('green');
   return getIcon('yellow');
 }
 
@@ -37,11 +51,25 @@ function buildMenu(statuses) {
   const runningCount = statuses.filter(s => s.status === 'running').length;
 
   const serviceItems = statuses.map(svc => {
-    const emoji = STATUS_EMOJI[svc.status] || '❓';
+    const effective = getEffectiveStatus(svc);
+    const emoji = STATUS_EMOJI[effective] || '❓';
     const isRunning = svc.status === 'running';
-    const detail = isRunning
-      ? `PID ${svc.pid}`
-      : (svc.exitCode != null && svc.status === 'error' ? `exit ${svc.exitCode}` : '');
+
+    let detail = '';
+    if (isRunning && svc.heartbeat) {
+      const age = Math.round((Date.now() - svc.heartbeat.lastCheck) / 1000);
+      const ageStr = age < 60 ? `${age}s ago` : `${Math.round(age / 60)}m ago`;
+      detail = `PID ${svc.pid}, last check ${ageStr}`;
+      if (svc.heartbeatHealth && svc.heartbeatHealth.errorCount > 0) {
+        detail += `, ${svc.heartbeatHealth.errorCount} errors`;
+      }
+    } else if (isRunning) {
+      detail = `PID ${svc.pid}`;
+    } else if (effective === 'startup-failed' && svc.heartbeatHealth) {
+      detail = svc.heartbeatHealth.detail || 'startup failed';
+    } else if (svc.exitCode != null && svc.status === 'error') {
+      detail = `exit ${svc.exitCode}`;
+    }
 
     return {
       label: `${emoji}  ${svc.label}${detail ? '  (' + detail + ')' : ''}`,
@@ -52,7 +80,7 @@ function buildMenu(statuses) {
             try {
               if (isRunning) serviceManager.stopService(svc.launchdLabel);
               else serviceManager.startService(svc.launchdLabel);
-            } catch (e) { /* may throw if already in target state */ }
+            } catch (e) {}
             setTimeout(refreshStatus, 1500);
           }
         },
@@ -114,21 +142,47 @@ function refreshStatus() {
   tray.setToolTip(`Claudia — ${runningCount}/${statuses.length} services running`);
   tray.setContextMenu(buildMenu(statuses));
 
-  // Notify on running → not-running transitions
+  // Smart notifications with dedup cooldown
   for (const svc of statuses) {
-    const prev = previousStatuses[svc.launchdLabel];
-    if (prev === 'running' && svc.status !== 'running') {
+    const effective = getEffectiveStatus(svc);
+    const prevEffective = previousStatuses[svc.launchdLabel];
+    const now = Date.now();
+    const lastNotif = lastNotificationTime[svc.launchdLabel] || 0;
+
+    // State transition notifications
+    if (prevEffective && prevEffective !== effective) {
+      if (['error', 'stopped', 'unresponsive', 'startup-failed'].includes(effective)) {
+        const body = svc.heartbeatHealth && svc.heartbeatHealth.detail
+          ? svc.heartbeatHealth.detail
+          : (svc.exitCode ? `Exit code ${svc.exitCode}` : 'Service stopped.');
+        new Notification({
+          title: `Claudia: ${svc.label} — ${effective}`,
+          body
+        }).show();
+        lastNotificationTime[svc.launchdLabel] = now;
+      } else if (['error', 'unresponsive', 'startup-failed', 'stopped'].includes(prevEffective) && effective === 'running') {
+        new Notification({
+          title: `Claudia: ${svc.label} recovered`,
+          body: 'Service is running normally again.'
+        }).show();
+        lastNotificationTime[svc.launchdLabel] = now;
+      }
+    }
+
+    // Persistent problem reminder (every 15 min)
+    if (['error', 'unresponsive', 'startup-failed'].includes(effective) &&
+        (now - lastNotif > NOTIFICATION_COOLDOWN) && prevEffective === effective) {
       new Notification({
-        title: `Claudia: ${svc.label} stopped`,
-        body: svc.exitCode
-          ? `Exit code ${svc.exitCode}. Right-click tray icon to restart.`
-          : 'Service stopped.'
+        title: `Claudia: ${svc.label} still ${effective}`,
+        body: (svc.heartbeatHealth && svc.heartbeatHealth.detail) || 'Check logs for details.'
       }).show();
+      lastNotificationTime[svc.launchdLabel] = now;
     }
   }
 
+  // Store effective status for next comparison
   previousStatuses = {};
-  for (const svc of statuses) previousStatuses[svc.launchdLabel] = svc.status;
+  for (const svc of statuses) previousStatuses[svc.launchdLabel] = getEffectiveStatus(svc);
 }
 
 const SPIN_FRAMES = 12;

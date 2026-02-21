@@ -9,6 +9,8 @@ const claudiaDb = require('./claudia-db');
 const log = require('./lib/logger')('followup-checker');
 
 const config = require('./lib/config');
+const heartbeat = require('./lib/heartbeat');
+const { validatePrerequisites } = require('./lib/startup-validation');
 
 // Configuration
 const CONFIG = {
@@ -49,6 +51,7 @@ let db = null;
 let accountId = null;
 let lastDailyDigest = null;
 let last4hCheck = null;
+let errorCount = 0;
 
 /**
  * Send Slack DM
@@ -69,7 +72,7 @@ function sendSlackDM(message, blocks = null) {
       headers: {
         'Authorization': `Bearer ${CONFIG.slackToken}`,
         'Content-Type': 'application/json',
-        'Content-Length': data.length
+        'Content-Length': Buffer.byteLength(data)
       }
     };
 
@@ -196,7 +199,7 @@ async function checkImmediate() {
 function buildEODSection(db) {
   const now = Math.floor(Date.now() / 1000);
   const pendingEmails = claudiaDb.getPendingResponses(db, accountId, { type: 'email' });
-  const respondedTodayCountCount = claudiaDb.getResolvedToday(db, accountId, 'email').length;
+  const respondedTodayCount = claudiaDb.getResolvedToday(db, accountId, 'email').length;
 
   // Split pending into urgent vs non-urgent by parsing metadata
   const urgent = [];
@@ -404,8 +407,18 @@ async function runChecks() {
     await check4Hour();
     await checkDaily();
     await checkEscalations();
+
+    heartbeat.write('followup-checker', {
+      checkInterval: CONFIG.checkInterval,
+      status: 'ok'
+    });
   } catch (error) {
     log.error({ err: error }, 'Error in checks');
+    heartbeat.write('followup-checker', {
+      checkInterval: CONFIG.checkInterval,
+      status: 'error',
+      errors: { lastError: error.message, lastErrorAt: Date.now(), countSinceStart: ++errorCount }
+    });
   }
 }
 
@@ -414,6 +427,14 @@ async function runChecks() {
  */
 async function main() {
   log.info({ checkIntervalMin: CONFIG.checkInterval / 60000 }, 'Follow-Up Checker starting');
+
+  const validation = validatePrerequisites('followup-checker', [
+    { type: 'database', path: claudiaDb.DB_PATH, description: 'Claudia database' }
+  ]);
+  if (validation.errors.length > 0) {
+    log.fatal({ errors: validation.errors }, 'Startup validation failed');
+    process.exit(1);
+  }
 
   // Initialize database
   db = claudiaDb.initDatabase();
@@ -432,6 +453,15 @@ async function main() {
   // Set up interval
   setInterval(runChecks, CONFIG.checkInterval);
 }
+
+function shutdown(signal) {
+  log.info({ signal }, 'Shutting down gracefully');
+  heartbeat.write('followup-checker', { checkInterval: CONFIG.checkInterval, status: 'shutting-down' });
+  if (db) try { db.close(); } catch {}
+  process.exit(0);
+}
+process.on('SIGTERM', () => shutdown('SIGTERM'));
+process.on('SIGINT', () => shutdown('SIGINT'));
 
 main().catch(error => {
   log.fatal({ err: error }, 'Fatal error');

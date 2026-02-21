@@ -12,6 +12,8 @@ const meetingCache = require('./meeting-cache');
 const linkParser = require('./meeting-link-parser');
 const platformLauncher = require('./platform-launcher');
 const log = require('./lib/logger')('meeting-alerts');
+const heartbeat = require('./lib/heartbeat');
+const { validatePrerequisites } = require('./lib/startup-validation');
 
 const CONFIG = {
   pollInterval: 2 * 60 * 1000,       // 2 minutes
@@ -29,6 +31,9 @@ const CONFIG = {
 
 let calendar = null;
 let activePopups = {};  // groupKey -> child process
+let o3Db = null;
+let accountId = null;
+let errorCount = 0;
 
 const SOUNDS = {
   fiveMin: '/System/Library/Sounds/Blow.aiff',
@@ -141,7 +146,7 @@ async function findBestGap(windowStart, windowEnd, minMinutes, preference) {
  * Send afternoon-before prep notification.
  * Content: list of tomorrow's O3s + open follow-up count per person + days since last O3
  */
-async function sendAfternoonPrep(db, event, report) {
+async function sendAfternoonPrep(db, event, report, accountId) {
   const startMs = new Date(event.start.dateTime).getTime();
   const startTime = new Date(startMs).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
 
@@ -183,7 +188,7 @@ async function sendAfternoonPrep(db, event, report) {
  * Send pre-meeting prep notification (nearest gap before O3, within 3 hours).
  * Content: open follow-ups, last O3 date, join link
  */
-async function sendPreMeetingPrep(db, event, report) {
+async function sendPreMeetingPrep(db, event, report, accountId) {
   const startMs = new Date(event.start.dateTime).getTime();
   const startTime = new Date(startMs).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
   const minutesUntil = Math.round((startMs - Date.now()) / 60000);
@@ -278,7 +283,7 @@ async function sendPostMeetingNudge(db, event, report) {
  * Scans cached events, detects O3s, upserts to DB, fires gap-aware notifications.
  * Uses FreeBusy API for gap-finding (async).
  */
-async function checkO3Notifications(events, db) {
+async function checkO3Notifications(events, db, accountId) {
   if (!db) return;
   const now = Date.now();
 
@@ -319,7 +324,7 @@ async function checkO3Notifications(events, db) {
       if (now >= windowStart && now <= windowEnd) {
         const gap = await findBestGap(now, windowEnd, O3_CONFIG.minGapMinutes, 'after');
         if (gap && now >= gap.start) {
-          await sendAfternoonPrep(db, event, report);
+          await sendAfternoonPrep(db, event, report, accountId);
         }
       }
     }
@@ -330,7 +335,7 @@ async function checkO3Notifications(events, db) {
     if (!session.prep_sent_before && now >= threeHoursBefore && now < startMs) {
       const gap = await findBestGap(now, startMs, O3_CONFIG.minGapMinutes, 'before');
       if (gap && now >= gap.start) {
-        await sendPreMeetingPrep(db, event, report);
+        await sendPreMeetingPrep(db, event, report, accountId);
       }
     }
 
@@ -680,6 +685,14 @@ async function main() {
     lookAheadHours: CONFIG.lookAheadHours
   }, 'Meeting Alert Monitor starting');
 
+  const validation = validatePrerequisites('meeting-alerts', [
+    { type: 'file', path: config.calendarTokenPath, description: 'Calendar token' }
+  ]);
+  if (validation.errors.length > 0) {
+    log.fatal({ errors: validation.errors }, 'Startup validation failed');
+    process.exit(1);
+  }
+
   try {
     calendar = await calendarAuth.getCalendarClient();
     log.info('Calendar authorized successfully');
@@ -689,12 +702,10 @@ async function main() {
   }
 
   // Initialize followups database (for O3 tracking)
-  let o3Db;
-  let accountId;
   try {
     o3Db = claudiaDb.initDatabase();
     const primaryAccount = claudiaDb.upsertAccount(o3Db, {
-      email: CONFIG.gmailAccount,
+      email: config.gmailAccount,
       provider: 'gmail',
       display_name: 'Primary',
       is_primary: 1
@@ -721,10 +732,24 @@ async function main() {
 
   // Set up polling interval for calendar sync
   setInterval(async () => {
-    const syncedEvents = await syncCalendar();
-    meetingCache.cleanupAlertState(syncedEvents);
-    await checkO3Notifications(syncedEvents, o3Db);
-    checkWeeklySummary(o3Db);
+    try {
+      const syncedEvents = await syncCalendar();
+      meetingCache.cleanupAlertState(syncedEvents);
+      await checkO3Notifications(syncedEvents, o3Db, accountId);
+      checkWeeklySummary(o3Db);
+      heartbeat.write('meeting-alerts', {
+        checkInterval: CONFIG.pollInterval,
+        status: 'ok',
+        metrics: { upcomingMeetings: syncedEvents.length }
+      });
+    } catch (error) {
+      log.error({ err: error }, 'Poll cycle error');
+      heartbeat.write('meeting-alerts', {
+        checkInterval: CONFIG.pollInterval,
+        status: 'error',
+        errors: { lastError: error.message, lastErrorAt: Date.now(), countSinceStart: ++errorCount }
+      });
+    }
   }, CONFIG.pollInterval);
 
   // Set up alert checking interval
@@ -737,12 +762,19 @@ async function main() {
 
   // Immediate alert check
   checkAlerts(events);
-  await checkO3Notifications(events, o3Db);
+  await checkO3Notifications(events, o3Db, accountId);
+
+  heartbeat.write('meeting-alerts', {
+    checkInterval: CONFIG.pollInterval,
+    status: 'ok',
+    metrics: { upcomingMeetings: events.length }
+  });
 }
 
 // Graceful shutdown - kill all popup children
 function shutdown(signal) {
   log.info({ signal }, 'Received signal, shutting down');
+  heartbeat.write('meeting-alerts', { checkInterval: CONFIG.pollInterval, status: 'shutting-down' });
 
   for (const [groupKey, child] of Object.entries(activePopups)) {
     try {
@@ -753,6 +785,7 @@ function shutdown(signal) {
   }
 
   activePopups = {};
+  if (o3Db) try { o3Db.close(); } catch {}
   process.exit(0);
 }
 
