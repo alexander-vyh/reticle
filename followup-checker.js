@@ -72,7 +72,7 @@ function sendSlackDM(message, blocks = null) {
       headers: {
         'Authorization': `Bearer ${CONFIG.slackToken}`,
         'Content-Type': 'application/json',
-        'Content-Length': data.length
+        'Content-Length': Buffer.byteLength(data)
       }
     };
 
