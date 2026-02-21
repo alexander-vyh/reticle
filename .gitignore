@@ -49,5 +49,9 @@ alert-state.json
 # Plan files (contain sensitive data)
 PLAN.md
 
+# Meeting recorder
+recorder/.build/
+recorder/scripts/.venv/
+
 # direnv
 .envrc

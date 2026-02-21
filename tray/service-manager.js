@@ -14,6 +14,7 @@ const HEARTBEAT_NAMES = {
   'ai.claudia.meeting-alerts': 'meeting-alerts',
   'ai.claudia.followup-checker': 'followup-checker',
   'ai.openclaw.gateway': null,  // Gateway doesn't write heartbeats (yet)
+  'ai.openclaw.meeting-recorder': null,  // Meeting recorder doesn't write heartbeats (yet)
 };
 
 const SERVICES = [
@@ -21,6 +22,7 @@ const SERVICES = [
   { label: 'Slack Events',       launchdLabel: 'ai.claudia.slack-events' },
   { label: 'Meeting Alerts',     launchdLabel: 'ai.claudia.meeting-alerts' },
   { label: 'Follow-up Checker',  launchdLabel: 'ai.claudia.followup-checker' },
+  { label: 'Meeting Recorder',   launchdLabel: 'ai.openclaw.meeting-recorder' },
   { label: 'Gateway',            launchdLabel: 'ai.openclaw.gateway' },
 ];
 

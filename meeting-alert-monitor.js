@@ -4,6 +4,7 @@
 const fs = require('fs');
 const path = require('path');
 const { execFile, spawn } = require('child_process');
+const http = require('http');
 const https = require('https');
 const claudiaDb = require('./claudia-db');
 const slack = require('./lib/slack');
@@ -516,6 +517,11 @@ function triggerAlert(event, level) {
 
   log.info({ alertLevel: level, eventId: event.id, summary: event.summary, startTime: event.start.dateTime }, 'Alert triggered');
 
+  // Start recording when meeting begins
+  if (level === 'start') {
+    startRecording(event, linkInfo);
+  }
+
   // Load current events from cache to find overlapping meetings
   const cached = meetingCache.loadCache();
   const allEvents = (cached && cached.events) || [];
@@ -675,6 +681,133 @@ function playSound(soundFile) {
   });
 }
 
+// --- Meeting Recorder Integration ---
+// Non-critical: if the recorder daemon is unavailable, alerts continue normally.
+
+const RECORDER_PORT = 9847;
+const RECORDER_STOP_BUFFER_MS = 2 * 60 * 1000; // 2 min past scheduled end
+let activeRecordingStopTimer = null;
+
+/**
+ * Send a JSON request to the meeting-recorder daemon.
+ * Returns a Promise that resolves to the parsed response or rejects on error.
+ */
+function recorderRequest(method, path, body) {
+  return new Promise((resolve, reject) => {
+    const payload = body ? JSON.stringify(body) : null;
+    const opts = {
+      hostname: '127.0.0.1',
+      port: RECORDER_PORT,
+      path,
+      method,
+      headers: { 'Content-Type': 'application/json' },
+    };
+    if (payload) opts.headers['Content-Length'] = Buffer.byteLength(payload);
+
+    const req = http.request(opts, (res) => {
+      let data = '';
+      res.on('data', (chunk) => { data += chunk; });
+      res.on('end', () => {
+        try {
+          resolve(JSON.parse(data));
+        } catch {
+          resolve(data);
+        }
+      });
+    });
+    req.on('error', reject);
+    req.setTimeout(3000, () => { req.destroy(new Error('timeout')); });
+    if (payload) req.write(payload);
+    req.end();
+  });
+}
+
+/**
+ * Map meeting platform to device hint for the recorder daemon.
+ */
+function platformToDeviceHint(platform) {
+  switch (platform) {
+    case 'zoom': return 'ZoomAudioDevice';
+    case 'teams': return 'Microsoft Teams Audio';
+    default: return null;
+  }
+}
+
+/**
+ * Start recording for a meeting event. Called when the "start" alert fires.
+ */
+async function startRecording(event, linkInfo) {
+  const attendees = (event.attendees || [])
+    .filter(a => !a.self)
+    .map(a => a.displayName || a.email);
+
+  const body = {
+    meetingId: event.id,
+    title: event.summary || 'Untitled Meeting',
+    attendees,
+    startTime: event.start.dateTime,
+    endTime: event.end.dateTime,
+    deviceHint: platformToDeviceHint(linkInfo.platform),
+  };
+
+  try {
+    const resp = await recorderRequest('POST', '/start', body);
+    log.info({ meetingId: event.id, resp }, 'Recorder: started');
+
+    // Schedule stop at meeting end + buffer
+    scheduleRecordingStop(event);
+  } catch (err) {
+    log.warn({ err: err.message, meetingId: event.id }, 'Recorder: start failed (non-critical)');
+  }
+}
+
+/**
+ * Schedule recording stop at meeting end time + buffer.
+ */
+function scheduleRecordingStop(event) {
+  if (activeRecordingStopTimer) {
+    clearTimeout(activeRecordingStopTimer);
+  }
+
+  const endMs = new Date(event.end.dateTime).getTime();
+  const stopAt = endMs + RECORDER_STOP_BUFFER_MS;
+  const delay = stopAt - Date.now();
+
+  if (delay <= 0) return; // Meeting already ended
+
+  activeRecordingStopTimer = setTimeout(async () => {
+    activeRecordingStopTimer = null;
+    try {
+      const resp = await recorderRequest('POST', '/stop', { meetingId: event.id });
+      log.info({ meetingId: event.id, resp }, 'Recorder: stopped (scheduled)');
+    } catch (err) {
+      log.warn({ err: err.message, meetingId: event.id }, 'Recorder: stop failed (non-critical)');
+    }
+  }, delay);
+
+  const delayMin = Math.round(delay / 60000);
+  log.info({ meetingId: event.id, delayMin }, 'Recorder: stop scheduled');
+}
+
+/**
+ * Stop any active recording (used during shutdown).
+ */
+async function stopRecordingGracefully() {
+  if (activeRecordingStopTimer) {
+    clearTimeout(activeRecordingStopTimer);
+    activeRecordingStopTimer = null;
+  }
+  try {
+    const status = await recorderRequest('GET', '/status');
+    if (status && status.recording) {
+      await recorderRequest('POST', '/stop', { meetingId: status.meetingId || 'shutdown' });
+      log.info('Recorder: stopped on shutdown');
+    }
+  } catch {
+    // Recorder unavailable — nothing to stop
+  }
+}
+
 /**
  * Main entry point - authorize calendar, start sync and alert loops.
  */
@@ -775,6 +908,9 @@ async function main() {
 function shutdown(signal) {
   log.info({ signal }, 'Received signal, shutting down');
   heartbeat.write('meeting-alerts', { checkInterval: CONFIG.pollInterval, status: 'shutting-down' });
+
+  // Stop any active recording
+  stopRecordingGracefully();
 
   for (const [groupKey, child] of Object.entries(activePopups)) {
     try {
