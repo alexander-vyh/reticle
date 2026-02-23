@@ -137,3 +137,68 @@ for (const item of items) {
 console.log('PASS: all items have full DigestItem shape');
 
 console.log('\n=== FOLLOW-UP COLLECTOR TESTS PASSED ===');
+
+// ============================================================
+// EMAIL COLLECTOR TESTS
+// ============================================================
+
+const { collectEmail } = require('./lib/digest-collectors');
+
+// --- Seed email data ---
+claudiaDb.upsertEmail(db, acct.id, {
+  gmail_id: 'gmail-001', thread_id: 'thread-001',
+  from_addr: 'vip@example.com', from_name: 'VIP Boss',
+  subject: 'Urgent request', date: now - 3600,
+  direction: 'inbound'
+});
+claudiaDb.upsertEmail(db, acct.id, {
+  gmail_id: 'gmail-002', thread_id: 'thread-002',
+  from_addr: 'test@example.com', to_addrs: ['someone@example.com'],
+  subject: 'Sent by me', date: now - 7200,
+  direction: 'outbound'
+});
+
+// Log a commitment action
+claudiaDb.logAction(db, {
+  accountId: acct.id, actor: 'user', entityType: 'email', entityId: 'gmail-001',
+  action: 'commitment', context: { text: 'I will review the RFC by Friday' }
+});
+
+const vipEmails = ['vip@example.com'];
+
+// Seed a conversation for the VIP email so vip-unreplied path is exercised
+claudiaDb.trackConversation(db, acct.id, {
+  id: 'email:vip-unreplied',
+  type: 'email',
+  subject: 'Urgent request',
+  from_user: 'vip@example.com',
+  from_name: 'VIP Boss',
+  last_sender: 'them',
+  waiting_for: 'my-response',
+  last_activity: now - (6 * 3600)
+});
+
+const emailItems = collectEmail(db, acct.id, { vipEmails });
+
+assert.ok(Array.isArray(emailItems));
+
+// Should have volume item
+const volumeItem = emailItems.find(i => i.category === 'email-volume');
+assert.ok(volumeItem, 'Should include email volume');
+assert.strictEqual(volumeItem.priority, 'low');
+console.log('PASS: email volume item');
+
+// Should have commitment item
+const commitItem = emailItems.find(i => i.category === 'commitment');
+assert.ok(commitItem, 'Should include commitment from action log');
+assert.ok(commitItem.observation.includes('review the RFC'), 'Should include commitment text');
+console.log('PASS: commitment item');
+
+// Should have VIP unreplied item
+const vipItem = emailItems.find(i => i.category === 'vip-unreplied');
+assert.ok(vipItem, 'Should include VIP unreplied item');
+assert.strictEqual(vipItem.priority, 'high');
+assert.ok(vipItem.observation.includes('VIP unreplied'), 'Should indicate VIP status');
+console.log('PASS: VIP unreplied item');
+
+console.log('\n=== EMAIL COLLECTOR TESTS PASSED ===');
