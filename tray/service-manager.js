@@ -5,7 +5,7 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 
-const HEARTBEAT_DIR = path.join(os.homedir(), '.config', 'claudia', 'heartbeats');
+const HEARTBEAT_DIR = path.join(os.homedir(), '.claudia', 'heartbeats');
 
 // Map launchd labels to heartbeat service names
 const HEARTBEAT_NAMES = {

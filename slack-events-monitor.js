@@ -36,6 +36,7 @@ const CONFIG = {
 let pendingMessages = {};
 let ws = null;
 let reconnectTimeout = null;
+let heartbeatInterval = null;
 let followupsDbConn = null;
 let accountId = null;
 let errorCount = 0;
@@ -1232,6 +1233,11 @@ async function connectSocketMode(db) {
     ws.on('open', () => {
       log.info('Socket Mode connected');
       heartbeat.write('slack-events', { checkInterval: 30000, status: 'ok' });
+      // Periodic heartbeat so tray doesn't flag us as stale during quiet periods
+      if (heartbeatInterval) clearInterval(heartbeatInterval);
+      heartbeatInterval = setInterval(() => {
+        heartbeat.write('slack-events', { checkInterval: 30000, status: 'ok' });
+      }, 30000);
       if (reconnectTimeout) {
         clearTimeout(reconnectTimeout);
         reconnectTimeout = null;
@@ -1282,6 +1288,7 @@ async function connectSocketMode(db) {
     });
 
     ws.on('close', () => {
+      if (heartbeatInterval) { clearInterval(heartbeatInterval); heartbeatInterval = null; }
       log.warn({ reconnectDelayMs: CONFIG.reconnectDelay }, 'Socket Mode disconnected, reconnecting');
       heartbeat.write('slack-events', {
         checkInterval: 30000,
