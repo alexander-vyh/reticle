@@ -1,7 +1,8 @@
 'use strict';
 
-const { app, Tray, Menu, Notification, shell } = require('electron');
+const { app, Tray, Menu, Notification, shell, dialog } = require('electron');
 const path = require('path');
+const fs = require('fs');
 const serviceManager = require('./service-manager');
 const icons = require('./icons');
 
@@ -221,7 +222,27 @@ function stopSpinning() {
   refreshStatus();
 }
 
-app.whenReady().then(() => {
+async function promptLoginItem() {
+  const flagFile = path.join(app.getPath('userData'), '.login-item-prompted');
+  if (fs.existsSync(flagFile)) return;
+
+  const { response } = await dialog.showMessageBox({
+    type: 'question',
+    buttons: ['Yes', 'No'],
+    defaultId: 0,
+    title: 'Claudia',
+    message: 'Start Claudia automatically at login?',
+    detail: 'Claudia monitors your background services. Starting at login keeps the menu bar icon available whenever you\'re logged in.'
+  });
+
+  if (response === 0) {
+    app.setLoginItemSettings({ openAtLogin: true });
+  }
+
+  fs.writeFileSync(flagFile, JSON.stringify({ asked: true, enabled: response === 0 }));
+}
+
+app.whenReady().then(async () => {
   if (app.dock) app.dock.hide();
 
   tray = new Tray(getIcon('yellow'));
@@ -229,6 +250,8 @@ app.whenReady().then(() => {
 
   refreshStatus();
   setInterval(refreshStatus, 10 * 1000);
+
+  await promptLoginItem();
 });
 
 app.on('window-all-closed', (e) => e.preventDefault());
