@@ -10,6 +10,8 @@ struct RecorderConfig: Codable {
     var pythonVenvPath: String = "~/.config/claudia/recorder-venv"
     var whisperModel: String = "mlx-community/whisper-large-v3-turbo"
     var language: String = "auto"
+    var micDevice: String = ""
+    var micVadThreshold: Double = 0.01
 
     static let configPath = NSString("~/.config/claudia/recorder.json").expandingTildeInPath
     private static let logger = Logger(subsystem: "ai.openclaw.meeting-recorder", category: "Config")
