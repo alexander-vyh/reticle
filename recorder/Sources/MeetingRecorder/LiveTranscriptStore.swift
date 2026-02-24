@@ -243,7 +243,4 @@ final class LiveTranscriptStore {
         let totalDuration: Double
     }
 
-    struct IdleEvent: Codable {
-        let state: String
-    }
 }

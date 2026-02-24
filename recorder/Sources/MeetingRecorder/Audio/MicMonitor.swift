@@ -145,15 +145,17 @@ final class MicMonitor {
     }
 
     func stop() {
-        if let unit = audioUnit {
-            AudioOutputUnitStop(unit)
-            AudioComponentInstanceDispose(unit)
-            audioUnit = nil
-        }
+        guard let unit = audioUnit else { return }
+        // Signal callback to bail early before stopping the unit
+        isRunning = false
+        // AudioOutputUnitStop waits for any in-flight callback to complete
+        AudioOutputUnitStop(unit)
+        AudioComponentInstanceDispose(unit)
+        audioUnit = nil
+        // Safe to deallocate now — no callback can be running
         renderBuffer?.deallocate()
         renderBuffer = nil
         renderBufferSize = 0
-        isRunning = false
     }
 
     /// Check if self was speaking during a time window (relative to recording start).
@@ -173,8 +175,8 @@ final class MicMonitor {
     func clearHistory() {
         historyLock.lock()
         _vadHistory.removeAll()
-        historyLock.unlock()
         startTime = nil
+        historyLock.unlock()
     }
 
     // MARK: - Audio Callback
