@@ -162,6 +162,88 @@ for svc in "${SERVICES[@]}"; do
 PLIST
 done
 
+# Scheduled service definitions: label|js_file
+SCHEDULED_SERVICES=(
+  "digest-daily|digest-daily.js"
+  "digest-weekly|digest-weekly.js"
+)
+
+# Daily digest: weekdays at 6:00 PM
+cat > "$PLIST_DIR/ai.claudia.digest-daily.plist" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>ai.claudia.digest-daily</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/opt/homebrew/bin/node</string>
+    <string>$CLAUDIA_HOME/app/digest-daily.js</string>
+  </array>
+  <key>StartCalendarInterval</key>
+  <array>
+    <dict><key>Weekday</key><integer>1</integer><key>Hour</key><integer>18</integer><key>Minute</key><integer>0</integer></dict>
+    <dict><key>Weekday</key><integer>2</integer><key>Hour</key><integer>18</integer><key>Minute</key><integer>0</integer></dict>
+    <dict><key>Weekday</key><integer>3</integer><key>Hour</key><integer>18</integer><key>Minute</key><integer>0</integer></dict>
+    <dict><key>Weekday</key><integer>4</integer><key>Hour</key><integer>18</integer><key>Minute</key><integer>0</integer></dict>
+    <dict><key>Weekday</key><integer>5</integer><key>Hour</key><integer>18</integer><key>Minute</key><integer>0</integer></dict>
+  </array>
+  <key>KeepAlive</key>
+  <false/>
+  <key>ProcessType</key>
+  <string>Background</string>
+  <key>StandardOutPath</key>
+  <string>$CLAUDIA_HOME/logs/digest-daily.log</string>
+  <key>StandardErrorPath</key>
+  <string>$CLAUDIA_HOME/logs/digest-daily-error.log</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>HOME</key>
+    <string>$HOME</string>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+  </dict>
+</dict>
+</plist>
+PLIST
+
+# Weekly digest: Friday at 4:00 PM
+cat > "$PLIST_DIR/ai.claudia.digest-weekly.plist" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>ai.claudia.digest-weekly</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/opt/homebrew/bin/node</string>
+    <string>$CLAUDIA_HOME/app/digest-weekly.js</string>
+  </array>
+  <key>StartCalendarInterval</key>
+  <dict><key>Weekday</key><integer>5</integer><key>Hour</key><integer>16</integer><key>Minute</key><integer>0</integer></dict>
+  <key>KeepAlive</key>
+  <false/>
+  <key>ProcessType</key>
+  <string>Background</string>
+  <key>StandardOutPath</key>
+  <string>$CLAUDIA_HOME/logs/digest-weekly.log</string>
+  <key>StandardErrorPath</key>
+  <string>$CLAUDIA_HOME/logs/digest-weekly-error.log</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>HOME</key>
+    <string>$HOME</string>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+  </dict>
+</dict>
+</plist>
+PLIST
+
 # --- Step 8: Unload old openclaw plists ---
 OLD_LABELS=(
   "ai.openclaw.gmail-monitor"
@@ -194,6 +276,17 @@ for svc in "${SERVICES[@]}"; do
   launchctl bootstrap "gui/$UID_VAL" "$plist_path"
 done
 
+# Load scheduled services
+for svc in "${SCHEDULED_SERVICES[@]}"; do
+  IFS='|' read -r label jsfile <<< "$svc"
+  plist_label="ai.claudia.$label"
+  plist_path="$PLIST_DIR/$plist_label.plist"
+
+  launchctl bootout "gui/$UID_VAL/$plist_label" 2>/dev/null || true
+  sleep 0.5
+  launchctl bootstrap "gui/$UID_VAL" "$plist_path"
+done
+
 # --- Step 10: Report status ---
 sleep 2
 info "Service status:"
@@ -213,6 +306,20 @@ for svc in "${SERVICES[@]}"; do
     else
       echo -e "  ${RED}error${NC}    $label (exit $exit_col)"
     fi
+  else
+    echo -e "  ${RED}unloaded${NC} $label"
+  fi
+done
+
+echo ""
+info "Scheduled services:"
+for svc in "${SCHEDULED_SERVICES[@]}"; do
+  IFS='|' read -r label jsfile <<< "$svc"
+  plist_label="ai.claudia.$label"
+
+  status_line=$(launchctl list 2>/dev/null | grep "$plist_label" || true)
+  if [ -n "$status_line" ]; then
+    echo -e "  ${GREEN}loaded${NC}   $label (scheduled)"
   else
     echo -e "  ${RED}unloaded${NC} $label"
   fi
