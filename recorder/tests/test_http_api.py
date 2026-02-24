@@ -3,9 +3,12 @@
 Tests Bug 1 (stale process detection) and Bug 3 (attendees optional).
 """
 
+import glob
+import json
 import os
 import signal
 import subprocess
+import threading
 import time
 
 import pytest
@@ -87,3 +90,92 @@ class TestStaleProcessDetection:
         resp = requests.get(f"{BASE_URL}/health", timeout=2)
         assert resp.ok
         assert resp.json().get("ok") is True
+
+
+class TestSSELiveEndpoint:
+    """GET /live should stream Server-Sent Events."""
+
+    def test_live_returns_sse_headers(self, daemon):
+        """GET /live should return text/event-stream content type."""
+        resp = requests.get(f"{BASE_URL}/live", stream=True, timeout=5)
+        assert resp.status_code == 200
+        assert "text/event-stream" in resp.headers.get("Content-Type", "")
+        resp.close()
+
+    def test_live_idle_when_not_recording(self, daemon):
+        """When not recording, /live should send a status:idle event."""
+        resp = requests.get(f"{BASE_URL}/live", stream=True, timeout=5)
+        # Read first event
+        first_line = b""
+        for chunk in resp.iter_content(chunk_size=1):
+            first_line += chunk
+            if b"\n\n" in first_line:
+                break
+        resp.close()
+
+        text = first_line.decode("utf-8")
+        assert "event: status" in text
+        assert '"idle"' in text
+
+    def test_live_streams_segments_during_recording(self, daemon):
+        """Start a recording, connect to /live, verify segment events arrive."""
+        # Start recording
+        start_resp = requests.post(
+            f"{BASE_URL}/start",
+            json={"meetingId": "sse-test", "title": "SSE Test"},
+        )
+        assert start_resp.status_code == 200
+
+        events = []
+        stop_flag = threading.Event()
+
+        def collect_events():
+            try:
+                resp = requests.get(f"{BASE_URL}/live", stream=True, timeout=15)
+                for line in resp.iter_lines():
+                    if stop_flag.is_set():
+                        break
+                    if line:
+                        events.append(line.decode("utf-8"))
+                resp.close()
+            except Exception:
+                pass
+
+        # Collect SSE events in background
+        t = threading.Thread(target=collect_events, daemon=True)
+        t.start()
+
+        # Wait a bit for events to accumulate, then stop
+        time.sleep(8)
+        requests.post(f"{BASE_URL}/stop", json={"meetingId": "sse-test"}, timeout=10)
+        time.sleep(2)
+        stop_flag.set()
+        t.join(timeout=5)
+
+        # Should have received at least a status event
+        event_text = "\n".join(events)
+        assert "event: status" in event_text, f"Expected status event, got: {event_text}"
+
+    def test_live_persists_on_stop(self, daemon):
+        """After stop, a -live.json file should be written."""
+        recordings_dir = os.path.expanduser("~/.config/claudia/recordings")
+
+        # Start and stop a recording
+        requests.post(
+            f"{BASE_URL}/start",
+            json={"meetingId": "persist-test", "title": "Persist Test"},
+        )
+        time.sleep(3)
+        requests.post(f"{BASE_URL}/stop", json={"meetingId": "persist-test"}, timeout=10)
+        time.sleep(2)
+
+        # Check for live JSON file
+        live_files = glob.glob(f"{recordings_dir}/meeting-persist-test-*-live.json")
+        assert len(live_files) >= 1, f"Expected live JSON file, found: {live_files}"
+
+        # Verify contents
+        with open(live_files[0]) as f:
+            data = json.load(f)
+        assert data["meetingId"] == "persist-test"
+        assert "finalMetrics" in data
+        assert "segments" in data
