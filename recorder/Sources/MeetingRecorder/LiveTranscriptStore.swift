@@ -33,11 +33,12 @@ final class LiveTranscriptStore {
     }
 
     init(meetingId: String, title: String, micMonitor: MicMonitor?) {
+        let now = Date()
         self.meetingId = meetingId
         self.title = title
-        self.startTime = Date()
+        self.startTime = now
         self.micMonitor = micMonitor
-        self.metrics = MetricsEngine(recordingStartTime: Date())
+        self.metrics = MetricsEngine(recordingStartTime: now)
     }
 
     // MARK: - Segment Ingestion
@@ -71,15 +72,13 @@ final class LiveTranscriptStore {
 
     func addSubscriber(connection: NWConnection) {
         let id = UUID()
-        subscriberLock.lock()
-        subscribers[id] = connection
-        subscriberLock.unlock()
 
         // Send status event
         let status = StatusEvent(state: "recording", meetingId: meetingId, title: title)
         sendSSE(to: connection, type: "status", data: status)
 
-        // Replay accumulated segments
+        // Replay accumulated segments before registering, so pushEvent
+        // doesn't race with replay and deliver out-of-order events
         lock.lock()
         let currentSegments = segments
         let currentMetrics = metrics.snapshot()
@@ -92,14 +91,23 @@ final class LiveTranscriptStore {
             sendSSE(to: connection, type: "metrics", data: currentMetrics)
         }
 
-        // Set up removal on connection close
+        // Register AFTER replay completes
+        subscriberLock.lock()
+        subscribers[id] = connection
+        let count = subscribers.count
+        subscriberLock.unlock()
+
+        // Set up removal on connection close or failure
         connection.stateUpdateHandler = { [weak self] state in
-            if case .cancelled = state {
+            switch state {
+            case .cancelled, .failed:
                 self?.removeSubscriber(id: id)
+            default:
+                break
             }
         }
 
-        logger.notice("SSE subscriber added (total: \(self.subscribers.count))")
+        logger.notice("SSE subscriber added (total: \(count))")
     }
 
     func removeSubscriber(id: UUID) {
