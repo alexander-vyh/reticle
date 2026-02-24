@@ -202,3 +202,50 @@ assert.ok(vipItem.observation.includes('VIP unreplied'), 'Should indicate VIP st
 console.log('PASS: VIP unreplied item');
 
 console.log('\n=== EMAIL COLLECTOR TESTS PASSED ===');
+
+// ============================================================
+// O3 COLLECTOR TESTS
+// ============================================================
+
+const { collectO3 } = require('./lib/digest-collectors');
+
+// --- Seed O3 data ---
+claudiaDb.upsertO3Session(db, acct.id, {
+  id: 'cal-o3-1',
+  report_name: 'Jane Smith',
+  report_email: 'jane@example.com',
+  scheduled_start: now - (2 * 86400), // 2 days ago
+  scheduled_end: now - (2 * 86400) + 1800,
+  created_at: now - (3 * 86400)
+});
+// This O3 happened but Lattice not logged
+claudiaDb.markO3Notified(db, 'cal-o3-1', 'prep_sent_before');
+
+// Upcoming O3: tomorrow
+claudiaDb.upsertO3Session(db, acct.id, {
+  id: 'cal-o3-2',
+  report_name: 'Dev Reyes',
+  report_email: 'dev@example.com',
+  scheduled_start: now + 86400,
+  scheduled_end: now + 86400 + 1800,
+  created_at: now
+});
+
+const o3Items = collectO3(db, acct.id);
+
+assert.ok(Array.isArray(o3Items));
+
+// Should flag the incomplete O3
+const incomplete = o3Items.find(i => i.category === 'o3-incomplete');
+assert.ok(incomplete, 'Should flag O3 without Lattice entry');
+assert.strictEqual(incomplete.priority, 'high');
+assert.ok(incomplete.observation.includes('Jane Smith'), 'Should name the report');
+console.log('PASS: O3 incomplete flagged');
+
+// Should show upcoming O3
+const upcoming = o3Items.find(i => i.category === 'o3-upcoming');
+assert.ok(upcoming, 'Should show upcoming O3');
+assert.ok(upcoming.observation.includes('Dev Reyes'));
+console.log('PASS: O3 upcoming shown');
+
+console.log('\n=== O3 COLLECTOR TESTS PASSED ===');
