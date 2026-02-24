@@ -214,6 +214,17 @@ function initDatabase() {
     );
     CREATE INDEX IF NOT EXISTS idx_notif_conv    ON notification_log(conversation_id);
     CREATE INDEX IF NOT EXISTS idx_notif_account ON notification_log(account_id, sent_at);
+
+    CREATE TABLE IF NOT EXISTS digest_snapshots (
+      id             INTEGER PRIMARY KEY AUTOINCREMENT,
+      account_id     TEXT NOT NULL REFERENCES accounts(id),
+      snapshot_date  TEXT NOT NULL,
+      cadence        TEXT NOT NULL,
+      items          TEXT NOT NULL,
+      created_at     INTEGER NOT NULL DEFAULT (strftime('%s','now'))
+    );
+    CREATE INDEX IF NOT EXISTS idx_digest_date ON digest_snapshots(account_id, snapshot_date);
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_digest_unique ON digest_snapshots(account_id, snapshot_date, cadence);
   `);
 
   return db;
@@ -657,6 +668,47 @@ function markNotified(db, conversationId) {
   ).run(conversationId);
 }
 
+// --- Digest Snapshots ---
+
+function saveSnapshot(db, accountId, { snapshotDate, cadence, items }) {
+  db.prepare(`
+    INSERT OR REPLACE INTO digest_snapshots (account_id, snapshot_date, cadence, items)
+    VALUES (?, ?, ?, ?)
+  `).run(accountId, snapshotDate, cadence, JSON.stringify(items));
+}
+
+function getSnapshotsForRange(db, accountId, startDate, endDate, cadence = null) {
+  let sql = `
+    SELECT * FROM digest_snapshots
+    WHERE account_id = ? AND snapshot_date >= ? AND snapshot_date < ?
+  `;
+  const params = [accountId, startDate, endDate];
+
+  if (cadence) {
+    sql += ` AND cadence = ?`;
+    params.push(cadence);
+  }
+
+  sql += ` ORDER BY snapshot_date ASC`;
+
+  return db.prepare(sql).all(...params).map(row => ({
+    ...row,
+    items: JSON.parse(row.items)
+  }));
+}
+
+function pruneOldSnapshots(db, accountId, maxAgeDays) {
+  const cutoffDate = new Date();
+  cutoffDate.setDate(cutoffDate.getDate() - maxAgeDays);
+  const cutoff = cutoffDate.toISOString().split('T')[0]; // YYYY-MM-DD
+
+  const result = db.prepare(`
+    DELETE FROM digest_snapshots
+    WHERE account_id = ? AND snapshot_date < ?
+  `).run(accountId, cutoff);
+  return result.changes;
+}
+
 module.exports = {
   DB_PATH,
   ENTITY_TYPES,
@@ -701,4 +753,7 @@ module.exports = {
   markO3LatticeLogged,
   logNotification,
   markNotified,
+  saveSnapshot,
+  getSnapshotsForRange,
+  pruneOldSnapshots,
 };

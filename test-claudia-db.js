@@ -25,10 +25,10 @@ const tables = db.prepare(
   "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name"
 ).all().map(r => r.name);
 assert.deepStrictEqual(tables, [
-  'accounts', 'action_log', 'conversations', 'email_rules',
+  'accounts', 'action_log', 'conversations', 'digest_snapshots', 'email_rules',
   'emails', 'entity_links', 'notification_log', 'o3_sessions', 'unsubscribes'
 ]);
-console.log('PASS: all 9 tables created');
+console.log('PASS: all 10 tables created');
 
 // --- Test: upsertAccount + getAccount ---
 const acct = claudiaDb.upsertAccount(db, {
@@ -871,5 +871,76 @@ assert.strictEqual(parsedOutcome.count, 42);
 console.log('PASS: action log JSON round-trip');
 
 console.log('\n--- JSON serialization tests passed ---');
+
+// --- Test: digest_snapshots table exists ---
+const snapshotTable = db.prepare(
+  "SELECT name FROM sqlite_master WHERE type='table' AND name='digest_snapshots'"
+).get();
+assert.ok(snapshotTable, 'digest_snapshots table should exist');
+console.log('PASS: digest_snapshots table created');
+
+// --- Test: saveSnapshot ---
+const testItems = [
+  { id: 'test-1', collector: 'followup', observation: 'test', priority: 'normal' },
+  { id: 'test-2', collector: 'email', observation: 'test2', priority: 'high' }
+];
+claudiaDb.saveSnapshot(db, acct.id, {
+  snapshotDate: '2026-02-23',
+  cadence: 'daily',
+  items: testItems
+});
+console.log('PASS: saveSnapshot');
+
+// --- Test: getSnapshotsForRange ---
+claudiaDb.saveSnapshot(db, acct.id, {
+  snapshotDate: '2026-02-22',
+  cadence: 'daily',
+  items: [{ id: 'test-3', collector: 'followup', observation: 'yesterday' }]
+});
+claudiaDb.saveSnapshot(db, acct.id, {
+  snapshotDate: '2026-02-21',
+  cadence: 'weekly',
+  items: [{ id: 'test-4' }]
+});
+
+const snapshots = claudiaDb.getSnapshotsForRange(db, acct.id, '2026-02-20', '2026-02-24');
+assert.strictEqual(snapshots.length, 3, 'Should return all 3 snapshots in range');
+// Items should be parsed back to arrays
+assert.ok(Array.isArray(snapshots[0].items), 'Items should be parsed from JSON');
+console.log('PASS: getSnapshotsForRange');
+
+// Filtered by cadence
+const dailyOnly = claudiaDb.getSnapshotsForRange(db, acct.id, '2026-02-20', '2026-02-24', 'daily');
+assert.strictEqual(dailyOnly.length, 2, 'Should return only daily snapshots');
+console.log('PASS: getSnapshotsForRange with cadence filter');
+
+// --- Test: pruneOldSnapshots ---
+// Add an old snapshot
+claudiaDb.saveSnapshot(db, acct.id, {
+  snapshotDate: '2025-01-01',
+  cadence: 'daily',
+  items: [{ id: 'ancient' }]
+});
+const beforePrune = claudiaDb.getSnapshotsForRange(db, acct.id, '2025-01-01', '2025-01-02');
+assert.strictEqual(beforePrune.length, 1);
+
+claudiaDb.pruneOldSnapshots(db, acct.id, 56); // 56 days = 8 weeks
+const afterPrune = claudiaDb.getSnapshotsForRange(db, acct.id, '2025-01-01', '2025-01-02');
+assert.strictEqual(afterPrune.length, 0, 'Old snapshot should be pruned');
+console.log('PASS: pruneOldSnapshots');
+
+// --- Test: account isolation for snapshots ---
+claudiaDb.saveSnapshot(db, acctB.id, {
+  snapshotDate: '2026-02-23',
+  cadence: 'daily',
+  items: [{ id: 'acctB-item' }]
+});
+const acctASnapshots = claudiaDb.getSnapshotsForRange(db, acct.id, '2026-02-23', '2026-02-24');
+// Should only have acct A's snapshot from earlier, not acct B's
+const acctAItems = acctASnapshots.flatMap(s => s.items);
+assert.ok(!acctAItems.some(i => i.id === 'acctB-item'), 'Account A should not see account B snapshots');
+console.log('PASS: snapshot account isolation');
+
+console.log('\n--- Digest snapshot tests passed ---');
 
 console.log('\n=== ALL CLAUDIA-DB TESTS PASSED ===');
