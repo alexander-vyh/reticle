@@ -160,11 +160,16 @@ class TestSSELiveEndpoint:
         """After stop, a -live.json file should be written."""
         recordings_dir = os.path.expanduser("~/.config/claudia/recordings")
 
+        # Clean up any stale files from previous runs
+        for f in glob.glob(f"{recordings_dir}/meeting-persist-test-*-live.json"):
+            os.remove(f)
+
         # Start and stop a recording
-        requests.post(
+        start_resp = requests.post(
             f"{BASE_URL}/start",
             json={"meetingId": "persist-test", "title": "Persist Test"},
         )
+        assert start_resp.status_code == 200, f"Start failed: {start_resp.text}"
         time.sleep(3)
         requests.post(f"{BASE_URL}/stop", json={"meetingId": "persist-test"}, timeout=10)
         time.sleep(2)
