@@ -17,7 +17,7 @@ final class RecorderDaemon {
     /// Current live transcript store (nil when not recording)
     private(set) var liveStore: LiveTranscriptStore?
 
-    private let micMonitor = MicMonitor()
+    private let micMonitor: MicMonitor
     private var heartbeatTimer: DispatchSourceTimer?
 
     struct RecordingSession {
@@ -34,6 +34,7 @@ final class RecorderDaemon {
     init(config: RecorderConfig, deviceManager: AudioDeviceManager) {
         self.config = config
         self.deviceManager = deviceManager
+        self.micMonitor = MicMonitor(vadThreshold: Float(config.micVadThreshold))
     }
 
     // MARK: - Daemon Lifecycle
@@ -105,6 +106,9 @@ final class RecorderDaemon {
 
         // Start mic monitor for self/others detection
         let micDeviceID = resolveMicDevice()
+        if micDeviceID == deviceID {
+            logger.warning("Mic device is same as capture device (\(deviceID)). Self/others detection may be inaccurate.")
+        }
         if micDeviceID != 0 {
             do {
                 try micMonitor.start(deviceID: micDeviceID)
