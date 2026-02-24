@@ -15,6 +15,8 @@ const HEARTBEAT_NAMES = {
   'ai.claudia.followup-checker': 'followup-checker',
   'ai.openclaw.gateway': null,  // Gateway doesn't write heartbeats (yet)
   'ai.openclaw.meeting-recorder': null,  // Meeting recorder doesn't write heartbeats (yet)
+  'ai.claudia.digest-daily': 'digest-daily',
+  'ai.claudia.digest-weekly': 'digest-weekly',
 };
 
 const SERVICES = [
@@ -24,6 +26,8 @@ const SERVICES = [
   { label: 'Follow-up Checker',  launchdLabel: 'ai.claudia.followup-checker' },
   { label: 'Meeting Recorder',   launchdLabel: 'ai.openclaw.meeting-recorder' },
   { label: 'Gateway',            launchdLabel: 'ai.openclaw.gateway' },
+  { label: 'Daily Digest',      launchdLabel: 'ai.claudia.digest-daily' },
+  { label: 'Weekly Digest',     launchdLabel: 'ai.claudia.digest-weekly' },
 ];
 
 function parseLaunchctlList(output) {

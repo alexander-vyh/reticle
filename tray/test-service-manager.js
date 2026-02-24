@@ -31,12 +31,15 @@ assert.strictEqual(statusFromEntry({ pid: null, exitCode: 1 }), 'error');
 assert.strictEqual(statusFromEntry(undefined), 'unloaded');
 
 // --- Test: SERVICES list matches expected inventory ---
-assert.strictEqual(SERVICES.length, 5);
+assert.strictEqual(SERVICES.length, 8);
 assert.ok(SERVICES.find(s => s.launchdLabel === 'ai.claudia.gmail-monitor'));
 assert.ok(SERVICES.find(s => s.launchdLabel === 'ai.claudia.slack-events'));
 assert.ok(SERVICES.find(s => s.launchdLabel === 'ai.claudia.meeting-alerts'));
 assert.ok(SERVICES.find(s => s.launchdLabel === 'ai.claudia.followup-checker'));
 assert.ok(SERVICES.find(s => s.launchdLabel === 'ai.openclaw.gateway'));
+assert.ok(SERVICES.find(s => s.launchdLabel === 'ai.openclaw.meeting-recorder'));
+assert.ok(SERVICES.find(s => s.launchdLabel === 'ai.claudia.digest-daily'));
+assert.ok(SERVICES.find(s => s.launchdLabel === 'ai.claudia.digest-weekly'));
 assert.ok(!SERVICES.find(s => s.launchdLabel === 'ai.openclaw.slack-monitor'), 'Old slack-monitor must not be in SERVICES');
 
 console.log('All service-manager tests passed');
