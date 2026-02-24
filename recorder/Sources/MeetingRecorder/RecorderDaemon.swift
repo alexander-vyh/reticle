@@ -14,6 +14,9 @@ final class RecorderDaemon {
     private var activeSession: RecordingSession?
     private var httpServer: HTTPServer?
 
+    /// Current live transcript store (nil when not recording)
+    private(set) var liveStore: LiveTranscriptStore?
+
     struct RecordingSession {
         let meetingId: String
         let title: String

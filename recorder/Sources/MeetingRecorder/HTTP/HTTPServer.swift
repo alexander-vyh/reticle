@@ -10,9 +10,11 @@ final class HTTPServer {
     private var listener: NWListener?
     private let router: HTTPRouter
     private let queue = DispatchQueue(label: "ai.openclaw.meeting-recorder.http")
+    private weak var daemon: RecorderDaemon?
 
     init(port: UInt16, daemon: RecorderDaemon) {
         self.port = port
+        self.daemon = daemon
         self.router = HTTPRouter(daemon: daemon)
     }
 
@@ -74,6 +76,13 @@ final class HTTPServer {
                 return
             }
 
+            // Check for SSE request before normal routing
+            let (method, path) = self.parseRequestLine(data: data)
+            if method == "GET" && path == "/live" {
+                self.handleSSEConnection(connection)
+                return
+            }
+
             let response = self.parseAndRoute(data: data)
             self.sendResponse(response, on: connection)
         }
@@ -118,6 +127,45 @@ final class HTTPServer {
                 self?.logger.error("Failed to send response: \(error.localizedDescription)")
             }
             connection.cancel()
+        })
+    }
+
+    // MARK: - SSE Support
+
+    private func parseRequestLine(data: Data) -> (String, String) {
+        guard let raw = String(data: data, encoding: .utf8) else { return ("GET", "/") }
+        let headerSection = raw.components(separatedBy: "\r\n\r\n").first ?? ""
+        let headerLines = headerSection.components(separatedBy: "\r\n")
+        guard let requestLine = headerLines.first else { return ("GET", "/") }
+        let tokens = requestLine.split(separator: " ", maxSplits: 2)
+        guard tokens.count >= 2 else { return ("GET", "/") }
+        return (String(tokens[0]), String(tokens[1]))
+    }
+
+    private func handleSSEConnection(_ connection: NWConnection) {
+        let headers = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nConnection: keep-alive\r\n\r\n"
+        guard let headerData = headers.data(using: .utf8) else {
+            connection.cancel()
+            return
+        }
+
+        connection.send(content: headerData, completion: .contentProcessed { [weak self] error in
+            if let error = error {
+                self?.logger.error("Failed to send SSE headers: \(error.localizedDescription)")
+                connection.cancel()
+                return
+            }
+
+            // Register as subscriber
+            if let store = self?.daemon?.liveStore {
+                store.addSubscriber(connection: connection)
+            } else {
+                // No active recording — send idle status and keep connection open
+                let idle = "event: status\ndata: {\"state\":\"idle\"}\n\n"
+                if let data = idle.data(using: .utf8) {
+                    connection.send(content: data, completion: .contentProcessed { _ in })
+                }
+            }
         })
     }
 }
