@@ -235,6 +235,19 @@ function initDatabase() {
       resolved_at INTEGER,
       created_at  INTEGER NOT NULL DEFAULT (strftime('%s','now'))
     );
+
+    CREATE TABLE IF NOT EXISTS feedback_candidates (
+      id          TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(8)))),
+      created_at  INTEGER NOT NULL DEFAULT (strftime('%s','now')),
+      account_id  TEXT,
+      report_name TEXT NOT NULL,
+      channel     TEXT,
+      raw_artifact TEXT NOT NULL,
+      draft       TEXT,
+      feedback_type TEXT,
+      entity_id   TEXT,
+      status      TEXT NOT NULL DEFAULT 'pending'
+    );
   `);
 
   return db;
