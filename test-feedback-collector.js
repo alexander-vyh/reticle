@@ -159,6 +159,12 @@ function testCreateFeedbackDigestItemAdjusting() {
   console.log('  PASS: createFeedbackDigestItem — adjusting gets high priority');
 }
 
+function testCollectFeedbackSignature() {
+  const { collectFeedback } = require('./lib/feedback-collector');
+  assert.strictEqual(typeof collectFeedback, 'function');
+  console.log('  PASS: collectFeedback — function exists');
+}
+
 console.log('feedback-collector tests:');
 testFilterToReportMessages();
 testFilterToReportMessagesNoDuplicates();
@@ -167,4 +173,5 @@ testFilterByConfidence();
 testBuildFeedbackDraftPrompt();
 testCreateFeedbackDigestItem();
 testCreateFeedbackDigestItemAdjusting();
+testCollectFeedbackSignature();
 console.log('All feedback-collector tests passed');
