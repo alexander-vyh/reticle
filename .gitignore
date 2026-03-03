@@ -55,3 +55,8 @@ recorder/scripts/.venv/
 
 # direnv
 .envrc
+
+# Reticle app
+reticle/.build/
+reticle/DerivedData/
+reticle/*.xcuserdata/
