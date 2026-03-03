@@ -1063,6 +1063,23 @@ async function handleInteractive(payload) {
           result = { success: true, message: '✓ Domain rule cancelled.' };
           break;
 
+        case 'feedback_delivered':
+        case 'feedback_skipped': {
+          const feedbackTracker = require('./lib/feedback-tracker');
+          if (followupsDbConn) {
+            const val = action.value ? JSON.parse(action.value) : {};
+            feedbackTracker.logFeedbackAction(followupsDbConn, accountId, {
+              reportName: val.report || 'unknown',
+              feedbackType: val.feedbackType || 'unknown',
+              action: actionId,
+              entityId: val.entityId || ''
+            });
+          }
+          const label = actionId === 'feedback_delivered' ? 'delivered' : 'skipped';
+          result = { success: true, message: `✓ Feedback marked as ${label}` };
+          break;
+        }
+
         default:
           result = { success: false, message: '✗ Unknown action' };
       }
