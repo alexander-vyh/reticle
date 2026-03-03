@@ -103,6 +103,16 @@ async function main() {
     failedCollectors.push('feedback');
   }
 
+  // Persist feedback candidates for gateway/Reticle access
+  for (const item of feedbackItems) {
+    db.prepare(`
+      INSERT OR IGNORE INTO feedback_candidates
+        (account_id, report_name, channel, raw_artifact, draft, feedback_type, entity_id)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+    `).run(accountId, item.counterparty, item.authority,
+        item.rawArtifact, item.feedbackDraft, item.feedbackType, item.entityId);
+  }
+
   if (allItems.length === 0 && failedCollectors.length === collectors.length) {
     await sendSlackDM('Daily digest unavailable — all collectors failed. Check logs.');
     process.exit(1);

@@ -71,9 +71,47 @@ function testGatewayDeleteDecodesEmail() {
   console.log('  PASS: gateway DELETE decodes URI-encoded email');
 }
 
+function testFeedbackCandidateFlow() {
+  const db = setupTestDb();
+  // Add feedback_candidates table
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS feedback_candidates (
+      id          TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(8)))),
+      created_at  INTEGER NOT NULL DEFAULT (strftime('%s','now')),
+      account_id  TEXT,
+      report_name TEXT NOT NULL,
+      channel     TEXT,
+      raw_artifact TEXT NOT NULL,
+      draft       TEXT,
+      feedback_type TEXT,
+      entity_id   TEXT,
+      status      TEXT NOT NULL DEFAULT 'pending'
+    );
+  `);
+
+  // Insert a candidate
+  db.prepare(`
+    INSERT INTO feedback_candidates (account_id, report_name, channel, raw_artifact, draft, feedback_type, entity_id)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
+  `).run('acc1', 'Marcus Chen', '#platform-eng', 'Great deployment work', 'When you deployed...', 'affirming', 'entity1');
+
+  // Verify pending query
+  const pending = db.prepare(`SELECT * FROM feedback_candidates WHERE status = 'pending'`).all();
+  assert.strictEqual(pending.length, 1);
+  assert.strictEqual(pending[0].report_name, 'Marcus Chen');
+
+  // Mark delivered
+  db.prepare(`UPDATE feedback_candidates SET status = 'delivered' WHERE id = ?`).run(pending[0].id);
+  const afterDeliver = db.prepare(`SELECT * FROM feedback_candidates WHERE status = 'pending'`).all();
+  assert.strictEqual(afterDeliver.length, 0);
+
+  console.log('  PASS: feedback candidate CRUD flow');
+}
+
 console.log('gateway tests:');
 testGatewaySyntax();
 testGatewayPeopleFlow();
 testGatewayPostValidation();
 testGatewayDeleteDecodesEmail();
+testFeedbackCandidateFlow();
 console.log('All gateway tests passed');
