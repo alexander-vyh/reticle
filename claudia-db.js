@@ -225,6 +225,16 @@ function initDatabase() {
     );
     CREATE INDEX IF NOT EXISTS idx_digest_date ON digest_snapshots(account_id, snapshot_date);
     CREATE UNIQUE INDEX IF NOT EXISTS idx_digest_unique ON digest_snapshots(account_id, snapshot_date, cadence);
+
+    CREATE TABLE IF NOT EXISTS monitored_people (
+      id          TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(8)))),
+      email       TEXT UNIQUE NOT NULL,
+      name        TEXT,
+      slack_id    TEXT,
+      jira_id     TEXT,
+      resolved_at INTEGER,
+      created_at  INTEGER NOT NULL DEFAULT (strftime('%s','now'))
+    );
   `);
 
   return db;
