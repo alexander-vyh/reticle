@@ -245,9 +245,10 @@ function initDatabase() {
       raw_artifact TEXT NOT NULL,
       draft       TEXT,
       feedback_type TEXT,
-      entity_id   TEXT,
+      entity_id   TEXT UNIQUE,
       status      TEXT NOT NULL DEFAULT 'pending'
     );
+    CREATE INDEX IF NOT EXISTS idx_feedback_status ON feedback_candidates(status);
   `);
 
   return db;
