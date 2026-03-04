@@ -19,6 +19,14 @@ const ENTITY_TYPES = {
   todo: 'todo',
   calendar_event: 'calendar_event',
   slack_message: 'slack_message',
+  initiative: 'initiative',
+  decision: 'decision',
+  action_item: 'action_item',
+  risk: 'risk',
+  contribution: 'contribution',
+  person: 'person',
+  team: 'team',
+  vendor: 'vendor',
 };
 
 const RELATIONSHIPS = {
@@ -28,6 +36,15 @@ const RELATIONSHIPS = {
   follow_up_for: 'follow_up_for',
   unsubscribed_from: 'unsubscribed_from',
   mentioned_in: 'mentioned_in',
+  assigned_to: 'assigned_to',
+  decided_by: 'decided_by',
+  raised_by: 'raised_by',
+  contributed_by: 'contributed_by',
+  spawned_by: 'spawned_by',
+  member_of: 'member_of',
+  part_of: 'part_of',
+  relates_to: 'relates_to',
+  blocks: 'blocks',
 };
 
 function generateId() {
@@ -292,9 +309,16 @@ function validateEntityType(type) {
   }
 }
 
+function validateRelationship(relationship) {
+  if (!Object.values(RELATIONSHIPS).includes(relationship)) {
+    throw new Error(`Unknown relationship: "${relationship}". Valid: ${Object.keys(RELATIONSHIPS).join(', ')}`);
+  }
+}
+
 function link(db, { sourceType, sourceId, targetType, targetId, relationship, metadata = null }) {
   validateEntityType(sourceType);
   validateEntityType(targetType);
+  validateRelationship(relationship);
   db.prepare(`INSERT INTO entity_links (source_type, source_id, target_type, target_id, relationship, metadata)
     VALUES (?, ?, ?, ?, ?, ?)
     ON CONFLICT (source_type, source_id, target_type, target_id, relationship) DO UPDATE SET

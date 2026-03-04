@@ -423,13 +423,52 @@ assert.ok(claudiaDb.RELATIONSHIPS.replied_to);
 assert.ok(claudiaDb.RELATIONSHIPS.follow_up_for);
 assert.ok(claudiaDb.RELATIONSHIPS.unsubscribed_from);
 assert.ok(claudiaDb.RELATIONSHIPS.mentioned_in);
+// Knowledge graph relationships
+assert.ok(claudiaDb.RELATIONSHIPS.assigned_to);
+assert.ok(claudiaDb.RELATIONSHIPS.decided_by);
+assert.ok(claudiaDb.RELATIONSHIPS.raised_by);
+assert.ok(claudiaDb.RELATIONSHIPS.contributed_by);
+assert.ok(claudiaDb.RELATIONSHIPS.spawned_by);
+assert.ok(claudiaDb.RELATIONSHIPS.member_of);
+assert.ok(claudiaDb.RELATIONSHIPS.part_of);
+assert.ok(claudiaDb.RELATIONSHIPS.relates_to);
+assert.ok(claudiaDb.RELATIONSHIPS.blocks);
 console.log('PASS: RELATIONSHIPS constant');
 
 // ENTITY_TYPES constant
 assert.ok(claudiaDb.ENTITY_TYPES.email);
 assert.ok(claudiaDb.ENTITY_TYPES.conversation);
 assert.ok(claudiaDb.ENTITY_TYPES.o3_session);
+// Knowledge graph entity types
+assert.ok(claudiaDb.ENTITY_TYPES.initiative);
+assert.ok(claudiaDb.ENTITY_TYPES.decision);
+assert.ok(claudiaDb.ENTITY_TYPES.action_item);
+assert.ok(claudiaDb.ENTITY_TYPES.risk);
+assert.ok(claudiaDb.ENTITY_TYPES.contribution);
+assert.ok(claudiaDb.ENTITY_TYPES.person);
+assert.ok(claudiaDb.ENTITY_TYPES.team);
+assert.ok(claudiaDb.ENTITY_TYPES.vendor);
 console.log('PASS: ENTITY_TYPES constant');
+
+// Relationship validation in link()
+assert.throws(() => {
+  claudiaDb.link(db, {
+    sourceType: 'person',
+    sourceId: crypto.randomUUID(),
+    targetType: 'team',
+    targetId: crypto.randomUUID(),
+    relationship: 'banana'
+  });
+}, /Unknown relationship/);
+// Valid knowledge graph link should work
+claudiaDb.link(db, {
+  sourceType: 'person',
+  sourceId: crypto.randomUUID(),
+  targetType: 'team',
+  targetId: crypto.randomUUID(),
+  relationship: 'member_of'
+});
+console.log('PASS: relationship validation in link()');
 
 console.log('\n--- Constants tests passed ---');
 
