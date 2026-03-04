@@ -93,9 +93,16 @@ Runtime config in `~/.claudia/` (never committed):
 - `data/claudia.db` — SQLite database (created on first run)
 - `logs/` — Structured logs via pino with rotation
 
-## Testing — TDD Required
+## Testing — Strict TDD Required
 
-Write tests first. Watch them fail. Implement.
+Follow RED-GREEN-REFACTOR for every change. No exceptions without explicit permission.
+
+1. **RED:** Write a failing test. Run it. **Show the failure output.**
+2. **GREEN:** Write minimal code to make the test pass. Run it. **Show it passes.**
+3. **REFACTOR:** Clean up while keeping tests green.
+
+If you wrote production code before a failing test exists, delete it and start over.
+"I'll add tests after" is not TDD. Tests that pass immediately prove nothing.
 
 **Unit tests** for pure logic — parsing, filtering, scoring, data transformation,
 decision logic.
