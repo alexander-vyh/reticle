@@ -14,6 +14,9 @@ const claudiaDb = require('./claudia-db');
 const { parseSenderEmail, formatRuleDescription } = require('./lib/email-utils');
 const { parseRuleRefinement } = require('./lib/ai');
 const log = require('./lib/logger')('slack-events');
+const orgMemoryDb = require('./lib/org-memory-db');
+const slackCapture = require('./lib/slack-capture');
+const slackReader = require('./lib/slack-reader');
 
 const os = require('os');
 const path = require('path');
@@ -408,6 +411,30 @@ async function handleEvent(event, db) {
   // Track conversation in follow-ups database
   if (event.type === 'message' && !event.subtype && event.user !== CONFIG.myUserId) {
     trackSlackConversation(db, event, 'incoming');
+  }
+
+  // Capture all non-bot messages to raw_messages for organizational memory
+  if (event.type === 'message' && !event.subtype && event.user !== CONFIG.myUserId) {
+    try {
+      const omDb = orgMemoryDb.getDatabase();
+      const userName = await slackReader.getUserInfo(event.user);
+      const channelName = event.channel_type === 'im'
+        ? userName
+        : await slackReader.getConversationInfo(event.channel);
+
+      slackCapture.captureMessage(omDb, {
+        channel: event.channel,
+        channelName,
+        ts: event.ts,
+        user: event.user,
+        userName,
+        text: event.text,
+        threadTs: event.thread_ts || null,
+        channelType: event.channel_type,
+      });
+    } catch (err) {
+      log.warn({ err, channel: event.channel, ts: event.ts }, 'Failed to capture message to org-memory');
+    }
   }
 
   switch (event.type) {
