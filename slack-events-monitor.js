@@ -1068,12 +1068,19 @@ async function handleInteractive(payload) {
           const feedbackTracker = require('./lib/feedback-tracker');
           if (followupsDbConn) {
             const val = action.value ? JSON.parse(action.value) : {};
+            const newStatus = actionId === 'feedback_delivered' ? 'delivered' : 'skipped';
             feedbackTracker.logFeedbackAction(followupsDbConn, accountId, {
               reportName: val.report || 'unknown',
               feedbackType: val.feedbackType || 'unknown',
               action: actionId,
               entityId: val.entityId || ''
             });
+            // Keep feedback_candidates in sync so Reticle/gateway reflect the status change
+            if (val.entityId) {
+              followupsDbConn.prepare(
+                `UPDATE feedback_candidates SET status = ? WHERE entity_id = ?`
+              ).run(newStatus, val.entityId);
+            }
           }
           const label = actionId === 'feedback_delivered' ? 'delivered' : 'skipped';
           result = { success: true, message: `✓ Feedback marked as ${label}` };

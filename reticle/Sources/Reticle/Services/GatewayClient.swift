@@ -74,7 +74,11 @@ class GatewayClient: ObservableObject {
         if let body = body {
             req.httpBody = try JSONSerialization.data(withJSONObject: body)
         }
-        let (data, _) = try await URLSession.shared.data(for: req)
+        let (data, response) = try await URLSession.shared.data(for: req)
+        if let httpResponse = response as? HTTPURLResponse,
+           !(200...299).contains(httpResponse.statusCode) {
+            throw URLError(.badServerResponse)
+        }
         return try JSONDecoder().decode(T.self, from: data)
     }
 

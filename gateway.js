@@ -2,7 +2,6 @@
 'use strict';
 
 const express = require('express');
-const bodyParser = require('body-parser');
 const claudiaDb = require('./claudia-db');
 const peopleStore = require('./lib/people-store');
 const slackReader = require('./lib/slack-reader');
@@ -12,7 +11,7 @@ const config = require('./lib/config');
 const app = express();
 const PORT = config.gatewayPort || 3001;
 
-app.use(bodyParser.json());
+app.use(express.json());
 
 const db = claudiaDb.initDatabase();
 
@@ -23,11 +22,15 @@ app.get('/people', (req, res) => {
 });
 
 // POST /people — add person by email (triggers Slack resolution)
-app.post('/people', async (req, res) => {
+app.post('/people', (req, res) => {
   const { email, name } = req.body;
   if (!email) return res.status(400).json({ error: 'email required' });
 
-  peopleStore.addPerson(db, { email, name });
+  try {
+    peopleStore.addPerson(db, { email, name });
+  } catch (err) {
+    return res.status(500).json({ error: 'failed to add person' });
+  }
 
   // Resolve Slack ID in background
   slackReader.lookupUserByEmail(email).then(slackId => {
@@ -96,6 +99,12 @@ app.get('/feedback/stats', (req, res) => {
 // Health check
 app.get('/health', (req, res) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString() });
+});
+
+// Global error handler
+app.use((err, req, res, _next) => {
+  console.error('Gateway error:', err.message || err);
+  res.status(500).json({ error: 'internal error' });
 });
 
 app.listen(PORT, () => {
