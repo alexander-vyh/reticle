@@ -22,6 +22,12 @@ jobs:
       - name: Install tray dependencies
         run: npm install --prefix tray
 
+      - name: Create config stubs for tests
+        run: |
+          mkdir -p ~/.claudia/config
+          echo '{"slackBotToken":"xoxb-test","slackUserId":"UTEST","gmailAccount":"test@test.com"}' > ~/.claudia/config/secrets.json
+          echo '{"reports":[]}' > ~/.claudia/config/team.json
+
       - name: Run tests
         run: npm test
 

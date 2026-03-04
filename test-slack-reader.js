@@ -1,27 +1,6 @@
 'use strict';
 
 const assert = require('assert');
-const fs = require('fs');
-const path = require('path');
-
-// Ensure config files exist so slack-reader can load without crashing.
-// In CI, secrets.json and team.json don't exist — create minimal stubs.
-const configDir = path.join(require('os').homedir(), '.claudia', 'config');
-const secretsPath = path.join(configDir, 'secrets.json');
-const teamPath = path.join(configDir, 'team.json');
-let createdSecrets = false;
-let createdTeam = false;
-if (!fs.existsSync(secretsPath)) {
-  fs.mkdirSync(configDir, { recursive: true });
-  fs.writeFileSync(secretsPath, JSON.stringify({
-    slackBotToken: 'xoxb-test', slackUserId: 'UTEST', gmailAccount: 'test@test.com'
-  }));
-  createdSecrets = true;
-}
-if (!fs.existsSync(teamPath)) {
-  fs.writeFileSync(teamPath, JSON.stringify({ reports: [] }));
-  createdTeam = true;
-}
 
 function testRateLimiter() {
   const { createRateLimiter } = require('./lib/slack-reader');
@@ -96,7 +75,3 @@ testParseMessagesKeepsThreadInfo();
 testResolveUserMentions();
 testResolveUserMentionsUnknown();
 console.log('All slack-reader tests passed');
-
-// Clean up stub files so we don't leave artifacts
-if (createdSecrets) fs.unlinkSync(secretsPath);
-if (createdTeam) fs.unlinkSync(teamPath);
