@@ -11,9 +11,7 @@ struct MeetingPopupApp: App {
 
     var body: some Scene {
         WindowGroup {
-            // PopupContentView will be added in Task 11
-            // For now, a placeholder that proves the state works
-            Text(state.countdownText)
+            PopupContentView()
                 .environmentObject(state)
                 .frame(width: state.isCollapsed ? 80 : 300, height: state.isCollapsed ? 44 : 200)
                 .background(Color.black.opacity(0.95))
