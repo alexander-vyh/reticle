@@ -71,7 +71,7 @@ Schema docs: `docs/plans/2026-02-19-schema-redesign-design.md`.
 
 - `reticle-db.js` — Database layer: schema, queries, entity type registry
 - `lib/ai.js` — Anthropic SDK wrapper for AI-powered filtering/triage
-- `lib/config.js` — Config loader (reads `~/.reticle/config/`)
+- `lib/config.js` — Config loader (reads `~/.claudia/config/`)
 - `lib/heartbeat.js` — Health check module (all services write heartbeat JSON)
 - `lib/startup-validation.js` — Pre-flight checks before service main loop
 - `lib/logger.js` — Structured logging via pino with rotation
@@ -181,7 +181,7 @@ Uses CoreAudio for capture and a Python venv for live transcription.
 - No automated deletes — archive/flag only; delete only on explicit user request
 - Deploy target is macOS launchd (not systemd, not Docker)
 - Pre-commit hook runs `gitleaks` — commits will be rejected if secrets are staged
-- Config templates are in `config/` — actual secrets live in `~/.reticle/config/`
+- Config templates are in `config/` — actual secrets live in `~/.claudia/config/`
 
 ## Deploy
 
