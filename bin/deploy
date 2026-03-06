@@ -102,6 +102,78 @@ if [ "$SKIP_INSTALL" = false ]; then
   npm install --omit=dev --ignore-scripts --silent
 fi
 
+# --- Build Swift targets ---
+info "Building Swift targets..."
+cd "$REPO_DIR/reticle"
+swift build -c release 2>&1 | tail -5
+
+# Assemble Reticle.app
+RETICLE_APP="$CLAUDIA_HOME/Reticle.app"
+info "Assembling Reticle.app..."
+rm -rf "$RETICLE_APP"
+mkdir -p "$RETICLE_APP/Contents/MacOS"
+mkdir -p "$RETICLE_APP/Contents/Resources"
+cp .build/release/Reticle "$RETICLE_APP/Contents/MacOS/"
+
+cat > "$RETICLE_APP/Contents/Info.plist" <<'INFOPLIST'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleIdentifier</key>
+  <string>ai.reticle.app</string>
+  <key>CFBundleName</key>
+  <string>Reticle</string>
+  <key>CFBundleExecutable</key>
+  <string>Reticle</string>
+  <key>CFBundleVersion</key>
+  <string>1.0</string>
+  <key>CFBundleShortVersionString</key>
+  <string>1.0</string>
+  <key>LSUIElement</key>
+  <true/>
+  <key>LSMinimumSystemVersion</key>
+  <string>14.0</string>
+</dict>
+</plist>
+INFOPLIST
+
+codesign --sign - --force "$RETICLE_APP"
+
+# Assemble MeetingPopup.app
+POPUP_APP="$CLAUDIA_HOME/MeetingPopup.app"
+info "Assembling MeetingPopup.app..."
+rm -rf "$POPUP_APP"
+mkdir -p "$POPUP_APP/Contents/MacOS"
+cp .build/release/MeetingPopup "$POPUP_APP/Contents/MacOS/"
+
+cat > "$POPUP_APP/Contents/Info.plist" <<'INFOPLIST'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleIdentifier</key>
+  <string>ai.reticle.meeting-popup</string>
+  <key>CFBundleName</key>
+  <string>MeetingPopup</string>
+  <key>CFBundleExecutable</key>
+  <string>MeetingPopup</string>
+  <key>CFBundleVersion</key>
+  <string>1.0</string>
+  <key>LSUIElement</key>
+  <true/>
+  <key>LSMinimumSystemVersion</key>
+  <string>14.0</string>
+</dict>
+</plist>
+INFOPLIST
+
+codesign --sign - --force "$POPUP_APP"
+
+cd "$REPO_DIR"
+
 # --- Step 7: Generate and load launchd plists ---
 info "Generating launchd plists..."
 
@@ -324,6 +396,10 @@ for svc in "${SCHEDULED_SERVICES[@]}"; do
     echo -e "  ${RED}unloaded${NC} $label"
   fi
 done
+
+echo ""
+info "Launching Reticle.app..."
+open "$CLAUDIA_HOME/Reticle.app"
 
 echo ""
 info "Deploy complete!"

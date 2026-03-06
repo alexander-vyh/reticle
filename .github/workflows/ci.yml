@@ -19,9 +19,6 @@ jobs:
       - name: Install root dependencies
         run: npm install
 
-      - name: Install tray dependencies
-        run: npm install --prefix tray
-
       - name: Create config stubs for tests
         run: |
           mkdir -p ~/.claudia/config

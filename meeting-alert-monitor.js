@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 'use strict';
 
+const os = require('os');
 const fs = require('fs');
 const path = require('path');
 const { execFile, spawn } = require('child_process');
@@ -26,8 +27,7 @@ const CONFIG = {
   },
   alertCheckInterval: 15 * 1000,      // Check every 15 seconds
   lookAheadHours: 24,
-  electronPath: path.join(__dirname, 'node_modules', '.bin', 'electron'),
-  popupScript: path.join(__dirname, 'meeting-popup-window.js')
+  popupBinary: path.join(os.homedir(), '.claudia', 'MeetingPopup.app', 'Contents', 'MacOS', 'MeetingPopup')
 };
 
 let calendar = null;
@@ -614,12 +614,11 @@ function spawnPopup(groupKey, popupData) {
   const dataB64 = Buffer.from(JSON.stringify(popupData)).toString('base64');
 
   const child = spawn(
-    CONFIG.electronPath,
-    [CONFIG.popupScript, dataB64],
+    CONFIG.popupBinary,
+    [dataB64],
     {
       cwd: __dirname,
-      stdio: ['pipe', 'pipe', 'pipe'],
-      env: { ...process.env, ELECTRON_DISABLE_SECURITY_WARNINGS: 'true' }
+      stdio: ['pipe', 'pipe', 'pipe']
     }
   );
 

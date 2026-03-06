@@ -36,15 +36,16 @@ don't paper over it.
 
 ```bash
 npm install                # Root dependencies
-npm install --prefix tray  # Tray app dependencies (Electron)
 npm test                   # Run all tests
+cd reticle && swift build  # Build SwiftUI apps
+cd reticle && swift test   # Run Swift tests
 ```
 
-Node >=22 required. Swift >=5.9 required for the meeting recorder.
+Node >=22 required. Swift >=5.9 required for the SwiftUI apps and meeting recorder.
 
 ## Architecture
 
-6 Node.js services + 1 Swift daemon, managed by an Electron tray app:
+6 Node.js services + 2 Swift apps + 1 Swift daemon:
 
 | Service | File | Purpose |
 |---------|------|---------|
@@ -57,17 +58,18 @@ Node >=22 required. Swift >=5.9 required for the meeting recorder.
 
 | Component | Path | Purpose |
 |-----------|------|---------|
+| Reticle App | `reticle/Sources/Reticle/` | SwiftUI menu bar tray + management window (People, Feedback) |
+| Meeting Popup | `reticle/Sources/MeetingPopup/` | SwiftUI floating panel for meeting countdown + join |
 | Gateway API | `gateway.js` | Express REST API — people, feedback, Slack reader endpoints |
 | Meeting Recorder | `recorder/` | Swift macOS daemon — CoreAudio capture + live transcription |
-| Tray App | `tray/` | Electron menu bar app — service lifecycle, health, status |
 
-**Database** (`claudia-db.js`): Typed entities + generic edge table (`entity_links`) +
+**Database** (`reticle-db.js`): Typed entities + generic edge table (`entity_links`) +
 append-only `action_log` (ML training corpus). SQLite via better-sqlite3.
 Schema docs: `docs/plans/2026-02-19-schema-redesign-design.md`.
 
 ## Key Files
 
-- `claudia-db.js` — Database layer: schema, queries, entity type registry
+- `reticle-db.js` — Database layer: schema, queries, entity type registry
 - `lib/ai.js` — Anthropic SDK wrapper for AI-powered filtering/triage
 - `lib/config.js` — Config loader (reads `~/.claudia/config/`)
 - `lib/heartbeat.js` — Health check module (all services write heartbeat JSON)
@@ -113,8 +115,8 @@ not `:memory:`), file system interactions, service startup/shutdown.
 Both layers required for new features.
 
 ```bash
-npm test                        # All tests (root + tray)
-node test-claudia-db.js         # Database layer
+npm test                        # All tests (root)
+node test-reticle-db.js         # Database layer
 node test-heartbeat.js          # Heartbeat module
 node test-startup-validation.js # Startup validation
 node test-people-store.js       # People store
@@ -127,18 +129,19 @@ node test-feedback-collector.js # Feedback extraction
 node test-feedback-tracker.js   # Feedback tracking
 node test-feedback-blocks.js    # Feedback Slack blocks
 node test-gateway.js            # Gateway API
-npm test --prefix tray          # Tray service-manager
+cd reticle && swift test        # Swift tests (ServiceManager parsing, heartbeat)
 ```
 
 Tests use plain Node.js `assert` — no test framework. Each test file is a standalone
-script at the project root that exits 0 on success, non-zero on failure.
+script at the project root that exits 0 on success, non-zero on failure. Swift tests
+use XCTest in `reticle/Tests/`.
 
 ## Code Style
 
 - Plain Node.js — no TypeScript, no bundler, no transpilation
-- No package-lock.json at root (tray/ has one for Electron reproducibility)
+- No package-lock.json at root
 - Structured logging via pino (`lib/logger.js`) — never `console.log` in services
-- Services are standalone scripts spawned as child processes by the tray app
+- Services are standalone scripts managed by launchd
 - JSON `metadata` columns for flexible attributes — promote to typed columns only
   when query performance demands it
 - Test files live at the project root alongside source (e.g., `test-claudia-db.js`)
@@ -170,8 +173,7 @@ Uses CoreAudio for capture and a Python venv for live transcription.
 
 ## Gotchas
 
-- Legacy "Claudia" / "OpenClaw" naming persists in some paths and labels — Reticle
-  is the project name
+- Legacy "OpenClaw" naming persists in some recorder paths and launchd labels
 - Gmail OAuth callback uses a high port to match the registered redirect URI
 - Database uses epoch seconds (not milliseconds) for all timestamps
 - `entity_links` edge table uses app-level type validation (ENTITY_TYPES registry),
@@ -184,5 +186,5 @@ Uses CoreAudio for capture and a Python venv for live transcription.
 ## Deploy
 
 ```bash
-bin/deploy  # Syncs to ~/.claudia/app/, generates plists, restarts services
+bin/deploy  # Syncs code, builds Swift apps, assembles .app bundles, restarts services
 ```
