@@ -10,6 +10,14 @@ let package = Package(
         .executableTarget(
             name: "Reticle",
             path: "Sources/Reticle"
-        )
+        ),
+        .executableTarget(
+            name: "MeetingPopup",
+            path: "Sources/MeetingPopup"
+        ),
+        .testTarget(
+            name: "ReticleTests",
+            path: "Tests/ReticleTests"
+        ),
     ]
 )
