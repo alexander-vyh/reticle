@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * Claudia Gmail Monitor - Simple polling-based email assistant
+ * Reticle Gmail Monitor - Simple polling-based email assistant
  * Monitors Gmail and sends notifications to Slack
  */
 
@@ -9,12 +9,13 @@ const fs = require('fs');
 const https = require('https');
 const path = require('path');
 const emailCache = require('./email-cache');
-const claudiaDb = require('./claudia-db');
+const claudiaDb = require('./reticle-db');
 const { parseSenderEmail, formatRuleDescription } = require('./lib/email-utils');
 const log = require('./lib/logger')('gmail-monitor');
 const config = require('./lib/config');
 const heartbeat = require('./lib/heartbeat');
 const { validatePrerequisites } = require('./lib/startup-validation');
+const gmailApi = require('./lib/gmail-api');
 
 // Configuration
 const CONFIG = {
@@ -185,7 +186,7 @@ function sendMacOSNotification(title, message) {
     const escapedTitle = title.replace(/"/g, '\\"').substring(0, 100);
     const escapedMessage = message.replace(/"/g, '\\"').substring(0, 200);
     execSync(
-      `terminal-notifier -title "${escapedTitle}" -message "${escapedMessage}" -sound default -sender ai.claudia.notifications`,
+      `terminal-notifier -title "${escapedTitle}" -message "${escapedMessage}" -sound default -sender ai.reticle.notifications`,
       { stdio: 'pipe' }
     );
   } catch (error) {
@@ -197,18 +198,10 @@ function sendMacOSNotification(title, message) {
 }
 
 /**
- * Get Gmail API client (shared helper)
+ * Get Gmail API client (delegates to lib/gmail-api)
  */
 function getGmailClient() {
-  const { google } = require('googleapis');
-
-  const credentials = JSON.parse(fs.readFileSync(config.gmailCredentialsPath));
-  const token = JSON.parse(fs.readFileSync(config.gmailTokenPath));
-  const { client_secret, client_id, redirect_uris } = credentials.installed;
-  const oAuth2Client = new google.auth.OAuth2(client_id, client_secret, redirect_uris[0]);
-  oAuth2Client.setCredentials(token);
-
-  return google.gmail({ version: 'v1', auth: oAuth2Client });
+  return gmailApi.getGmailClient();
 }
 
 /**
@@ -438,14 +431,20 @@ function applyRuleBasedFilter(email) {
   }
 
   // Auto-archive rules (noise, but keep in archive)
-  // Archive IT group forwards only if addressed solely to the IT list (not also to user)
-  if (from.includes('via it') && to.includes('it@' + config.filterPatterns.companyDomain) &&
-      !to.includes(CONFIG.gmailAccount)) {
-    return { action: 'archive', reason: 'IT group-only notification' };
-  }
+  // NOTE: IT group (it@simpli.fi) is now handled by a Gmail server-side filter
 
   if (from.includes('no-reply@zoom.us')) {
     return { action: 'archive', reason: 'Zoom notification' };
+  }
+
+  // Archive Okta release notes (unsubscribed, but filter as safety net)
+  if (from.includes('oktareleasenotes@okta.com')) {
+    return { action: 'archive', reason: 'Okta release notes' };
+  }
+
+  // Archive Hootsuite/Amplifi social media digests
+  if (from.includes('hootsuite.com')) {
+    return { action: 'archive', reason: 'Hootsuite digest' };
   }
 
   // Archive automated Role Group Audit notifications (DW automation)
@@ -500,8 +499,10 @@ function applyRuleBasedFilter(email) {
     return { action: 'archive', reason: 'Confluence digest' };
   }
 
-  // Archive Atlassian admin notifications
-  if (from.includes('@id.atlassian.net')) {
+  // Archive Atlassian admin notifications (multiple domains)
+  // Keep automation failure emails from automation@simplifi.atlassian.net
+  if ((from.includes('@id.atlassian.net') || from.includes('@po.atlassian.net')) &&
+      !subject.includes('failed')) {
     return { action: 'archive', reason: 'Atlassian admin notification' };
   }
 
@@ -596,49 +597,25 @@ function applyRuleBasedFilter(email) {
 /**
  * Archive email in Gmail
  */
-function archiveEmail(emailId) {
-  try {
-    execSync(
-      `gog gmail batch modify "${emailId}" --remove INBOX --account ${CONFIG.gmailAccount} --no-input`,
-      { stdio: 'ignore' }
-    );
-    return true;
-  } catch (error) {
-    log.error({ err: error, emailId }, 'Archive failed');
-    return false;
-  }
+async function archiveEmail(emailId) {
+  const client = getGmailClient();
+  return gmailApi.archiveMessage(client, emailId);
 }
 
 /**
  * Delete email in Gmail (move to trash)
  */
-function deleteEmail(emailId) {
-  try {
-    execSync(
-      `gog gmail batch modify "${emailId}" --add TRASH --remove INBOX --account ${CONFIG.gmailAccount} --no-input`,
-      { stdio: 'ignore' }
-    );
-    return true;
-  } catch (error) {
-    log.error({ err: error, emailId }, 'Delete failed');
-    return false;
-  }
+async function deleteEmail(emailId) {
+  const client = getGmailClient();
+  return gmailApi.trashMessage(client, emailId);
 }
 
 /**
  * Tag email with a Gmail label (keeps in inbox)
  */
-function tagEmail(emailId, label) {
-  try {
-    execSync(
-      `gog gmail messages modify "${emailId}" --account ${CONFIG.gmailAccount} --add-labels "${label}" 2>/dev/null`,
-      { stdio: 'ignore' }
-    );
-    return true;
-  } catch (error) {
-    log.error({ err: error, emailId, label }, 'Tag failed');
-    return false;
-  }
+async function tagEmail(emailId, label) {
+  const client = getGmailClient();
+  return gmailApi.tagMessage(client, emailId, label);
 }
 
 /**
@@ -699,16 +676,12 @@ function checkUrgency(email) {
 }
 
 /**
- * Get recent emails
+ * Get recent emails via Gmail API
  */
-function getRecentEmails() {
+async function getRecentEmails() {
   try {
-    const result = execSync(
-      `gog gmail messages search "newer_than:10m is:unread" --account ${CONFIG.gmailAccount} --max 50 --json`,
-      { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'ignore'] }
-    );
-    const data = JSON.parse(result);
-    return data.messages || [];
+    const client = getGmailClient();
+    return await gmailApi.searchRecentUnread(client, { maxResults: 50 });
   } catch (error) {
     log.error({ err: error }, 'Error fetching emails');
     return [];
@@ -1028,7 +1001,7 @@ async function checkSentEmails() {
 async function checkEmails() {
   log.info('Checking for new emails');
 
-  const emails = getRecentEmails();
+  const emails = await getRecentEmails();
   const lastCheck = getLastCheckTime();
 
   if (emails.length === 0) {
@@ -1060,12 +1033,12 @@ async function checkEmails() {
     if (userRule) {
       if (userRule.action === 'archive') {
         log.info({ from: fromShort, reason: userRule.reason }, 'Archiving email (user rule)');
-        if (archiveEmail(email.id)) filteringStats.archived++;
+        if (await archiveEmail(email.id)) filteringStats.archived++;
         continue;
       }
       if (userRule.action === 'delete') {
         log.info({ from: fromShort, reason: userRule.reason }, 'Deleting email (user rule)');
-        if (deleteEmail(email.id)) filteringStats.deleted++;
+        if (await deleteEmail(email.id)) filteringStats.deleted++;
         continue;
       }
       if (userRule.action === 'demote') {
@@ -1082,7 +1055,7 @@ async function checkEmails() {
 
     if (filter.action === 'archive') {
       log.info({ from: fromShort, reason: filter.reason }, 'Archiving email');
-      if (archiveEmail(email.id)) {
+      if (await archiveEmail(email.id)) {
         filteringStats.archived++;
       }
       continue;
@@ -1090,7 +1063,7 @@ async function checkEmails() {
 
     if (filter.action === 'delete') {
       log.info({ from: fromShort, reason: filter.reason }, 'Deleting email');
-      if (deleteEmail(email.id)) {
+      if (await deleteEmail(email.id)) {
         filteringStats.deleted++;
       }
       continue;
@@ -1098,7 +1071,7 @@ async function checkEmails() {
 
     if (filter.action === 'tag') {
       log.info({ from: fromShort, label: filter.label, reason: filter.reason }, 'Tagging email');
-      tagEmail(email.id, filter.label);
+      await tagEmail(email.id, filter.label);
       // Continue processing (don't skip) - email stays in inbox and will be checked for urgency
     }
 

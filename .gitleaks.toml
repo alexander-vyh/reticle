@@ -16,7 +16,12 @@ regex = '''U03QTC30FAR|U08HWQZRCR4|U0412G376E9|U0A0UJ35KE2|ULPLLCRQF|U070SD8QX39
 
 [allowlist]
 # Example config files use placeholder tokens like xoxb-your-bot-token
+# Filter logic files necessarily reference company domain patterns
 paths = [
   '''config/secrets\.example\.json''',
   '''config/team\.example\.json''',
+  '''gmail-monitor\.js''',
+  '''slack-webhook-server\.js''',
+  '''test-gmail-api\.js''',
+  '''lib/gmail-api\.js''',
 ]

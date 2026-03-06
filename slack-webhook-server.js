@@ -9,6 +9,7 @@ const bodyParser = require('body-parser');
 const crypto = require('crypto');
 const { execSync } = require('child_process');
 const https = require('https');
+const gmailApi = require('./lib/gmail-api');
 
 const app = express();
 const PORT = 3030;
@@ -131,30 +132,16 @@ async function getFullEmail(emailId) {
  * Archive email
  */
 async function archiveEmail(emailId) {
-  try {
-    execSync(
-      `gog gmail messages modify "${emailId}" --account ${CONFIG.gmailAccount} --remove-labels INBOX 2>/dev/null`,
-      { stdio: 'ignore' }
-    );
-    return true;
-  } catch (error) {
-    return false;
-  }
+  const client = gmailApi.getGmailClient();
+  return gmailApi.archiveMessage(client, emailId);
 }
 
 /**
  * Delete email
  */
 async function deleteEmail(emailId) {
-  try {
-    execSync(
-      `gog gmail messages trash "${emailId}" --account ${CONFIG.gmailAccount} 2>/dev/null`,
-      { stdio: 'ignore' }
-    );
-    return true;
-  } catch (error) {
-    return false;
-  }
+  const client = gmailApi.getGmailClient();
+  return gmailApi.trashMessage(client, emailId);
 }
 
 /**
