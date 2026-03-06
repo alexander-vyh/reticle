@@ -1,0 +1,7 @@
+{
+  "database": "dolt",
+  "backend": "dolt",
+  "dolt_mode": "server",
+  "dolt_database": "reticle",
+  "project_id": "18d11b01-beb9-4c7a-9e6c-08873bc9007b"
+}

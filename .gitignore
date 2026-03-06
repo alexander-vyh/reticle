@@ -17,7 +17,7 @@ slack-events-state.json
 email-cache/
 .cache/
 
-# Credentials (should be in ~/.config/claudia/)
+# Credentials (should be in ~/.config/reticle/)
 *-credentials.json
 *-token.json
 
@@ -26,7 +26,9 @@ email-cache/
 *.swp
 .DS_Store
 
-# Claudia database
+# Reticle database
+reticle.db
+reticle.db-*
 claudia.db
 claudia.db-*
 
@@ -60,3 +62,7 @@ recorder/scripts/.venv/
 reticle/.build/
 reticle/DerivedData/
 reticle/*.xcuserdata/
+
+# Dolt database files (added by bd init)
+.dolt/
+*.db
