@@ -53,5 +53,34 @@ struct ContentView: View {
             }
         }
         .navigationTitle("Reticle")
+        .background(WindowAccessor { NSApp.setActivationPolicy(.accessory) })
+    }
+}
+
+struct WindowAccessor: NSViewRepresentable {
+    let onClose: () -> Void
+
+    func makeNSView(context: Context) -> NSView {
+        let view = NSView()
+        DispatchQueue.main.async {
+            guard let window = view.window else { return }
+            window.delegate = context.coordinator
+            window.identifier = NSUserInterfaceItemIdentifier("management")
+        }
+        return view
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) {}
+    func makeCoordinator() -> Coordinator { Coordinator(onClose: onClose) }
+
+    class Coordinator: NSObject, NSWindowDelegate {
+        let onClose: () -> Void
+        init(onClose: @escaping () -> Void) { self.onClose = onClose }
+
+        func windowShouldClose(_ sender: NSWindow) -> Bool {
+            sender.orderOut(nil)
+            onClose()
+            return false
+        }
     }
 }
