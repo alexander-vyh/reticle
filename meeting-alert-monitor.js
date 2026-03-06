@@ -27,7 +27,7 @@ const CONFIG = {
   },
   alertCheckInterval: 15 * 1000,      // Check every 15 seconds
   lookAheadHours: 24,
-  popupBinary: path.join(os.homedir(), '.reticle', 'MeetingPopup.app', 'Contents', 'MacOS', 'MeetingPopup')
+  popupBinary: path.join(os.homedir(), '.claudia', 'MeetingPopup.app', 'Contents', 'MacOS', 'MeetingPopup')
 };
 
 let calendar = null;
