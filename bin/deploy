@@ -113,7 +113,7 @@ cd "$REPO_DIR/reticle"
 swift build -c release 2>&1 | tail -5
 
 # Assemble Reticle.app
-RETICLE_APP="$CLAUDIA_HOME/Reticle.app"
+RETICLE_APP="$RETICLE_HOME/Reticle.app"
 info "Assembling Reticle.app..."
 rm -rf "$RETICLE_APP"
 mkdir -p "$RETICLE_APP/Contents/MacOS"
@@ -147,7 +147,7 @@ INFOPLIST
 codesign --sign - --force "$RETICLE_APP"
 
 # Assemble MeetingPopup.app
-POPUP_APP="$CLAUDIA_HOME/MeetingPopup.app"
+POPUP_APP="$RETICLE_HOME/MeetingPopup.app"
 info "Assembling MeetingPopup.app..."
 rm -rf "$POPUP_APP"
 mkdir -p "$POPUP_APP/Contents/MacOS"
@@ -412,7 +412,7 @@ done
 
 echo ""
 info "Launching Reticle.app..."
-open "$CLAUDIA_HOME/Reticle.app"
+open "$RETICLE_HOME/Reticle.app"
 
 echo ""
 info "Deploy complete!"
