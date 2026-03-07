@@ -24,4 +24,5 @@ paths = [
   '''slack-webhook-server\.js''',
   '''test-gmail-api\.js''',
   '''lib/gmail-api\.js''',
+  '''test-email-filters\.js''',
 ]

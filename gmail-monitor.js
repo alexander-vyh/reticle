@@ -16,6 +16,7 @@ const config = require('./lib/config');
 const heartbeat = require('./lib/heartbeat');
 const { validatePrerequisites } = require('./lib/startup-validation');
 const gmailApi = require('./lib/gmail-api');
+const ai = require('./lib/ai');
 
 // Configuration
 const CONFIG = {
@@ -590,6 +591,16 @@ function applyRuleBasedFilter(email) {
     return { action: 'archive', reason: 'Vendor outreach (SolarWinds)' };
   }
 
+  // DW group emails: 95% noise, 5% important — let AI decide
+  if (from.includes(config.filterPatterns.dwGroupEmail)) {
+    return { action: 'ai-triage', reason: 'DW group email (AI triage)' };
+  }
+
+  // Licensing group emails: mostly vendor noise but billing failures matter
+  if (to.includes('licensing@' + config.filterPatterns.companyDomain)) {
+    return { action: 'ai-triage', reason: 'Licensing group email (AI triage)' };
+  }
+
   // Keep for batch/AI review
   return { action: 'keep', reason: 'Passed filters' };
 }
@@ -1069,6 +1080,33 @@ async function checkEmails() {
       continue;
     }
 
+    if (filter.action === 'ai-triage') {
+      log.info({ from: fromShort, reason: filter.reason }, 'AI triage requested');
+      const assessment = await ai.assessEmailUrgency({
+        from: email.from, to: email.to, cc: email.cc,
+        subject: email.subject, snippet: email.snippet
+      });
+      if (assessment && !assessment.urgent) {
+        // AI says noise — archive silently
+        log.info({ from: fromShort, aiReason: assessment.reason }, 'AI triage: archiving (not urgent)');
+        if (await archiveEmail(email.id)) filteringStats.archived++;
+        continue;
+      }
+      // AI says urgent or AI failed — surface in batch (safe default)
+      log.info({
+        from: fromShort,
+        aiUrgent: assessment?.urgent ?? null,
+        aiReason: assessment?.reason ?? 'AI unavailable — defaulting to batch'
+      }, 'AI triage: keeping for batch');
+      batchQueue.push({ from: email.from, subject: email.subject, date: email.date, id: email.id, threadId: email.threadId });
+      trackEmailConversation(followupsDbConn, email, 'incoming', {
+        urgency: 'batch',
+        aiTriaged: true,
+        aiReason: assessment?.reason
+      });
+      continue;
+    }
+
     if (filter.action === 'tag') {
       log.info({ from: fromShort, label: filter.label, reason: filter.reason }, 'Tagging email');
       await tagEmail(email.id, filter.label);
@@ -1307,7 +1345,12 @@ function shutdown(signal) {
 process.on('SIGTERM', () => shutdown('SIGTERM'));
 process.on('SIGINT', () => shutdown('SIGINT'));
 
-main().catch(error => {
-  log.fatal({ err: error }, 'Fatal error');
-  process.exit(1);
-});
+// Export for testing; run service only when executed directly
+if (require.main === module) {
+  main().catch(error => {
+    log.fatal({ err: error }, 'Fatal error');
+    process.exit(1);
+  });
+}
+
+module.exports = { applyRuleBasedFilter, checkUrgency };

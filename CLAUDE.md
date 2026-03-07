@@ -129,6 +129,8 @@ node test-feedback-collector.js # Feedback extraction
 node test-feedback-tracker.js   # Feedback tracking
 node test-feedback-blocks.js    # Feedback Slack blocks
 node test-gateway.js            # Gateway API
+node test-gmail-api.js          # Gmail API wrapper
+node test-email-filters.js      # Email filter rules + AI triage
 cd reticle && swift test        # Swift tests (ServiceManager parsing, heartbeat)
 ```
 
