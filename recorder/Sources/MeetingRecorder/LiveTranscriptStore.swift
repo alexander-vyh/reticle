@@ -5,7 +5,7 @@ import os
 /// Stores live transcript segments, manages SSE subscribers, computes metrics,
 /// and persists data to disk when recording stops.
 final class LiveTranscriptStore {
-    private let logger = Logger(subsystem: "ai.openclaw.meeting-recorder", category: "LiveStore")
+    private let logger = Logger(subsystem: "ai.reticle.meeting-recorder", category: "LiveStore")
 
     private let lock = NSLock()
     private var segments: [SegmentEvent] = []

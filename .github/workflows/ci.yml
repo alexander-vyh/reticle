@@ -21,9 +21,9 @@ jobs:
 
       - name: Create config stubs for tests
         run: |
-          mkdir -p ~/.claudia/config
-          echo '{"slackBotToken":"xoxb-test","slackUserId":"UTEST","gmailAccount":"test@test.com"}' > ~/.claudia/config/secrets.json
-          echo '{"reports":[]}' > ~/.claudia/config/team.json
+          mkdir -p ~/.reticle/config
+          echo '{"slackBotToken":"xoxb-test","slackUserId":"UTEST","gmailAccount":"test@test.com"}' > ~/.reticle/config/secrets.json
+          echo '{"reports":[]}' > ~/.reticle/config/team.json
 
       - name: Run tests
         run: npm test

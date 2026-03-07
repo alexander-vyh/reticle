@@ -1,7 +1,7 @@
 #!/bin/bash
 set -euo pipefail
 
-CONFIG_DIR="$HOME/.config/claudia"
+CONFIG_DIR="$HOME/.config/reticle"
 mkdir -p "$CONFIG_DIR"
 
 if [ -z "${BW_SESSION:-}" ]; then
@@ -9,7 +9,7 @@ if [ -z "${BW_SESSION:-}" ]; then
   exit 1
 fi
 
-ITEM_NAME="Claudia Automation Secrets"
+ITEM_NAME="Reticle Automation Secrets"
 ITEM=$(bw get item "$ITEM_NAME" 2>/dev/null) || {
   echo "ERROR: Bitwarden item '$ITEM_NAME' not found"
   exit 1

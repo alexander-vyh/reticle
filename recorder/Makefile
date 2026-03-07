@@ -3,8 +3,8 @@
 BUILD_DIR := .build
 INSTALL_DIR := /usr/local/bin
 PLIST_DIR := $(HOME)/Library/LaunchAgents
-PLIST_NAME := ai.openclaw.meeting-recorder.plist
-LABEL := ai.openclaw.meeting-recorder
+PLIST_NAME := ai.reticle.meeting-recorder.plist
+LABEL := ai.reticle.meeting-recorder
 
 build:
 	swift build

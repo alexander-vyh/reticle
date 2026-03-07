@@ -3,11 +3,11 @@
 <plist version="1.0">
 <dict>
 	<key>Label</key>
-	<string>ai.openclaw.meeting-recorder</string>
+	<string>ai.reticle.meeting-recorder</string>
 
 	<key>ProgramArguments</key>
 	<array>
-		<string>/usr/local/bin/meeting-recorder</string>
+		<string>/opt/homebrew/bin/meeting-recorder</string>
 	</array>
 
 	<key>RunAtLoad</key>
@@ -23,10 +23,10 @@
 	<integer>30</integer>
 
 	<key>StandardOutPath</key>
-	<string>/Users/USERNAME/GitHub/claudia/meeting-recorder.log</string>
+	<string>/Users/USERNAME/.reticle/logs/meeting-recorder.log</string>
 
 	<key>StandardErrorPath</key>
-	<string>/Users/USERNAME/GitHub/claudia/meeting-recorder-error.log</string>
+	<string>/Users/USERNAME/.reticle/logs/meeting-recorder-error.log</string>
 
 	<key>EnvironmentVariables</key>
 	<dict>

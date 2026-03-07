@@ -10,7 +10,7 @@ final class CoreAudioRecorder {
 
     // MARK: - Properties
 
-    private let logger = Logger(subsystem: "ai.openclaw.meeting-recorder", category: "CoreAudioRecorder")
+    private let logger = Logger(subsystem: "ai.reticle.meeting-recorder", category: "CoreAudioRecorder")
 
     private var audioUnit: AudioUnit?
     private var audioFile: ExtAudioFileRef?

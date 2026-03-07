@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Claudia Deploy Script
+# Reticle Deploy Script
 # Usage: bin/deploy [--skip-pull] [--skip-install]
 
-CLAUDIA_HOME="$HOME/.claudia"
+RETICLE_HOME="$HOME/.reticle"
 REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 PLIST_DIR="$HOME/Library/LaunchAgents"
 UID_VAL=$(id -u)
@@ -30,26 +30,31 @@ for arg in "$@"; do
 done
 
 # --- Step 1: Create directory structure ---
-info "Ensuring ~/.claudia/ directory structure..."
-mkdir -p "$CLAUDIA_HOME"/{app,data,logs,config}
+info "Ensuring ~/.reticle/ directory structure..."
+mkdir -p "$RETICLE_HOME"/{app,data,logs,config}
 
 # --- Step 2: First-run migration ---
-# Config: ~/.config/claudia/ → ~/.claudia/config/
-if [ -d "$HOME/.config/claudia" ] && [ ! -f "$CLAUDIA_HOME/config/secrets.json" ]; then
-  info "Migrating config from ~/.config/claudia/ to ~/.claudia/config/..."
-  cp -n "$HOME/.config/claudia/"* "$CLAUDIA_HOME/config/" 2>/dev/null || true
-  warn "Old config left in place at ~/.config/claudia/ (remove manually when ready)"
-fi
+# Config: migrate from legacy paths
+for legacy_dir in "$HOME/.config/claudia" "$HOME/.claudia/config"; do
+  if [ -d "$legacy_dir" ] && [ ! -f "$RETICLE_HOME/config/secrets.json" ]; then
+    info "Migrating config from $legacy_dir/ to ~/.reticle/config/..."
+    cp -n "$legacy_dir/"* "$RETICLE_HOME/config/" 2>/dev/null || true
+    warn "Old config left in place at $legacy_dir/ (remove manually when ready)"
+    break
+  fi
+done
 
-# Database: ~/.openclaw/workspace/claudia.db → ~/.claudia/data/
-if [ -f "$HOME/.openclaw/workspace/claudia.db" ] && [ ! -f "$CLAUDIA_HOME/data/claudia.db" ]; then
-  info "Migrating database from ~/.openclaw/workspace/ to ~/.claudia/data/..."
-  cp "$HOME/.openclaw/workspace/claudia.db" "$CLAUDIA_HOME/data/claudia.db"
-  # Copy WAL/SHM files if they exist
-  cp "$HOME/.openclaw/workspace/claudia.db-wal" "$CLAUDIA_HOME/data/claudia.db-wal" 2>/dev/null || true
-  cp "$HOME/.openclaw/workspace/claudia.db-shm" "$CLAUDIA_HOME/data/claudia.db-shm" 2>/dev/null || true
-  warn "Old database left in place at ~/.openclaw/workspace/ (remove manually when ready)"
-fi
+# Database: migrate from legacy paths
+for legacy_db in "$HOME/.claudia/data/claudia.db" "$HOME/.openclaw/workspace/claudia.db"; do
+  if [ -f "$legacy_db" ] && [ ! -f "$RETICLE_HOME/data/reticle.db" ]; then
+    info "Migrating database from $legacy_db to ~/.reticle/data/reticle.db..."
+    cp "$legacy_db" "$RETICLE_HOME/data/reticle.db"
+    cp "${legacy_db}-wal" "$RETICLE_HOME/data/reticle.db-wal" 2>/dev/null || true
+    cp "${legacy_db}-shm" "$RETICLE_HOME/data/reticle.db-shm" 2>/dev/null || true
+    warn "Old database left in place at $legacy_db (remove manually when ready)"
+    break
+  fi
+done
 
 # --- Step 3: Pull latest ---
 if [ "$SKIP_PULL" = false ]; then
@@ -66,7 +71,7 @@ if [ "$SKIP_INSTALL" = false ]; then
 fi
 
 # --- Step 5: Sync code to ~/.claudia/app/ ---
-info "Syncing code to ~/.claudia/app/..."
+info "Syncing code to ~/.reticle/app/..."
 rsync -a --delete \
   --exclude='.git' \
   --exclude='node_modules' \
@@ -93,12 +98,12 @@ rsync -a --delete \
   --exclude='*-heartbeat.json' \
   --exclude='*-batch-queue.json' \
   --exclude='*-last-check.txt' \
-  "$REPO_DIR/" "$CLAUDIA_HOME/app/"
+  "$REPO_DIR/" "$RETICLE_HOME/app/"
 
 # --- Step 6: Install production dependencies ---
 if [ "$SKIP_INSTALL" = false ]; then
-  info "Installing production dependencies in ~/.claudia/app/..."
-  cd "$CLAUDIA_HOME/app"
+  info "Installing production dependencies in ~/.reticle/app/..."
+  cd "$RETICLE_HOME/app"
   npm install --omit=dev --ignore-scripts --silent
 fi
 
@@ -187,7 +192,7 @@ SERVICES=(
 
 for svc in "${SERVICES[@]}"; do
   IFS='|' read -r label jsfile <<< "$svc"
-  plist_label="ai.claudia.$label"
+  plist_label="ai.reticle.$label"
   plist_path="$PLIST_DIR/$plist_label.plist"
 
   cat > "$plist_path" <<PLIST
@@ -201,7 +206,7 @@ for svc in "${SERVICES[@]}"; do
   <key>ProgramArguments</key>
   <array>
     <string>/opt/homebrew/bin/node</string>
-    <string>$CLAUDIA_HOME/app/$jsfile</string>
+    <string>$RETICLE_HOME/app/$jsfile</string>
   </array>
   <key>RunAtLoad</key>
   <true/>
@@ -217,9 +222,9 @@ for svc in "${SERVICES[@]}"; do
   <key>ExitTimeOut</key>
   <integer>5</integer>
   <key>StandardOutPath</key>
-  <string>$CLAUDIA_HOME/logs/$label.log</string>
+  <string>$RETICLE_HOME/logs/$label.log</string>
   <key>StandardErrorPath</key>
-  <string>$CLAUDIA_HOME/logs/$label-error.log</string>
+  <string>$RETICLE_HOME/logs/$label-error.log</string>
   <key>EnvironmentVariables</key>
   <dict>
     <key>HOME</key>
@@ -241,18 +246,18 @@ SCHEDULED_SERVICES=(
 )
 
 # Daily digest: weekdays at 6:00 PM
-cat > "$PLIST_DIR/ai.claudia.digest-daily.plist" <<PLIST
+cat > "$PLIST_DIR/ai.reticle.digest-daily.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
   "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
   <key>Label</key>
-  <string>ai.claudia.digest-daily</string>
+  <string>ai.reticle.digest-daily</string>
   <key>ProgramArguments</key>
   <array>
     <string>/opt/homebrew/bin/node</string>
-    <string>$CLAUDIA_HOME/app/digest-daily.js</string>
+    <string>$RETICLE_HOME/app/digest-daily.js</string>
   </array>
   <key>StartCalendarInterval</key>
   <array>
@@ -267,9 +272,9 @@ cat > "$PLIST_DIR/ai.claudia.digest-daily.plist" <<PLIST
   <key>ProcessType</key>
   <string>Background</string>
   <key>StandardOutPath</key>
-  <string>$CLAUDIA_HOME/logs/digest-daily.log</string>
+  <string>$RETICLE_HOME/logs/digest-daily.log</string>
   <key>StandardErrorPath</key>
-  <string>$CLAUDIA_HOME/logs/digest-daily-error.log</string>
+  <string>$RETICLE_HOME/logs/digest-daily-error.log</string>
   <key>EnvironmentVariables</key>
   <dict>
     <key>HOME</key>
@@ -282,18 +287,18 @@ cat > "$PLIST_DIR/ai.claudia.digest-daily.plist" <<PLIST
 PLIST
 
 # Weekly digest: Friday at 4:00 PM
-cat > "$PLIST_DIR/ai.claudia.digest-weekly.plist" <<PLIST
+cat > "$PLIST_DIR/ai.reticle.digest-weekly.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
   "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
   <key>Label</key>
-  <string>ai.claudia.digest-weekly</string>
+  <string>ai.reticle.digest-weekly</string>
   <key>ProgramArguments</key>
   <array>
     <string>/opt/homebrew/bin/node</string>
-    <string>$CLAUDIA_HOME/app/digest-weekly.js</string>
+    <string>$RETICLE_HOME/app/digest-weekly.js</string>
   </array>
   <key>StartCalendarInterval</key>
   <dict><key>Weekday</key><integer>5</integer><key>Hour</key><integer>16</integer><key>Minute</key><integer>0</integer></dict>
@@ -302,9 +307,9 @@ cat > "$PLIST_DIR/ai.claudia.digest-weekly.plist" <<PLIST
   <key>ProcessType</key>
   <string>Background</string>
   <key>StandardOutPath</key>
-  <string>$CLAUDIA_HOME/logs/digest-weekly.log</string>
+  <string>$RETICLE_HOME/logs/digest-weekly.log</string>
   <key>StandardErrorPath</key>
-  <string>$CLAUDIA_HOME/logs/digest-weekly-error.log</string>
+  <string>$RETICLE_HOME/logs/digest-weekly-error.log</string>
   <key>EnvironmentVariables</key>
   <dict>
     <key>HOME</key>
@@ -321,7 +326,15 @@ OLD_LABELS=(
   "ai.openclaw.gmail-monitor"
   "ai.openclaw.slack-monitor"
   "ai.openclaw.slack-events"
+  "ai.openclaw.gateway"
+  "ai.openclaw.meeting-recorder"
   "com.openclaw.meeting-alerts"
+  "ai.claudia.gmail-monitor"
+  "ai.claudia.slack-events"
+  "ai.claudia.meeting-alerts"
+  "ai.claudia.followup-checker"
+  "ai.claudia.digest-daily"
+  "ai.claudia.digest-weekly"
 )
 
 for old_label in "${OLD_LABELS[@]}"; do
@@ -337,7 +350,7 @@ done
 info "Loading services..."
 for svc in "${SERVICES[@]}"; do
   IFS='|' read -r label jsfile <<< "$svc"
-  plist_label="ai.claudia.$label"
+  plist_label="ai.reticle.$label"
   plist_path="$PLIST_DIR/$plist_label.plist"
 
   # Bootout if already loaded (ignore errors)
@@ -351,7 +364,7 @@ done
 # Load scheduled services
 for svc in "${SCHEDULED_SERVICES[@]}"; do
   IFS='|' read -r label jsfile <<< "$svc"
-  plist_label="ai.claudia.$label"
+  plist_label="ai.reticle.$label"
   plist_path="$PLIST_DIR/$plist_label.plist"
 
   launchctl bootout "gui/$UID_VAL/$plist_label" 2>/dev/null || true
@@ -365,7 +378,7 @@ info "Service status:"
 echo ""
 for svc in "${SERVICES[@]}"; do
   IFS='|' read -r label jsfile <<< "$svc"
-  plist_label="ai.claudia.$label"
+  plist_label="ai.reticle.$label"
 
   status_line=$(launchctl list 2>/dev/null | grep "$plist_label" || true)
   if [ -n "$status_line" ]; then
@@ -387,7 +400,7 @@ echo ""
 info "Scheduled services:"
 for svc in "${SCHEDULED_SERVICES[@]}"; do
   IFS='|' read -r label jsfile <<< "$svc"
-  plist_label="ai.claudia.$label"
+  plist_label="ai.reticle.$label"
 
   status_line=$(launchctl list 2>/dev/null | grep "$plist_label" || true)
   if [ -n "$status_line" ]; then
