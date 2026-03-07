@@ -2,7 +2,7 @@
 'use strict';
 
 const express = require('express');
-const claudiaDb = require('./claudia-db');
+const reticleDb = require('./reticle-db');
 const peopleStore = require('./lib/people-store');
 const slackReader = require('./lib/slack-reader');
 const feedbackTracker = require('./lib/feedback-tracker');
@@ -13,7 +13,7 @@ const PORT = config.gatewayPort || 3001;
 
 app.use(express.json());
 
-const db = claudiaDb.initDatabase();
+const db = reticleDb.initDatabase();
 
 // GET /people — list all monitored people
 app.get('/people', (req, res) => {
@@ -86,7 +86,7 @@ app.post('/feedback/candidates/:id/skipped', (req, res) => {
 
 // GET /feedback/stats
 app.get('/feedback/stats', (req, res) => {
-  const primaryAccount = claudiaDb.getPrimaryAccount(db);
+  const primaryAccount = reticleDb.getPrimaryAccount(db);
   if (!primaryAccount) return res.json({ weekly: {}, monthly: {}, ratios: {} });
 
   const now = Math.floor(Date.now() / 1000);
@@ -108,7 +108,7 @@ app.use((err, req, res, _next) => {
 });
 
 app.listen(PORT, () => {
-  console.log(`Claudia Gateway listening on port ${PORT}`);
+  console.log(`Reticle Gateway listening on port ${PORT}`);
 });
 
 module.exports = app; // for testing

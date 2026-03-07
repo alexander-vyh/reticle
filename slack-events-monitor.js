@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * Claudia Slack Events Monitor - Socket Mode event tracking
+ * Reticle Slack Events Monitor - Socket Mode event tracking
  * Monitors unanswered DMs and @mentions via Slack Socket Mode
  */
 
@@ -10,7 +10,7 @@ const WebSocket = require('ws');
 const { execSync } = require('child_process');
 const crypto = require('crypto');
 const emailCache = require('./email-cache');
-const claudiaDb = require('./claudia-db');
+const reticleDb = require('./reticle-db');
 const { parseSenderEmail, formatRuleDescription } = require('./lib/email-utils');
 const { parseRuleRefinement } = require('./lib/ai');
 const log = require('./lib/logger')('slack-events');
@@ -191,7 +191,7 @@ function trackSlackConversation(db, event, direction) {
     const lastSender = direction === 'incoming' ? 'them' : 'me';
     const waitingFor = direction === 'incoming' ? 'my-response' : 'their-response';
 
-    claudiaDb.trackConversation(db, accountId, {
+    reticleDb.trackConversation(db, accountId, {
       id: conversationId,
       type: conversationType,
       subject: event.text ? event.text.substring(0, 100) : null,
@@ -759,13 +759,13 @@ async function handleClassifyAction(action, channel, userId, messageTs) {
     const suggestedConditions = { ruleType: actionType, matchFrom: senderEmail, matchTo: toMatch };
     const description = `FROM ${senderEmail} AND TO ${toMatch}`;
     // Create the rule provisionally to get an ID, but we could also just pass args
-    const ruleRow = claudiaDb.createRule(followupsDbConn, accountId, {
+    const ruleRow = reticleDb.createRule(followupsDbConn, accountId, {
       rule_type: actionType, match_from: senderEmail, match_to: toMatch,
       source_email: meta.from, source_subject: meta.subject
     });
     const ruleId = ruleRow.id;
     // Immediately deactivate — it's a proposal, not yet accepted
-    claudiaDb.deactivateRule(followupsDbConn, ruleId);
+    reticleDb.deactivateRule(followupsDbConn, ruleId);
 
     const defaultRuleArgs = JSON.stringify({ rule_type: actionType, match_from: senderEmail, source_email: meta.from, source_subject: meta.subject });
     const actionLabel = immediateAction === 'archive' ? '✓ Archived this email\n' : immediateAction === 'delete' ? '✓ Trashed this email\n' : '';
@@ -785,12 +785,12 @@ async function handleClassifyAction(action, channel, userId, messageTs) {
     }
   } else {
     // Default: simple sender rule — create immediately
-    const ruleRow2 = claudiaDb.createRule(followupsDbConn, accountId, {
+    const ruleRow2 = reticleDb.createRule(followupsDbConn, accountId, {
       rule_type: actionType, match_from: senderEmail,
       source_email: meta.from, source_subject: meta.subject
     });
     const ruleId = ruleRow2.id;
-    const description = formatRuleDescription(claudiaDb.getRuleById(followupsDbConn, ruleId));
+    const description = formatRuleDescription(reticleDb.getRuleById(followupsDbConn, ruleId));
     const actionLabel = immediateAction === 'archive' ? '✓ Archived this email\n' : immediateAction === 'delete' ? '✓ Trashed this email\n' : '';
     const blocks = buildRuleConfirmationBlocks(actionType, description, ruleId);
     if (actionLabel) {
@@ -852,13 +852,13 @@ async function handleRuleRefinementReply(event) {
   });
 
   // Create the proposed rule (deactivated until confirmed)
-  const newRuleRow = claudiaDb.createRule(followupsDbConn, accountId, {
+  const newRuleRow = reticleDb.createRule(followupsDbConn, accountId, {
     rule_type: ctx.ruleType, match_from: result.matchFrom, match_from_domain: result.matchFromDomain,
     match_to: result.matchTo, match_subject_contains: result.matchSubjectContains,
     source_email: ctx.emailMeta.from, source_subject: ctx.emailMeta.subject
   });
   const newRuleId = newRuleRow.id;
-  claudiaDb.deactivateRule(followupsDbConn, newRuleId);
+  reticleDb.deactivateRule(followupsDbConn, newRuleId);
 
   // Update context with new proposal
   ctx.currentConditions = result;
@@ -926,7 +926,7 @@ async function handleInteractive(payload) {
         case 'mark_replied':
           // Flip conversation state — still waiting for their reply back
           if (threadId && followupsDbConn) {
-            claudiaDb.updateConversationState(followupsDbConn, `email:${threadId}`, 'me', 'their-response');
+            reticleDb.updateConversationState(followupsDbConn, `email:${threadId}`, 'me', 'their-response');
           }
           result = { success: true, message: '✓ Marked as replied' };
           break;
@@ -934,7 +934,7 @@ async function handleInteractive(payload) {
         case 'mark_no_response_needed':
           // Resolve outright — this email doesn't need a reply
           if (threadId && followupsDbConn) {
-            claudiaDb.resolveConversation(followupsDbConn, `email:${threadId}`);
+            reticleDb.resolveConversation(followupsDbConn, `email:${threadId}`);
           }
           result = { success: true, message: '✓ Marked as no reply needed' };
           break;
@@ -956,12 +956,12 @@ async function handleInteractive(payload) {
           const ruleId = parseInt(action.value);
           if (followupsDbConn) {
             // Reactivate the previously deactivated proposed rule
-            claudiaDb.createRule(followupsDbConn, accountId, (() => {
-              const r = claudiaDb.getRuleById(followupsDbConn, ruleId);
+            reticleDb.createRule(followupsDbConn, accountId, (() => {
+              const r = reticleDb.getRuleById(followupsDbConn, ruleId);
               if (!r) return { rule_type: 'archive' }; // fallback
               return { rule_type: r.rule_type, match_from: r.match_from, match_from_domain: r.match_from_domain, match_to: r.match_to, match_subject_contains: r.match_subject_contains, source_email: r.source_email, source_subject: r.source_subject };
             })());
-            const rule = claudiaDb.getRuleById(followupsDbConn, ruleId);
+            const rule = reticleDb.getRuleById(followupsDbConn, ruleId);
             const desc = rule ? formatRuleDescription(rule) : 'unknown';
             result = { success: true, message: `✓ Rule created: ${rule?.rule_type || 'archive'} when ${desc}` };
           }
@@ -977,9 +977,9 @@ async function handleInteractive(payload) {
             const args = JSON.parse(argsJson);
             if (followupsDbConn) {
               // Deactivate the compound proposal
-              claudiaDb.deactivateRule(followupsDbConn, proposedRuleId);
+              reticleDb.deactivateRule(followupsDbConn, proposedRuleId);
               // Create the simple sender rule
-              const rule = claudiaDb.createRule(followupsDbConn, accountId, args);
+              const rule = reticleDb.createRule(followupsDbConn, accountId, args);
               const desc = rule ? formatRuleDescription(rule) : 'unknown';
               result = { success: true, message: `✓ Rule created: ${rule?.rule_type || 'archive'} when ${desc}` };
             }
@@ -993,8 +993,8 @@ async function handleInteractive(payload) {
         case 'undo_rule': {
           const ruleId = parseInt(action.value);
           if (followupsDbConn) {
-            const rule = claudiaDb.getRuleById(followupsDbConn, ruleId);
-            claudiaDb.deactivateRule(followupsDbConn, ruleId);
+            const rule = reticleDb.getRuleById(followupsDbConn, ruleId);
+            reticleDb.deactivateRule(followupsDbConn, ruleId);
             result = { success: true, message: `✓ Rule removed. Emails${rule?.match_from ? ` from ${rule.match_from}` : ''} will appear normally.` };
           }
           break;
@@ -1042,9 +1042,9 @@ async function handleInteractive(payload) {
           const ruleId = parseInt(action.value);
           if (followupsDbConn) {
             // Reactivate it
-            const rule = claudiaDb.getRuleById(followupsDbConn, ruleId);
+            const rule = reticleDb.getRuleById(followupsDbConn, ruleId);
             if (rule) {
-              claudiaDb.createRule(followupsDbConn, accountId, {
+              reticleDb.createRule(followupsDbConn, accountId, {
                 rule_type: rule.rule_type, match_from: rule.match_from, match_from_domain: rule.match_from_domain,
                 match_to: rule.match_to, match_subject_contains: rule.match_subject_contains,
                 source_email: rule.source_email, source_subject: rule.source_subject
@@ -1056,7 +1056,7 @@ async function handleInteractive(payload) {
               if (threadTs) {
                 const ctx = ruleRefinementThreads.get(threadTs);
                 if (ctx && ctx.ruleId !== ruleId) {
-                  claudiaDb.deactivateRule(followupsDbConn, ctx.ruleId);
+                  reticleDb.deactivateRule(followupsDbConn, ctx.ruleId);
                 }
                 ruleRefinementThreads.delete(threadTs);
               }
@@ -1077,7 +1077,7 @@ async function handleInteractive(payload) {
           // User confirmed a domain-level rule
           const [ruleType, domain, sourceEmail, sourceSubject] = (action.value || '').split('|');
           if (followupsDbConn && ruleType && domain) {
-            claudiaDb.createRule(followupsDbConn, accountId, {
+            reticleDb.createRule(followupsDbConn, accountId, {
               rule_type: ruleType, match_from_domain: domain,
               source_email: sourceEmail || null, source_subject: sourceSubject || null
             });
@@ -1133,7 +1133,7 @@ async function handleInteractive(payload) {
 
       // Resolve email conversation in follow-ups when archived/deleted/unsubscribed
       if (followupsDbConn && threadId && ['archive_email', 'delete_email', 'unsubscribe_email'].includes(actionId)) {
-        claudiaDb.resolveConversation(followupsDbConn, `email:${threadId}`);
+        reticleDb.resolveConversation(followupsDbConn, `email:${threadId}`);
       }
     } catch (error) {
       const durationMs = Date.now() - startTime;
@@ -1375,8 +1375,8 @@ async function main() {
 
   // Validate prerequisites before proceeding
   const validation = validatePrerequisites('slack-events', [
-    { type: 'file', path: path.join(config.configDir, 'secrets.json'), description: 'Claudia secrets (Slack tokens)' },
-    { type: 'database', path: claudiaDb.DB_PATH, description: 'Claudia database' }
+    { type: 'file', path: path.join(config.configDir, 'secrets.json'), description: 'Reticle secrets (Slack tokens)' },
+    { type: 'database', path: reticleDb.DB_PATH, description: 'Reticle database' }
   ]);
   if (validation.errors.length > 0) {
     log.fatal({ errors: validation.errors }, 'Startup validation failed');
@@ -1385,15 +1385,15 @@ async function main() {
 
   // Initialize follow-ups database
   try {
-    followupsDbConn = claudiaDb.initDatabase();
-    const primaryAccount = claudiaDb.upsertAccount(followupsDbConn, {
+    followupsDbConn = reticleDb.initDatabase();
+    const primaryAccount = reticleDb.upsertAccount(followupsDbConn, {
       email: CONFIG.gmailAccount,
       provider: 'gmail',
       display_name: 'Primary',
       is_primary: 1
     });
     accountId = primaryAccount.id;
-    log.info('Claudia DB initialized');
+    log.info('Reticle DB initialized');
   } catch (error) {
     log.error({ err: error }, 'Failed to init follow-ups DB');
   }

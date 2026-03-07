@@ -6,10 +6,10 @@ const fs = require('fs');
 const os = require('os');
 
 // Use a temp DB
-const TEST_DB_PATH = path.join(os.tmpdir(), `claudia-collector-test-${Date.now()}.db`);
-process.env.CLAUDIA_DB_PATH = TEST_DB_PATH;
+const TEST_DB_PATH = path.join(os.tmpdir(), `reticle-collector-test-${Date.now()}.db`);
+process.env.RETICLE_DB_PATH = TEST_DB_PATH;
 
-const claudiaDb = require('./claudia-db');
+const reticleDb = require('./reticle-db');
 const { collectFollowups } = require('./lib/digest-collectors');
 
 process.on('exit', () => {
@@ -18,8 +18,8 @@ process.on('exit', () => {
   try { fs.unlinkSync(TEST_DB_PATH + '-shm'); } catch {}
 });
 
-const db = claudiaDb.initDatabase();
-const acct = claudiaDb.upsertAccount(db, {
+const db = reticleDb.initDatabase();
+const acct = reticleDb.upsertAccount(db, {
   email: 'test@example.com', provider: 'gmail',
   display_name: 'Test User', is_primary: 1
 });
@@ -28,7 +28,7 @@ const acct = claudiaDb.upsertAccount(db, {
 const now = Math.floor(Date.now() / 1000);
 
 // Unreplied email: 52 hours old (should be high priority)
-claudiaDb.trackConversation(db, acct.id, {
+reticleDb.trackConversation(db, acct.id, {
   id: 'email:old-unreplied',
   type: 'email',
   subject: 'Q3 Budget Review',
@@ -40,7 +40,7 @@ claudiaDb.trackConversation(db, acct.id, {
 });
 
 // Unreplied DM: 2 hours old (collected as low priority — under 24h threshold)
-claudiaDb.trackConversation(db, acct.id, {
+reticleDb.trackConversation(db, acct.id, {
   id: 'slack-dm:recent',
   type: 'slack-dm',
   subject: 'Quick question',
@@ -52,7 +52,7 @@ claudiaDb.trackConversation(db, acct.id, {
 });
 
 // Awaiting reply: 5 days old
-claudiaDb.trackConversation(db, acct.id, {
+reticleDb.trackConversation(db, acct.id, {
   id: 'email:awaiting-old',
   type: 'email',
   subject: 'Vendor Contract',
@@ -64,7 +64,7 @@ claudiaDb.trackConversation(db, acct.id, {
 });
 
 // Resolved today
-claudiaDb.trackConversation(db, acct.id, {
+reticleDb.trackConversation(db, acct.id, {
   id: 'email:resolved-today',
   type: 'email',
   subject: 'Resolved Issue',
@@ -73,10 +73,10 @@ claudiaDb.trackConversation(db, acct.id, {
   last_sender: 'them',
   waiting_for: 'my-response'
 });
-claudiaDb.resolveConversation(db, 'email:resolved-today');
+reticleDb.resolveConversation(db, 'email:resolved-today');
 
 // Stale conversation: 10 days inactive, not waiting for anyone
-claudiaDb.trackConversation(db, acct.id, {
+reticleDb.trackConversation(db, acct.id, {
   id: 'slack-dm:stale-convo',
   type: 'slack-dm',
   subject: 'Old Discussion',
@@ -145,13 +145,13 @@ console.log('\n=== FOLLOW-UP COLLECTOR TESTS PASSED ===');
 const { collectEmail } = require('./lib/digest-collectors');
 
 // --- Seed email data ---
-claudiaDb.upsertEmail(db, acct.id, {
+reticleDb.upsertEmail(db, acct.id, {
   gmail_id: 'gmail-001', thread_id: 'thread-001',
   from_addr: 'vip@example.com', from_name: 'VIP Boss',
   subject: 'Urgent request', date: now - 3600,
   direction: 'inbound'
 });
-claudiaDb.upsertEmail(db, acct.id, {
+reticleDb.upsertEmail(db, acct.id, {
   gmail_id: 'gmail-002', thread_id: 'thread-002',
   from_addr: 'test@example.com', to_addrs: ['someone@example.com'],
   subject: 'Sent by me', date: now - 7200,
@@ -159,7 +159,7 @@ claudiaDb.upsertEmail(db, acct.id, {
 });
 
 // Log a commitment action
-claudiaDb.logAction(db, {
+reticleDb.logAction(db, {
   accountId: acct.id, actor: 'user', entityType: 'email', entityId: 'gmail-001',
   action: 'commitment', context: { text: 'I will review the RFC by Friday' }
 });
@@ -167,7 +167,7 @@ claudiaDb.logAction(db, {
 const vipEmails = ['vip@example.com'];
 
 // Seed a conversation for the VIP email so vip-unreplied path is exercised
-claudiaDb.trackConversation(db, acct.id, {
+reticleDb.trackConversation(db, acct.id, {
   id: 'email:vip-unreplied',
   type: 'email',
   subject: 'Urgent request',
@@ -210,7 +210,7 @@ console.log('\n=== EMAIL COLLECTOR TESTS PASSED ===');
 const { collectO3 } = require('./lib/digest-collectors');
 
 // --- Seed O3 data ---
-claudiaDb.upsertO3Session(db, acct.id, {
+reticleDb.upsertO3Session(db, acct.id, {
   id: 'cal-o3-1',
   report_name: 'Jane Smith',
   report_email: 'jane@example.com',
@@ -219,10 +219,10 @@ claudiaDb.upsertO3Session(db, acct.id, {
   created_at: now - (3 * 86400)
 });
 // This O3 happened but Lattice not logged
-claudiaDb.markO3Notified(db, 'cal-o3-1', 'prep_sent_before');
+reticleDb.markO3Notified(db, 'cal-o3-1', 'prep_sent_before');
 
 // Upcoming O3: tomorrow
-claudiaDb.upsertO3Session(db, acct.id, {
+reticleDb.upsertO3Session(db, acct.id, {
   id: 'cal-o3-2',
   report_name: 'Dev Reyes',
   report_email: 'dev@example.com',

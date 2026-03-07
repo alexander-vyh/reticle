@@ -5,9 +5,9 @@ const path = require('path');
 const fs = require('fs');
 
 const TEST_OM_PATH = path.join(__dirname, 'test-seed-om.db');
-const TEST_MAIN_PATH = path.join(__dirname, 'test-seed-claudia.db');
+const TEST_MAIN_PATH = path.join(__dirname, 'test-seed-reticle.db');
 process.env.ORG_MEMORY_DB_PATH = TEST_OM_PATH;
-process.env.CLAUDIA_DB_PATH = TEST_MAIN_PATH;
+process.env.RETICLE_DB_PATH = TEST_MAIN_PATH;
 
 function cleanup() {
   for (const p of [TEST_OM_PATH, TEST_MAIN_PATH]) {
@@ -21,14 +21,14 @@ function freshDbs() {
   cleanup();
   // Clear require cache for both modules
   delete require.cache[require.resolve('./lib/org-memory-db')];
-  delete require.cache[require.resolve('./claudia-db')];
+  delete require.cache[require.resolve('./reticle-db')];
   delete require.cache[require.resolve('./lib/seed-data')];
   delete require.cache[require.resolve('./lib/knowledge-graph')];
   const orgDb = require('./lib/org-memory-db');
-  const claudiaDb = require('./claudia-db');
+  const reticleDb = require('./reticle-db');
   return {
     db: orgDb.initDatabase(TEST_OM_PATH),
-    mainDb: claudiaDb.initDatabase()
+    mainDb: reticleDb.initDatabase()
   };
 }
 

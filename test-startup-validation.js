@@ -7,9 +7,9 @@ const path = require('path');
 const os = require('os');
 
 // Use temp dir for heartbeats
-const TEST_DIR = path.join(os.tmpdir(), `claudia-startup-test-${Date.now()}`);
+const TEST_DIR = path.join(os.tmpdir(), `reticle-startup-test-${Date.now()}`);
 fs.mkdirSync(TEST_DIR, { recursive: true });
-process.env.CLAUDIA_HEARTBEAT_DIR = TEST_DIR;
+process.env.RETICLE_HEARTBEAT_DIR = TEST_DIR;
 
 const { validatePrerequisites } = require('./lib/startup-validation');
 

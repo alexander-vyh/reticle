@@ -7,11 +7,11 @@ const path = require('path');
 const os = require('os');
 
 // Use temp dir for tests
-const TEST_DIR = path.join(os.tmpdir(), `claudia-heartbeat-test-${Date.now()}`);
+const TEST_DIR = path.join(os.tmpdir(), `reticle-heartbeat-test-${Date.now()}`);
 fs.mkdirSync(TEST_DIR, { recursive: true });
 
 // Override heartbeat dir before requiring the module
-process.env.CLAUDIA_HEARTBEAT_DIR = TEST_DIR;
+process.env.RETICLE_HEARTBEAT_DIR = TEST_DIR;
 
 const heartbeat = require('./lib/heartbeat');
 

@@ -5,10 +5,10 @@ const path = require('path');
 const fs = require('fs');
 const os = require('os');
 
-const TEST_DB_PATH = path.join(os.tmpdir(), `claudia-patterns-test-${Date.now()}.db`);
-process.env.CLAUDIA_DB_PATH = TEST_DB_PATH;
+const TEST_DB_PATH = path.join(os.tmpdir(), `reticle-patterns-test-${Date.now()}.db`);
+process.env.RETICLE_DB_PATH = TEST_DB_PATH;
 
-const claudiaDb = require('./claudia-db');
+const reticleDb = require('./reticle-db');
 const { detectPatterns } = require('./lib/digest-patterns');
 
 process.on('exit', () => {
@@ -17,15 +17,15 @@ process.on('exit', () => {
   try { fs.unlinkSync(TEST_DB_PATH + '-shm'); } catch {}
 });
 
-const db = claudiaDb.initDatabase();
-const acct = claudiaDb.upsertAccount(db, {
+const db = reticleDb.initDatabase();
+const acct = reticleDb.upsertAccount(db, {
   email: 'test@example.com', provider: 'gmail',
   display_name: 'Test', is_primary: 1
 });
 
 // --- Seed 4 weeks of snapshot data ---
 // Week 1 (3 weeks ago): fast reply times
-claudiaDb.saveSnapshot(db, acct.id, {
+reticleDb.saveSnapshot(db, acct.id, {
   snapshotDate: '2026-02-02',
   cadence: 'daily',
   items: [
@@ -38,7 +38,7 @@ claudiaDb.saveSnapshot(db, acct.id, {
 });
 
 // Week 2: slightly slower
-claudiaDb.saveSnapshot(db, acct.id, {
+reticleDb.saveSnapshot(db, acct.id, {
   snapshotDate: '2026-02-09',
   cadence: 'daily',
   items: [
@@ -49,7 +49,7 @@ claudiaDb.saveSnapshot(db, acct.id, {
 });
 
 // Week 3: much slower (>25% increase = moderate)
-claudiaDb.saveSnapshot(db, acct.id, {
+reticleDb.saveSnapshot(db, acct.id, {
   snapshotDate: '2026-02-16',
   cadence: 'daily',
   items: [
@@ -98,13 +98,13 @@ for (const insight of insights) {
 console.log('PASS: all insights have valid shape');
 
 // --- Test: close rate with zero resolved (division by zero guard) ---
-const acct2 = claudiaDb.upsertAccount(db, {
+const acct2 = reticleDb.upsertAccount(db, {
   email: 'zero-rate@example.com', provider: 'gmail',
   display_name: 'Zero Rate Test', is_primary: 0
 });
 
 // Week with only unreplied items (0 resolved → rate = 0)
-claudiaDb.saveSnapshot(db, acct2.id, {
+reticleDb.saveSnapshot(db, acct2.id, {
   snapshotDate: '2026-02-09',
   cadence: 'daily',
   items: [
@@ -114,7 +114,7 @@ claudiaDb.saveSnapshot(db, acct2.id, {
 });
 
 // Another week also with 0 resolved
-claudiaDb.saveSnapshot(db, acct2.id, {
+reticleDb.saveSnapshot(db, acct2.id, {
   snapshotDate: '2026-02-16',
   cadence: 'daily',
   items: [

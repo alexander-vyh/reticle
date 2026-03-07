@@ -1,7 +1,7 @@
 'use strict';
 
 const config = require('./lib/config');
-const claudiaDb = require('./claudia-db');
+const reticleDb = require('./reticle-db');
 const log = require('./lib/logger')('digest-daily');
 const heartbeat = require('./lib/heartbeat');
 const { validatePrerequisites } = require('./lib/startup-validation');
@@ -28,15 +28,15 @@ async function main() {
 
   // Startup validation
   const validation = validatePrerequisites(SERVICE_NAME, [
-    { type: 'database', path: claudiaDb.DB_PATH, description: 'Claudia database' }
+    { type: 'database', path: reticleDb.DB_PATH, description: 'Reticle database' }
   ]);
   if (validation.errors.length > 0) {
     log.fatal({ errors: validation.errors }, 'Startup validation failed');
     process.exit(1);
   }
 
-  const db = claudiaDb.initDatabase();
-  const primaryAccount = claudiaDb.upsertAccount(db, {
+  const db = reticleDb.initDatabase();
+  const primaryAccount = reticleDb.upsertAccount(db, {
     email: config.gmailAccount,
     provider: 'gmail',
     display_name: 'Primary',
@@ -124,7 +124,7 @@ async function main() {
 
   // Save snapshot
   const dateStr = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`;
-  claudiaDb.saveSnapshot(db, accountId, {
+  reticleDb.saveSnapshot(db, accountId, {
     snapshotDate: dateStr,
     cadence: 'daily',
     items: allItems

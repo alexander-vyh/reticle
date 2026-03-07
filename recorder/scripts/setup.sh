@@ -6,7 +6,7 @@ set -euo pipefail
 # for video-transcription-analysis imports.
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-VENV_DIR="${RECORDER_VENV_PATH:-$HOME/.config/claudia/recorder-venv}"
+VENV_DIR="${RECORDER_VENV_PATH:-$HOME/.config/reticle/recorder-venv}"
 VTA_DIR="${VTA_PATH:-$HOME/GitHub/video-transcription-analysis}"
 
 echo "=== Meeting Recorder Python Setup ==="
@@ -60,8 +60,8 @@ echo "Downloading spaCy English model..."
 python -m spacy download en_core_web_sm 2>/dev/null || echo "spaCy model download failed (non-critical)"
 
 # Ensure config directories exist
-mkdir -p ~/.config/claudia/transcripts
-mkdir -p ~/.config/claudia/recordings
+mkdir -p ~/.config/reticle/transcripts
+mkdir -p ~/.config/reticle/recordings
 
 # Write an activation helper that RecorderConfig can reference
 cat > "$VENV_DIR/activate-recorder.sh" <<'ACTIVATE'

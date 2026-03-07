@@ -9,7 +9,7 @@ const fs = require('fs');
 const https = require('https');
 const path = require('path');
 const emailCache = require('./email-cache');
-const claudiaDb = require('./reticle-db');
+const reticleDb = require('./reticle-db');
 const { parseSenderEmail, formatRuleDescription } = require('./lib/email-utils');
 const log = require('./lib/logger')('gmail-monitor');
 const config = require('./lib/config');
@@ -62,7 +62,7 @@ let accountId = null;
 // Sent-mail detection: use wider window on first run to cover restart gaps
 let sentMailFirstRun = true;
 
-// VIP senders (loaded from ~/.config/claudia/team.json)
+// VIP senders (loaded from ~/.reticle/config/team.json)
 const VIPS = config.vipEmails;
 
 // VIP title patterns (case-insensitive)
@@ -179,7 +179,7 @@ function createUrgentEmailBlocks(from, subject, reason, date, emailId, threadId)
 }
 
 /**
- * Send macOS notification using terminal-notifier (appears as "Claudia")
+ * Send macOS notification using terminal-notifier (appears as "Reticle")
  */
 function sendMacOSNotification(title, message) {
   try {
@@ -369,7 +369,7 @@ let userRules = [];
 function loadUserRules() {
   if (!followupsDbConn) return;
   try {
-    userRules = claudiaDb.getActiveRules(followupsDbConn, accountId);
+    userRules = reticleDb.getActiveRules(followupsDbConn, accountId);
     if (userRules.length > 0) {
       log.info({ count: userRules.length }, 'Loaded user email rules');
     }
@@ -402,7 +402,7 @@ function applyUserRules(email) {
     if (rule.match_subject_contains && !subject.includes(rule.match_subject_contains)) continue;
 
     // Record the hit (fire-and-forget — don't block on DB write)
-    try { claudiaDb.recordRuleHit(followupsDbConn, rule.id); } catch { /* ignore */ }
+    try { reticleDb.recordRuleHit(followupsDbConn, rule.id); } catch { /* ignore */ }
 
     return { action: rule.rule_type, reason: `Learned: ${formatRuleDescription(rule)}`, ruleId: rule.id };
   }
@@ -776,7 +776,7 @@ function trackEmailConversation(db, email, direction, metadata) {
     // Extract sender display name using shared utility
     const fromName = parseSenderEmail(email.from).display;
 
-    claudiaDb.trackConversation(db, accountId, {
+    reticleDb.trackConversation(db, accountId, {
       id: threadId,
       type: 'email',
       subject: email.subject,
@@ -959,7 +959,7 @@ async function checkSentEmails() {
     }
 
     // Get all pending email conversations
-    const pending = claudiaDb.getPendingResponses(followupsDbConn, accountId, { type: 'email' });
+    const pending = reticleDb.getPendingResponses(followupsDbConn, accountId, { type: 'email' });
     if (pending.length === 0) {
       log.debug('No pending email conversations to match against');
       return;
@@ -981,7 +981,7 @@ async function checkSentEmails() {
       // Idempotency: skip if already flipped
       if (conv.waiting_for === 'their-response') continue;
 
-      claudiaDb.updateConversationState(followupsDbConn, conv.id, 'me', 'their-response');
+      reticleDb.updateConversationState(followupsDbConn, conv.id, 'me', 'their-response');
       flipped++;
     }
 
@@ -1205,7 +1205,7 @@ async function maybeSendHealthCheck() {
   let rulesLine = '';
   try {
     if (followupsDbConn) {
-      const rulesSummary = claudiaDb.getRulesSummary(followupsDbConn, accountId);
+      const rulesSummary = reticleDb.getRulesSummary(followupsDbConn, accountId);
       if (rulesSummary.total > 0) {
         const topLines = rulesSummary.top.map((r, i) =>
           `    ${i + 1}. ${r.rule_type.charAt(0).toUpperCase() + r.rule_type.slice(1)} ${formatRuleDescription(r)} (${r.hit_count} hits)`
@@ -1258,7 +1258,7 @@ async function main() {
   const validation = validatePrerequisites('gmail-monitor', [
     { type: 'file', path: config.gmailCredentialsPath, description: 'Gmail credentials' },
     { type: 'file', path: config.gmailTokenPath, description: 'Gmail token' },
-    { type: 'database', path: claudiaDb.DB_PATH, description: 'Claudia database' }
+    { type: 'database', path: reticleDb.DB_PATH, description: 'Reticle database' }
   ]);
   if (validation.errors.length > 0) {
     log.fatal({ errors: validation.errors }, 'Startup validation failed');
@@ -1267,15 +1267,15 @@ async function main() {
 
   // Initialize follow-ups database
   try {
-    followupsDbConn = claudiaDb.initDatabase();
-    const primaryAccount = claudiaDb.upsertAccount(followupsDbConn, {
+    followupsDbConn = reticleDb.initDatabase();
+    const primaryAccount = reticleDb.upsertAccount(followupsDbConn, {
       email: CONFIG.gmailAccount,
       provider: 'gmail',
       display_name: 'Primary',
       is_primary: 1
     });
     accountId = primaryAccount.id;
-    log.info('Claudia DB initialized');
+    log.info('Reticle DB initialized');
   } catch (error) {
     log.error({ err: error }, 'Failed to init follow-ups DB');
   }

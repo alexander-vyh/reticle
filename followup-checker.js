@@ -5,7 +5,7 @@
  */
 
 const https = require('https');
-const claudiaDb = require('./claudia-db');
+const reticleDb = require('./reticle-db');
 const log = require('./lib/logger')('followup-checker');
 
 const config = require('./lib/config');
@@ -51,6 +51,7 @@ let db = null;
 let accountId = null;
 let lastDailyDigest = null;
 let last4hCheck = null;
+let lastEodDate = null;
 let errorCount = 0;
 
 /**
@@ -198,8 +199,8 @@ async function checkImmediate() {
  */
 function buildEODSection(db) {
   const now = Math.floor(Date.now() / 1000);
-  const pendingEmails = claudiaDb.getPendingResponses(db, accountId, { type: 'email' });
-  const respondedTodayCount = claudiaDb.getResolvedToday(db, accountId, 'email').length;
+  const pendingEmails = reticleDb.getPendingResponses(db, accountId, { type: 'email' });
+  const respondedTodayCount = reticleDb.getResolvedToday(db, accountId, 'email').length;
 
   // Split pending into urgent vs non-urgent by parsing metadata
   const urgent = [];
@@ -259,7 +260,7 @@ async function check4Hour() {
   const now = Math.floor(Date.now() / 1000);
 
   // Get items older than 4 hours that haven't been notified recently
-  const pending = claudiaDb.getPendingResponses(db, accountId, {
+  const pending = reticleDb.getPendingResponses(db, accountId, {
     olderThan: CONFIG.thresholds.batch4h.slackDm
   }).filter(conv => {
     // Only notify if we haven't notified in the last 4 hours
@@ -295,14 +296,16 @@ async function check4Hour() {
     }
   }
 
-  // Append EOD email section if after 5 PM
+  // Append EOD email section once per evening (after 5 PM, at most once per calendar day)
   const hour = new Date().getHours();
-  if (hour >= 17) {
+  const today = new Date().toDateString();
+  if (hour >= 17 && lastEodDate !== today) {
     const eodSection = buildEODSection(db);
     if (eodSection) {
       if (!hasContent) message = '📊 *End-of-Day Summary*';
       message += eodSection;
       hasContent = true;
+      lastEodDate = today;
     }
   }
 
@@ -316,8 +319,8 @@ async function check4Hour() {
 
   // Mark as notified
   pending.forEach(conv => {
-    claudiaDb.markNotified(db, conv.id);
-    claudiaDb.logNotification(db, accountId, conv.id, '4h-batch');
+    reticleDb.markNotified(db, conv.id);
+    reticleDb.logNotification(db, accountId, conv.id, '4h-batch');
   });
 }
 
@@ -335,8 +338,8 @@ async function checkDaily() {
   const today = now.toISOString().split('T')[0];
   if (lastDailyDigest === today) return;
 
-  const pending = claudiaDb.getPendingResponses(db, accountId);
-  const awaiting = claudiaDb.getAwaitingReplies(db, accountId, {
+  const pending = reticleDb.getPendingResponses(db, accountId);
+  const awaiting = reticleDb.getAwaitingReplies(db, accountId, {
     olderThan: CONFIG.thresholds.daily.email
   });
 
@@ -354,7 +357,7 @@ async function checkDaily() {
 
   // Mark as notified
   pending.forEach(conv => {
-    claudiaDb.logNotification(db, accountId, conv.id, 'daily-digest');
+    reticleDb.logNotification(db, accountId, conv.id, 'daily-digest');
   });
 }
 
@@ -364,7 +367,7 @@ async function checkDaily() {
 async function checkEscalations() {
   const now = Math.floor(Date.now() / 1000);
 
-  const escalated = claudiaDb.getPendingResponses(db, accountId).filter(conv => {
+  const escalated = reticleDb.getPendingResponses(db, accountId).filter(conv => {
     const age = now - conv.last_activity;
     const threshold = CONFIG.thresholds.escalation[conv.type];
 
@@ -391,8 +394,8 @@ async function checkEscalations() {
   log.warn({ count: escalated.length, items: escalated.map(c => ({ id: c.id, type: c.type, from: c.from_name || c.from_user })) }, 'Sent escalation notification');
 
   escalated.forEach(conv => {
-    claudiaDb.markNotified(db, conv.id);
-    claudiaDb.logNotification(db, accountId, conv.id, 'escalation');
+    reticleDb.markNotified(db, conv.id);
+    reticleDb.logNotification(db, accountId, conv.id, 'escalation');
   });
 }
 
@@ -429,7 +432,7 @@ async function main() {
   log.info({ checkIntervalMin: CONFIG.checkInterval / 60000 }, 'Follow-Up Checker starting');
 
   const validation = validatePrerequisites('followup-checker', [
-    { type: 'database', path: claudiaDb.DB_PATH, description: 'Claudia database' }
+    { type: 'database', path: reticleDb.DB_PATH, description: 'Reticle database' }
   ]);
   if (validation.errors.length > 0) {
     log.fatal({ errors: validation.errors }, 'Startup validation failed');
@@ -437,15 +440,15 @@ async function main() {
   }
 
   // Initialize database
-  db = claudiaDb.initDatabase();
-  const primaryAccount = claudiaDb.upsertAccount(db, {
+  db = reticleDb.initDatabase();
+  const primaryAccount = reticleDb.upsertAccount(db, {
     email: config.gmailAccount,
     provider: 'gmail',
     display_name: 'Primary',
     is_primary: 1
   });
   accountId = primaryAccount.id;
-  log.info('Claudia DB initialized');
+  log.info('Reticle DB initialized');
 
   // Initial check
   await runChecks();
