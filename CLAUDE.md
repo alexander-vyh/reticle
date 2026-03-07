@@ -71,7 +71,7 @@ Schema docs: `docs/plans/2026-02-19-schema-redesign-design.md`.
 
 - `reticle-db.js` — Database layer: schema, queries, entity type registry
 - `lib/ai.js` — Anthropic SDK wrapper for AI-powered filtering/triage
-- `lib/config.js` — Config loader (reads `~/.claudia/config/`)
+- `lib/config.js` — Config loader (reads `~/.reticle/config/`)
 - `lib/heartbeat.js` — Health check module (all services write heartbeat JSON)
 - `lib/startup-validation.js` — Pre-flight checks before service main loop
 - `lib/logger.js` — Structured logging via pino with rotation
@@ -89,10 +89,10 @@ Schema docs: `docs/plans/2026-02-19-schema-redesign-design.md`.
 
 ## Configuration
 
-Runtime config in `~/.claudia/` (never committed):
+Runtime config in `~/.reticle/` (never committed):
 - `config/secrets.json` — Slack tokens, Gmail account (template: `config/secrets.example.json`)
 - `config/team.json` — VIP contacts, direct reports (template: `config/team.example.json`)
-- `data/claudia.db` — SQLite database (created on first run)
+- `data/reticle.db` — SQLite database (created on first run)
 - `logs/` — Structured logs via pino with rotation
 
 ## Testing — Strict TDD Required
@@ -115,7 +115,7 @@ not `:memory:`), file system interactions, service startup/shutdown.
 Both layers required for new features.
 
 ```bash
-npm test                        # All tests (root)
+npm test                        # All tests (root + tray)
 node test-reticle-db.js         # Database layer
 node test-heartbeat.js          # Heartbeat module
 node test-startup-validation.js # Startup validation
@@ -144,7 +144,7 @@ use XCTest in `reticle/Tests/`.
 - Services are standalone scripts managed by launchd
 - JSON `metadata` columns for flexible attributes — promote to typed columns only
   when query performance demands it
-- Test files live at the project root alongside source (e.g., `test-claudia-db.js`)
+- Test files live at the project root alongside source (e.g., `test-reticle-db.js`)
 
 ## Agent Framework Files (Product Feature — Not Dev Instructions)
 
@@ -152,11 +152,59 @@ use XCTest in `reticle/Tests/`.
 define the **Reticle agent persona** for conversational contexts (Discord, Slack).
 They are part of the product, not instructions for Claude Code.
 
+## Work Tracking (Beads)
+
+This project uses [beads](https://beads.dev) (`bd` command) for task tracking with
+dependency chains. The database lives in `.beads/` (Dolt-backed, auto-managed).
+
+**Two layers, no duplication:**
+- **Design** (`docs/plans/*.md`) — approved specs, schema, rationale. Read before
+  implementing. Rarely changes.
+- **Execution** (`bd`) — task status, dependencies, blocking chains. Check and
+  update during implementation.
+
+### When starting implementation work
+
+```bash
+bd ready                        # What's unblocked and ready?
+bd ready --parent <epic-id>     # Filter to a specific workstream
+bd show <issue-id>              # Read details before starting
+bd update <id> -s in_progress   # Claim the task
+```
+
+### When finishing a task
+
+```bash
+bd close <id>                   # Marks done, unblocks dependents
+bd ready                        # See what opened up
+```
+
+### When you discover new work mid-session
+
+```bash
+bd q "Short description"                    # Quick capture, returns ID
+bd create "Title" --parent <epic> -p 2      # Structured, under an epic
+bd dep <blocker-id> --blocks <blocked-id>   # Wire into dependency chain
+```
+
+### Key commands
+
+```bash
+bd list                  # All open issues
+bd blocked               # What's waiting on what
+bd graph --all           # Visual dependency map
+bd children <epic-id>    # What's under an epic
+bd stale                 # Forgotten work
+```
+
+Do NOT use beads for quick questions, code review, or exploratory work. Use it when
+the session involves implementing, completing, or planning tracked work.
+
 ## Design Documents
 
 All approved designs live in `docs/plans/` with date prefixes. Read the relevant
 design doc before working on a feature — they contain approved schema, API contracts,
-and architectural decisions.
+and architectural decisions. Task breakdowns and status live in beads, not in plan docs.
 
 ## Meeting Recorder (Swift)
 
@@ -168,7 +216,7 @@ make list-devices   # Show available audio devices
 make run            # Build + run debug
 ```
 
-Managed by launchd via `recorder/ai.openclaw.meeting-recorder.plist`.
+Managed by launchd via `recorder/ai.reticle.meeting-recorder.plist`.
 Uses CoreAudio for capture and a Python venv for live transcription.
 
 ## Gotchas
@@ -181,10 +229,10 @@ Uses CoreAudio for capture and a Python venv for live transcription.
 - No automated deletes — archive/flag only; delete only on explicit user request
 - Deploy target is macOS launchd (not systemd, not Docker)
 - Pre-commit hook runs `gitleaks` — commits will be rejected if secrets are staged
-- Config templates are in `config/` — actual secrets live in `~/.claudia/config/`
+- Config templates are in `config/` — actual secrets live in `~/.reticle/config/`
 
 ## Deploy
 
 ```bash
-bin/deploy  # Syncs code, builds Swift apps, assembles .app bundles, restarts services
+bin/deploy  # Syncs to ~/.reticle/app/, generates plists, restarts services
 ```

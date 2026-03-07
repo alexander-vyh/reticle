@@ -1,5 +1,5 @@
 /**
- * Claudia Email Cache
+ * Reticle Email Cache
  * Disk-based cache for email content to speed up "View" button
  */
 
@@ -8,7 +8,7 @@ const path = require('path');
 const os = require('os');
 
 // Cache directory in standard macOS location
-const CACHE_DIR = path.join(os.homedir(), 'Library', 'Caches', 'claudia', 'email-cache');
+const CACHE_DIR = path.join(os.homedir(), 'Library', 'Caches', 'reticle', 'email-cache');
 
 // Maximum age for cache files (24 hours in milliseconds)
 const MAX_CACHE_AGE = 24 * 60 * 60 * 1000;

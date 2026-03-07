@@ -3,18 +3,18 @@ import os
 
 struct RecorderConfig: Codable {
     var httpPort: UInt16 = 9847
-    var preferredDevices: [String] = ["ZoomAudioDevice", "BlackHole 2ch"]
+    var preferredDevices: [String] = ["BlackHole 2ch", "ZoomAudioDevice"]
     var chunkDurationSeconds: Double = 0.1
-    var transcriptsDir: String = "~/.config/claudia/transcripts"
-    var recordingsDir: String = "~/.config/claudia/recordings"
-    var pythonVenvPath: String = "~/.config/claudia/recorder-venv"
+    var transcriptsDir: String = "~/.config/reticle/transcripts"
+    var recordingsDir: String = "~/.config/reticle/recordings"
+    var pythonVenvPath: String = "~/.config/reticle/recorder-venv"
     var whisperModel: String = "mlx-community/whisper-large-v3-turbo"
     var language: String = "auto"
     var micDevice: String = ""
     var micVadThreshold: Double = 0.01
 
-    static let configPath = NSString("~/.config/claudia/recorder.json").expandingTildeInPath
-    private static let logger = Logger(subsystem: "ai.openclaw.meeting-recorder", category: "Config")
+    static let configPath = NSString("~/.config/reticle/recorder.json").expandingTildeInPath
+    private static let logger = Logger(subsystem: "ai.reticle.meeting-recorder", category: "Config")
 
     var resolvedTranscriptsDir: String {
         NSString(string: transcriptsDir).expandingTildeInPath

@@ -4,7 +4,7 @@ import os
 
 // Simplified from VoiceInk (GPL v3) — stripped ObservableObject/@Published/UserDefaults/priority mode
 final class AudioDeviceManager {
-    private let logger = Logger(subsystem: "ai.openclaw.meeting-recorder", category: "AudioDeviceManager")
+    private let logger = Logger(subsystem: "ai.reticle.meeting-recorder", category: "AudioDeviceManager")
 
     struct AudioDevice {
         let id: AudioDeviceID

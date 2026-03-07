@@ -5,11 +5,11 @@ import os
 /// Minimal HTTP/1.1 server using Apple's Network framework (NWListener).
 /// Handles JSON API requests for the meeting recorder daemon.
 final class HTTPServer {
-    private let logger = Logger(subsystem: "ai.openclaw.meeting-recorder", category: "HTTP")
+    private let logger = Logger(subsystem: "ai.reticle.meeting-recorder", category: "HTTP")
     private let port: UInt16
     private var listener: NWListener?
     private let router: HTTPRouter
-    private let queue = DispatchQueue(label: "ai.openclaw.meeting-recorder.http")
+    private let queue = DispatchQueue(label: "ai.reticle.meeting-recorder.http")
     private weak var daemon: RecorderDaemon?
 
     init(port: UInt16, daemon: RecorderDaemon) {

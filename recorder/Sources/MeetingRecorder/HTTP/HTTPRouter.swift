@@ -3,7 +3,7 @@ import os
 
 /// Routes HTTP requests to daemon methods and produces JSON responses.
 final class HTTPRouter {
-    private let logger = Logger(subsystem: "ai.openclaw.meeting-recorder", category: "Router")
+    private let logger = Logger(subsystem: "ai.reticle.meeting-recorder", category: "Router")
     private weak var daemon: RecorderDaemon?
     private let startTime = Date()
 

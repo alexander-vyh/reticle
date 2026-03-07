@@ -1,7 +1,7 @@
 import Foundation
 import os
 
-let logger = Logger(subsystem: "ai.openclaw.meeting-recorder", category: "Main")
+let logger = Logger(subsystem: "ai.reticle.meeting-recorder", category: "Main")
 
 // MARK: - CLI Argument Parsing
 

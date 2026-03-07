@@ -6,7 +6,7 @@ import os
 /// Monitors the local microphone for voice activity (RMS energy).
 /// Used to determine when "self" is speaking for self/others segment tagging.
 final class MicMonitor {
-    private let logger = Logger(subsystem: "ai.openclaw.meeting-recorder", category: "MicMonitor")
+    private let logger = Logger(subsystem: "ai.reticle.meeting-recorder", category: "MicMonitor")
 
     private var audioUnit: AudioUnit?
     private var isRunning = false

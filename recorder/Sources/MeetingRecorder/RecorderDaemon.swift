@@ -5,7 +5,7 @@ import os
 /// Orchestrates audio recording sessions: manages CoreAudioRecorder, Python live transcription
 /// subprocess, and post-processing pipeline.
 final class RecorderDaemon {
-    private let logger = Logger(subsystem: "ai.openclaw.meeting-recorder", category: "Daemon")
+    private let logger = Logger(subsystem: "ai.reticle.meeting-recorder", category: "Daemon")
     private let config: RecorderConfig
     private let deviceManager: AudioDeviceManager
     private let recorder = CoreAudioRecorder()
@@ -187,10 +187,27 @@ final class RecorderDaemon {
         // Launch batch post-processing in background
         launchPostProcessor(session: session)
 
+        // Clear session immediately so new recordings can start without waiting
         activeSession = nil
 
-        logger.notice("Recording stopped. WAV at \(wavPath)")
-        return wavPath
+        // Python cleanup and post-processing happen in background — don't block HTTP response
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            // Wait for Python live transcriber to finish
+            if let process = session.pythonProcess, process.isRunning {
+                // Give it up to 5 seconds to exit cleanly on EOF
+                Thread.sleep(forTimeInterval: 5.0)
+                if process.isRunning {
+                    self?.logger.warning("Python live transcriber didn't exit cleanly, terminating")
+                    process.terminate()
+                }
+            }
+
+            // Launch batch post-processing
+            self?.launchPostProcessor(session: session)
+        }
+
+        logger.notice("Recording stopped. WAV at \(session.wavPath)")
+        return session.wavPath
     }
 
     // MARK: - Device Resolution
