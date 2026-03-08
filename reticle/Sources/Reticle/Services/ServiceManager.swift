@@ -41,14 +41,14 @@ struct ServiceDefinition {
     let scheduled: Bool
 
     static let all: [ServiceDefinition] = [
-        ServiceDefinition(label: "Gmail Monitor",     launchdLabel: "ai.claudia.gmail-monitor",      heartbeatName: "gmail-monitor",      scheduled: false),
-        ServiceDefinition(label: "Slack Events",      launchdLabel: "ai.claudia.slack-events",       heartbeatName: "slack-events",       scheduled: false),
-        ServiceDefinition(label: "Meeting Alerts",    launchdLabel: "ai.claudia.meeting-alerts",     heartbeatName: "meeting-alerts",     scheduled: false),
-        ServiceDefinition(label: "Follow-up Checker", launchdLabel: "ai.claudia.followup-checker",   heartbeatName: "followup-checker",   scheduled: false),
-        ServiceDefinition(label: "Meeting Recorder",  launchdLabel: "ai.openclaw.meeting-recorder",  heartbeatName: nil,                  scheduled: false),
-        ServiceDefinition(label: "Gateway",           launchdLabel: "ai.openclaw.gateway",           heartbeatName: nil,                  scheduled: false),
-        ServiceDefinition(label: "Daily Digest",      launchdLabel: "ai.claudia.digest-daily",       heartbeatName: "digest-daily",       scheduled: true),
-        ServiceDefinition(label: "Weekly Digest",     launchdLabel: "ai.claudia.digest-weekly",      heartbeatName: "digest-weekly",      scheduled: true),
+        ServiceDefinition(label: "Gmail Monitor",     launchdLabel: "ai.reticle.gmail-monitor",      heartbeatName: "gmail-monitor",      scheduled: false),
+        ServiceDefinition(label: "Slack Events",      launchdLabel: "ai.reticle.slack-events",       heartbeatName: "slack-events",       scheduled: false),
+        ServiceDefinition(label: "Meeting Alerts",    launchdLabel: "ai.reticle.meeting-alerts",     heartbeatName: "meeting-alerts",     scheduled: false),
+        ServiceDefinition(label: "Follow-up Checker", launchdLabel: "ai.reticle.followup-checker",   heartbeatName: "followup-checker",   scheduled: false),
+        ServiceDefinition(label: "Meeting Recorder",  launchdLabel: "ai.reticle.meeting-recorder",   heartbeatName: "meeting-recorder",   scheduled: false),
+        ServiceDefinition(label: "Gateway",           launchdLabel: "ai.reticle.gateway",            heartbeatName: "gateway",            scheduled: false),
+        ServiceDefinition(label: "Daily Digest",      launchdLabel: "ai.reticle.digest-daily",       heartbeatName: "digest-daily",       scheduled: true),
+        ServiceDefinition(label: "Weekly Digest",     launchdLabel: "ai.reticle.digest-weekly",      heartbeatName: "digest-weekly",      scheduled: true),
     ]
 }
 
@@ -67,7 +67,7 @@ class ServiceManager {
 
     private static let heartbeatDir: String = {
         let home = FileManager.default.homeDirectoryForCurrentUser.path
-        return "\(home)/.claudia/heartbeats"
+        return "\(home)/.reticle/heartbeats"
     }()
 
     private static var cachedUID: String?

@@ -240,29 +240,29 @@ final class ServiceStoreTests: XCTestCase {
     // ==========================================================
 
     func testServiceLabelsMatchDeployScript() {
-        // The deploy script generates plists with ai.claudia.{name} labels.
+        // The deploy script generates plists with ai.reticle.{name} labels.
         // ServiceDefinition.all must use exactly the same labels.
         let expectedLabels: Set<String> = [
-            "ai.claudia.gmail-monitor",
-            "ai.claudia.slack-events",
-            "ai.claudia.meeting-alerts",
-            "ai.claudia.followup-checker",
-            "ai.openclaw.meeting-recorder",
-            "ai.openclaw.gateway",
-            "ai.claudia.digest-daily",
-            "ai.claudia.digest-weekly",
+            "ai.reticle.gmail-monitor",
+            "ai.reticle.slack-events",
+            "ai.reticle.meeting-alerts",
+            "ai.reticle.followup-checker",
+            "ai.reticle.meeting-recorder",
+            "ai.reticle.gateway",
+            "ai.reticle.digest-daily",
+            "ai.reticle.digest-weekly",
         ]
 
         // Production ServiceDefinition.all — duplicated here for contract test
         let productionLabels: Set<String> = [
-            "ai.claudia.gmail-monitor",
-            "ai.claudia.slack-events",
-            "ai.claudia.meeting-alerts",
-            "ai.claudia.followup-checker",
-            "ai.openclaw.meeting-recorder",
-            "ai.openclaw.gateway",
-            "ai.claudia.digest-daily",
-            "ai.claudia.digest-weekly",
+            "ai.reticle.gmail-monitor",
+            "ai.reticle.slack-events",
+            "ai.reticle.meeting-alerts",
+            "ai.reticle.followup-checker",
+            "ai.reticle.meeting-recorder",
+            "ai.reticle.gateway",
+            "ai.reticle.digest-daily",
+            "ai.reticle.digest-weekly",
         ]
 
         XCTAssertEqual(expectedLabels, productionLabels,

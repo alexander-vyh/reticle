@@ -93,6 +93,29 @@ func evaluateHeartbeat(_ hb: HeartbeatData?, now: Double? = nil) -> HeartbeatHea
     )
 }
 
+struct ServiceDefinitionMirror {
+    let label: String
+    let launchdLabel: String
+    let heartbeatName: String?
+    let scheduled: Bool
+}
+
+let serviceDefinitions: [ServiceDefinitionMirror] = [
+    ServiceDefinitionMirror(label: "Gmail Monitor",     launchdLabel: "ai.reticle.gmail-monitor",      heartbeatName: "gmail-monitor",      scheduled: false),
+    ServiceDefinitionMirror(label: "Slack Events",      launchdLabel: "ai.reticle.slack-events",       heartbeatName: "slack-events",       scheduled: false),
+    ServiceDefinitionMirror(label: "Meeting Alerts",    launchdLabel: "ai.reticle.meeting-alerts",     heartbeatName: "meeting-alerts",     scheduled: false),
+    ServiceDefinitionMirror(label: "Follow-up Checker", launchdLabel: "ai.reticle.followup-checker",   heartbeatName: "followup-checker",   scheduled: false),
+    ServiceDefinitionMirror(label: "Meeting Recorder",  launchdLabel: "ai.reticle.meeting-recorder",   heartbeatName: "meeting-recorder",   scheduled: false),
+    ServiceDefinitionMirror(label: "Gateway",           launchdLabel: "ai.reticle.gateway",            heartbeatName: "gateway",            scheduled: false),
+    ServiceDefinitionMirror(label: "Daily Digest",      launchdLabel: "ai.reticle.digest-daily",       heartbeatName: "digest-daily",       scheduled: true),
+    ServiceDefinitionMirror(label: "Weekly Digest",     launchdLabel: "ai.reticle.digest-weekly",      heartbeatName: "digest-weekly",      scheduled: true),
+]
+
+let heartbeatDir: String = {
+    let home = FileManager.default.homeDirectoryForCurrentUser.path
+    return "\(home)/.reticle/heartbeats"
+}()
+
 // MARK: - Tests
 
 final class ServiceManagerTests: XCTestCase {
@@ -249,5 +272,48 @@ final class ServiceManagerTests: XCTestCase {
         XCTAssertEqual(result.health, "shutting-down")
         XCTAssertNil(result.detail)
         XCTAssertEqual(result.errorCount, 0)
+    }
+
+    // MARK: - ServiceDefinition labels
+
+    func testAllLaunchdLabelsUseReticlePrefix() {
+        for def in serviceDefinitions {
+            XCTAssertTrue(
+                def.launchdLabel.hasPrefix("ai.reticle."),
+                "\(def.label) has stale launchd label: \(def.launchdLabel)"
+            )
+        }
+    }
+
+    func testAllPersistentServicesHaveHeartbeatName() {
+        let persistent = serviceDefinitions.filter { !$0.scheduled }
+        for def in persistent {
+            XCTAssertNotNil(
+                def.heartbeatName,
+                "\(def.label) is a persistent service but has nil heartbeatName"
+            )
+        }
+    }
+
+    func testMeetingRecorderHasHeartbeatName() {
+        let recorder = serviceDefinitions.first { $0.label == "Meeting Recorder" }
+        XCTAssertNotNil(recorder, "Meeting Recorder not found in service definitions")
+        XCTAssertEqual(recorder?.heartbeatName, "meeting-recorder")
+    }
+
+    func testGatewayHasHeartbeatName() {
+        let gateway = serviceDefinitions.first { $0.label == "Gateway" }
+        XCTAssertNotNil(gateway, "Gateway not found in service definitions")
+        XCTAssertEqual(gateway?.heartbeatName, "gateway")
+    }
+
+    func testHeartbeatDirPointsToReticle() {
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        let expected = "\(home)/.reticle/heartbeats"
+        XCTAssertEqual(heartbeatDir, expected)
+    }
+
+    func testServiceDefinitionCount() {
+        XCTAssertEqual(serviceDefinitions.count, 8)
     }
 }
