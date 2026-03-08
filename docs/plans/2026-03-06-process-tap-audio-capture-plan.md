@@ -121,6 +121,13 @@ cat ~/.config/reticle/transcripts/meeting-tap-test-*.json | jq '.segments[0].tex
   first, falls back to AUHAL. Sets `captureMode` in status dict.
 - `status` dict gains `captureMode` field (`"tap"` or `"fallback"`)
 
+**Dual-stream requirement:** Process Tap (meeting audio — all participants) runs
+simultaneously with MicMonitor (user mic via AUHAL). Both streams feed independent
+audio pipelines. The tap stream goes to WAV + Whisper for full-meeting transcription.
+The mic stream provides the isolated user signal needed for future live analytics
+(talk speed, listen/talk ratio, self/others attribution via VAD). Both must be
+active during recording and both must survive output device switches.
+
 **Reference implementations:**
 - [AudioCap](https://github.com/insidegui/AudioCap) (per-process tap, Swift)
 - [AudioTee](https://github.com/makeusabrew/audiotee) (global tap, CLI)
