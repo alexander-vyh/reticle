@@ -9,6 +9,7 @@ struct StartRecordingRequest: Codable {
     var startTime: String?
     var endTime: String?
     var deviceHint: String?
+    var browserMeeting: Bool?
 
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
@@ -18,6 +19,7 @@ struct StartRecordingRequest: Codable {
         startTime = try container.decodeIfPresent(String.self, forKey: .startTime)
         endTime = try container.decodeIfPresent(String.self, forKey: .endTime)
         deviceHint = try container.decodeIfPresent(String.self, forKey: .deviceHint)
+        browserMeeting = try container.decodeIfPresent(Bool.self, forKey: .browserMeeting)
     }
 }
 
@@ -33,6 +35,7 @@ struct StatusResponse: Codable {
     var title: String?
     var duration: Double?
     var deviceName: String?
+    var captureMode: String?
 }
 
 struct HealthResponse: Codable {
@@ -54,4 +57,5 @@ struct StopResponse: Codable {
 struct StartResponse: Codable {
     let started: Bool
     let meetingId: String
+    var captureMode: String?
 }

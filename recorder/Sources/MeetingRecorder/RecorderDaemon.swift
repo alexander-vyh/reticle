@@ -36,6 +36,8 @@ final class RecorderDaemon {
         let wavPath: String
         let pythonProcess: Process?
         let pythonStdinPipe: Pipe?
+        let captureMode: String  // "tap" or "fallback"
+        let processTap: ProcessTapCapture?  // nil when using fallback
     }
 
     init(config: RecorderConfig, deviceManager: AudioDeviceManager) {
@@ -74,25 +76,18 @@ final class RecorderDaemon {
                 "title": session.title,
                 "duration": round(duration * 10) / 10,
                 "deviceName": deviceName,
+                "captureMode": session.captureMode,
             ]
         }
         return ["recording": false]
     }
 
     func startRecording(meetingId: String, title: String, attendees: [String],
-                        startTime: String?, endTime: String?, deviceHint: String?) throws {
+                        startTime: String?, endTime: String?, deviceHint: String?,
+                        browserMeeting: Bool = false) throws {
         guard activeSession == nil else {
             throw RecorderError.alreadyRecording
         }
-
-        // Resolve device
-        let deviceID = resolveDevice(hint: deviceHint)
-        guard deviceID != 0 else {
-            throw RecorderError.noDeviceFound
-        }
-
-        let deviceName = deviceManager.getDeviceName(deviceID: deviceID) ?? "Unknown"
-        logger.notice("Starting recording: meeting=\(meetingId), device=\(deviceName)")
 
         // Prepare WAV output path
         let dateStr = ISO8601DateFormatter().string(from: Date())
@@ -104,21 +99,79 @@ final class RecorderDaemon {
         // Start Python live transcription subprocess
         let (pythonProcess, stdinPipe) = launchLiveTranscriber()
 
-        // Set up audio chunk handler: pipe PCM to Python stdin
-        recorder.onAudioChunk = { [weak self] data in
-            guard let pipe = self?.activeSession?.pythonStdinPipe else { return }
-            pipe.fileHandleForWriting.write(data)
-        }
+        // Resolve audio source: try Process Tap first, fall back to AUHAL
+        let audioSource = resolveAudioSource(browserMeeting: browserMeeting)
 
-        // Start audio capture (also writes WAV internally)
-        try recorder.startRecording(toOutputFile: wavURL, deviceID: deviceID)
+        var captureMode: String
+        var tapCapture: ProcessTapCapture?
+        var deviceID: AudioDeviceID = 0
+
+        switch audioSource {
+        case .processTap(let tap):
+            captureMode = "tap"
+            tapCapture = tap
+
+            // Set up audio chunk handler: pipe PCM to Python stdin
+            tap.onAudioChunk = { [weak self] data in
+                guard let pipe = self?.activeSession?.pythonStdinPipe else { return }
+                pipe.fileHandleForWriting.write(data)
+            }
+
+            // Start the tap (writes WAV + delivers chunks)
+            do {
+                try tap.start(outputFile: wavURL)
+                logger.notice("Starting recording via Process Tap: meeting=\(meetingId)")
+            } catch {
+                // Tap failed at start — fall through to AUHAL
+                logger.warning("Process Tap start failed: \(error.localizedDescription). Falling back to AUHAL.")
+                tapCapture = nil
+                captureMode = "fallback"
+
+                // Fall back to AUHAL device capture
+                deviceID = resolveDevice(hint: deviceHint)
+                guard deviceID != 0 else { throw RecorderError.noDeviceFound }
+                let deviceName = deviceManager.getDeviceName(deviceID: deviceID) ?? "Unknown"
+                logger.notice("Starting recording via AUHAL fallback: meeting=\(meetingId), device=\(deviceName)")
+
+                recorder.onAudioChunk = { [weak self] data in
+                    guard let pipe = self?.activeSession?.pythonStdinPipe else { return }
+                    pipe.fileHandleForWriting.write(data)
+                }
+                try recorder.startRecording(toOutputFile: wavURL, deviceID: deviceID)
+            }
+
+        case .device(let id):
+            captureMode = "fallback"
+            deviceID = id
+            let deviceName = deviceManager.getDeviceName(deviceID: deviceID) ?? "Unknown"
+            logger.notice("Starting recording via AUHAL: meeting=\(meetingId), device=\(deviceName)")
+
+            recorder.onAudioChunk = { [weak self] data in
+                guard let pipe = self?.activeSession?.pythonStdinPipe else { return }
+                pipe.fileHandleForWriting.write(data)
+            }
+            try recorder.startRecording(toOutputFile: wavURL, deviceID: deviceID)
+
+        case .none:
+            throw RecorderError.noDeviceFound
+        }
 
         // Start mic monitor for self/others detection
         let micDeviceID = resolveMicDevice()
-        if micDeviceID == deviceID {
+        if micDeviceID != 0 && micDeviceID != deviceID {
+            do {
+                try micMonitor.start(deviceID: micDeviceID)
+            } catch {
+                logger.warning("Mic monitor failed to start: \(error.localizedDescription). Self/others detection disabled.")
+            }
+        } else if micDeviceID == deviceID && captureMode == "fallback" {
             logger.warning("Mic device is same as capture device (\(deviceID)). Self/others detection may be inaccurate.")
-        }
-        if micDeviceID != 0 {
+            do {
+                try micMonitor.start(deviceID: micDeviceID)
+            } catch {
+                logger.warning("Mic monitor failed to start: \(error.localizedDescription). Self/others detection disabled.")
+            }
+        } else if micDeviceID != 0 {
             do {
                 try micMonitor.start(deviceID: micDeviceID)
             } catch {
@@ -140,7 +193,9 @@ final class RecorderDaemon {
             deviceID: deviceID,
             wavPath: wavPath,
             pythonProcess: pythonProcess,
-            pythonStdinPipe: stdinPipe
+            pythonStdinPipe: stdinPipe,
+            captureMode: captureMode,
+            processTap: tapCapture
         )
 
         // Start reading live transcript from Python stdout
@@ -156,11 +211,15 @@ final class RecorderDaemon {
             return nil
         }
 
-        logger.notice("Stopping recording: meeting=\(session.meetingId)")
+        logger.notice("Stopping recording: meeting=\(session.meetingId), mode=\(session.captureMode)")
 
-        // Stop audio capture
-        recorder.onAudioChunk = nil
-        recorder.stopRecording()
+        // Stop audio capture — tap or AUHAL depending on mode
+        if let tap = session.processTap {
+            tap.stop()
+        } else {
+            recorder.onAudioChunk = nil
+            recorder.stopRecording()
+        }
 
         // Close Python stdin to signal EOF -> triggers graceful shutdown
         session.pythonStdinPipe?.fileHandleForWriting.closeFile()
@@ -177,8 +236,6 @@ final class RecorderDaemon {
                 process.terminate()
             }
         }
-
-        let wavPath = session.wavPath
 
         // Persist live transcript and metrics
         liveStore?.notifyStopped()
@@ -217,6 +274,50 @@ final class RecorderDaemon {
 
         logger.notice("Recording stopped. WAV at \(session.wavPath)")
         return session.wavPath
+    }
+
+    // MARK: - Audio Source Resolution
+
+    /// Represents the resolved audio capture source.
+    enum AudioSource {
+        case processTap(ProcessTapCapture)  // Process Tap targeting meeting apps
+        case device(AudioDeviceID)           // AUHAL device capture (fallback)
+        case none                            // No source available
+    }
+
+    /// Try Process Tap first (macOS 14.2+), fall back to AUHAL device capture.
+    /// - Parameter browserMeeting: If true, include browser apps in tap targets
+    ///   (for Google Meet, WebEx in browser).
+    /// - Returns: The resolved audio source.
+    private func resolveAudioSource(browserMeeting: Bool = false) -> AudioSource {
+        // Check if Process Tap is available on this macOS version
+        guard ProcessTapCapture.isAvailable else {
+            logger.notice("Process Taps unavailable (requires macOS 14.2+), using AUHAL fallback")
+            return resolveDeviceSource()
+        }
+
+        // Build target bundle ID list
+        var targetBundleIDs = config.meetingApps
+        if browserMeeting {
+            targetBundleIDs.append(contentsOf: config.browserApps)
+        }
+
+        let tap = ProcessTapCapture(bundleIDs: targetBundleIDs)
+        let pids = tap.findTargetProcessPIDs()
+
+        guard !pids.isEmpty else {
+            logger.notice("No meeting apps running, falling back to AUHAL device capture")
+            return resolveDeviceSource()
+        }
+
+        logger.notice("Found \(pids.count) meeting process(es), will attempt Process Tap")
+        return .processTap(tap)
+    }
+
+    /// Wrap resolveDevice() into an AudioSource enum value.
+    private func resolveDeviceSource() -> AudioSource {
+        let deviceID = resolveDevice(hint: nil)
+        return deviceID != 0 ? .device(deviceID) : .none
     }
 
     // MARK: - Device Resolution
@@ -508,12 +609,18 @@ enum RecorderError: LocalizedError {
     case alreadyRecording
     case noDeviceFound
     case notRecording
+    case permissionDenied
+    case noMeetingAppsRunning
+    case tapCreationFailed(OSStatus)
 
     var errorDescription: String? {
         switch self {
         case .alreadyRecording: return "A recording is already in progress"
         case .noDeviceFound: return "No suitable audio input device found"
         case .notRecording: return "No recording is in progress"
+        case .permissionDenied: return "Audio capture permission denied"
+        case .noMeetingAppsRunning: return "No meeting apps are currently running"
+        case .tapCreationFailed(let status): return "Process Tap creation failed: \(status)"
         }
     }
 }
