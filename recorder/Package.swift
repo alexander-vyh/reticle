@@ -10,9 +10,20 @@ let package = Package(
             name: "meeting-recorder",
             path: "Sources/MeetingRecorder",
             linkerSettings: [
+                .linkedFramework("AppKit"),
                 .linkedFramework("AudioToolbox"),
                 .linkedFramework("CoreAudio"),
                 .linkedFramework("Network"),
+            ]
+        ),
+        .testTarget(
+            name: "MeetingRecorderTests",
+            dependencies: [],
+            path: "Tests/MeetingRecorderTests",
+            linkerSettings: [
+                .linkedFramework("AppKit"),
+                .linkedFramework("AudioToolbox"),
+                .linkedFramework("CoreAudio"),
             ]
         ),
     ]
