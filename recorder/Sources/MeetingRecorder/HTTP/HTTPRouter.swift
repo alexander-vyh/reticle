@@ -83,9 +83,11 @@ final class HTTPRouter {
                 attendees: request.attendees,
                 startTime: request.startTime,
                 endTime: request.endTime,
-                deviceHint: request.deviceHint
+                deviceHint: request.deviceHint,
+                browserMeeting: request.browserMeeting ?? false
             )
-            return jsonResponse(statusCode: 200, StartResponse(started: true, meetingId: request.meetingId))
+            let captureMode = daemon.status["captureMode"] as? String
+            return jsonResponse(statusCode: 200, StartResponse(started: true, meetingId: request.meetingId, captureMode: captureMode))
         } catch RecorderError.alreadyRecording {
             return jsonResponse(statusCode: 409, ErrorResponse(error: "Already recording"))
         } catch {
@@ -124,7 +126,8 @@ final class HTTPRouter {
             meetingId: status["meetingId"] as? String,
             title: status["title"] as? String,
             duration: status["duration"] as? Double,
-            deviceName: status["deviceName"] as? String
+            deviceName: status["deviceName"] as? String,
+            captureMode: status["captureMode"] as? String
         )
         return jsonResponse(statusCode: 200, response)
     }
