@@ -12,6 +12,17 @@ struct RecorderConfig: Codable {
     var language: String = "auto"
     var micDevice: String = ""
     var micVadThreshold: Double = 0.01
+    var meetingApps: [String] = [
+        "us.zoom.xos",              // Zoom
+        "com.microsoft.teams2",     // Teams
+        "com.tinyspeck.slackmacgap" // Slack
+    ]
+    var browserApps: [String] = [
+        "com.apple.Safari",
+        "com.google.Chrome",
+        "org.mozilla.firefox",
+        "company.thebrowser.Browser" // Arc
+    ]
 
     static let configPath = NSString("~/.config/reticle/recorder.json").expandingTildeInPath
     private static let logger = Logger(subsystem: "ai.reticle.meeting-recorder", category: "Config")
