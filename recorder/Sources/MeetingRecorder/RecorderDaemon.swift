@@ -20,6 +20,13 @@ final class RecorderDaemon {
     private let micMonitor: MicMonitor
     private var heartbeatTimer: DispatchSourceTimer?
 
+    // File-based health heartbeat (separate from SSE heartbeat above)
+    private var fileHeartbeatTimer: DispatchSourceTimer?
+    private var heartbeatWriter: HeartbeatWriter?
+    private var errorCount: Int = 0
+    private var lastError: String?
+    private var lastErrorAt: Double?
+
     struct RecordingSession {
         let meetingId: String
         let title: String
@@ -42,12 +49,14 @@ final class RecorderDaemon {
     func start(port: UInt16) {
         httpServer = HTTPServer(port: port, daemon: self)
         httpServer?.start()
+        startFileHeartbeat()
     }
 
     func stop() {
         if activeSession != nil {
             stopRecording()
         }
+        stopFileHeartbeat()
         httpServer?.stop()
     }
 
@@ -358,6 +367,58 @@ final class RecorderDaemon {
     private func stopHeartbeat() {
         heartbeatTimer?.cancel()
         heartbeatTimer = nil
+    }
+
+    // MARK: - File-Based Health Heartbeat
+
+    private func startFileHeartbeat() {
+        let writer = HeartbeatWriter(directory: config.resolvedHeartbeatDir)
+        self.heartbeatWriter = writer
+
+        // Write immediately on start
+        writeFileHeartbeat()
+
+        let timer = DispatchSource.makeTimerSource(queue: .global(qos: .utility))
+        timer.schedule(deadline: .now() + 30, repeating: 30)
+        timer.setEventHandler { [weak self] in
+            self?.writeFileHeartbeat()
+        }
+        timer.resume()
+        fileHeartbeatTimer = timer
+
+        let dir = config.resolvedHeartbeatDir
+        logger.notice("File heartbeat started: \(dir)/meeting-recorder.json")
+    }
+
+    private func stopFileHeartbeat() {
+        fileHeartbeatTimer?.cancel()
+        fileHeartbeatTimer = nil
+        heartbeatWriter = nil
+    }
+
+    private func writeFileHeartbeat() {
+        guard let writer = heartbeatWriter else { return }
+
+        let metrics: HeartbeatMetricsPayload
+        if let session = activeSession {
+            let duration = Date().timeIntervalSince(session.startTime)
+            metrics = HeartbeatMetricsPayload(
+                recording: true,
+                meetingId: session.meetingId,
+                duration: round(duration * 10) / 10,
+                captureMode: "device"
+            )
+        } else {
+            metrics = HeartbeatMetricsPayload()
+        }
+
+        let errors = HeartbeatErrorsPayload(
+            lastError: lastError,
+            lastErrorAt: lastErrorAt,
+            countSinceStart: errorCount
+        )
+
+        writer.write(status: "ok", errors: errors, metrics: metrics)
     }
 
     // MARK: - Post-Processing
