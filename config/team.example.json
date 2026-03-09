@@ -10,5 +10,9 @@
   "filterPatterns": {
     "companyDomain": "example.com",
     "dwGroupEmail": "it-group@example.com"
-  }
+  },
+  "dwTeamEmails": [
+    { "name": "Jane Doe", "team": "CSE", "email": "jane@example.com" },
+    { "name": "John Smith", "team": "Desktop Support", "email": "john@example.com" }
+  ]
 }
