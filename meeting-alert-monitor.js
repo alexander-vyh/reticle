@@ -27,7 +27,7 @@ const CONFIG = {
   },
   alertCheckInterval: 15 * 1000,      // Check every 15 seconds
   lookAheadHours: 24,
-  popupBinary: path.join(os.homedir(), '.claudia', 'MeetingPopup.app', 'Contents', 'MacOS', 'MeetingPopup')
+  popupBinary: path.join(os.homedir(), '.reticle', 'MeetingPopup.app', 'Contents', 'MacOS', 'MeetingPopup')
 };
 
 let calendar = null;
@@ -464,6 +464,10 @@ async function syncCalendar() {
         if (self && self.responseStatus === 'declined') return false;
       }
 
+      // Filter out solo events (no attendees or only self) — these aren't meetings
+      const others = (event.attendees || []).filter(a => !a.self);
+      if (others.length === 0) return false;
+
       return true;
     });
 
@@ -517,9 +521,14 @@ function triggerAlert(event, level) {
 
   log.info({ alertLevel: level, eventId: event.id, summary: event.summary, startTime: event.start.dateTime }, 'Alert triggered');
 
-  // Start recording when meeting begins
+  // Start recording when meeting begins (only if there are other attendees)
   if (level === 'start') {
-    startRecording(event, linkInfo);
+    const others = (event.attendees || []).filter(a => !a.self);
+    if (others.length > 0) {
+      startRecording(event, linkInfo);
+    } else {
+      log.info({ eventId: event.id, summary: event.summary }, 'Skipping recording: no other attendees');
+    }
   }
 
   // Load current events from cache to find overlapping meetings
@@ -747,6 +756,7 @@ async function startRecording(event, linkInfo) {
     startTime: event.start.dateTime,
     endTime: event.end.dateTime,
     deviceHint: platformToDeviceHint(linkInfo.platform),
+    browserMeeting: linkParser.isBrowserMeeting(linkInfo.platform),
   };
 
   try {

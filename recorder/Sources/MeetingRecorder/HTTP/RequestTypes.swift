@@ -36,12 +36,36 @@ struct StatusResponse: Codable {
     var duration: Double?
     var deviceName: String?
     var captureMode: String?
+    var permissionStatus: String?
 }
 
 struct HealthResponse: Codable {
     let ok: Bool
     let uptime: Double
     var pythonAvailable: Bool
+    var permissionStatus: String?
+}
+
+// MARK: - Capture Types
+
+struct CaptureStartRequest: Codable {
+    let mode: String  // "dictation" or "notes"
+    var source: String?  // default "mic"
+}
+
+struct CaptureStartResponse: Codable {
+    let captureId: String
+    let streaming: Bool
+}
+
+struct CaptureStopResponse: Codable {
+    let captureId: String
+    var transcript: String?
+    var wavPath: String?
+}
+
+struct CaptureStreamResponse: Codable {
+    let segments: [String]
 }
 
 struct ErrorResponse: Codable {

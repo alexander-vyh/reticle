@@ -3,12 +3,18 @@ import SwiftUI
 struct TrayMenu: View {
     @EnvironmentObject var serviceStore: ServiceStore
     @EnvironmentObject var appState: AppState
+    @EnvironmentObject var captureManager: CaptureManager
 
     var body: some View {
         Button("Open Reticle") {
             appState.showManagementWindow()
         }
         .keyboardShortcut("r", modifiers: .command)
+
+        if captureManager.isCapturing, let mode = captureManager.captureMode {
+            Text("Capturing (\(mode))...")
+                .foregroundColor(.secondary)
+        }
 
         Divider()
 
@@ -43,7 +49,8 @@ struct TrayMenu: View {
         let effective = serviceStore.effectiveStatus(svc)
         let emoji = effectiveEmoji(effective)
         let detail = serviceDetail(svc, effective: effective)
-        let label = "\(emoji)  \(svc.definition.label)\(detail.isEmpty ? "" : "  (\(detail))")"
+        let permWarning = permissionWarning(svc)
+        let label = "\(emoji)  \(svc.definition.label)\(detail.isEmpty ? "" : "  (\(detail))")\(permWarning)"
 
         Menu(label) {
             if svc.status == .running {
@@ -53,6 +60,18 @@ struct TrayMenu: View {
                 Button("Start") { serviceStore.start(svc.definition.launchdLabel) }
             }
         }
+    }
+
+    /// Returns a warning suffix if the meeting recorder has a denied TCC permission.
+    private func permissionWarning(_ svc: ServiceState) -> String {
+        guard svc.definition.heartbeatName == "meeting-recorder",
+              let hb = svc.heartbeat,
+              let metrics = hb.metrics,
+              let permStatus = metrics.permissionStatus,
+              permStatus == "denied" else {
+            return ""
+        }
+        return "  [mic-only]"
     }
 
     private func effectiveEmoji(_ status: ServiceStore.EffectiveStatus) -> String {

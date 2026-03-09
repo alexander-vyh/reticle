@@ -53,6 +53,12 @@ final class HTTPRouter {
             return handleStatus()
         case ("GET", "/health"):
             return handleHealth()
+        case ("POST", "/capture/start"):
+            return handleCaptureStart(body: body)
+        case ("POST", "/capture/stop"):
+            return handleCaptureStop()
+        case ("GET", "/capture/stream"):
+            return handleCaptureStream()
         default:
             return jsonResponse(statusCode: 404, ErrorResponse(error: "Not found: \(method) \(path)"))
         }
@@ -127,7 +133,8 @@ final class HTTPRouter {
             title: status["title"] as? String,
             duration: status["duration"] as? Double,
             deviceName: status["deviceName"] as? String,
-            captureMode: status["captureMode"] as? String
+            captureMode: status["captureMode"] as? String,
+            permissionStatus: daemon.permissionStatus
         )
         return jsonResponse(statusCode: 200, response)
     }
@@ -136,13 +143,80 @@ final class HTTPRouter {
         let config = RecorderConfig.load()
         let pythonAvailable = FileManager.default.fileExists(atPath: config.pythonPath)
         let uptime = Date().timeIntervalSince(startTime)
+        let permStatus = daemon?.permissionStatus
 
         let response = HealthResponse(
             ok: true,
             uptime: round(uptime * 10) / 10,
-            pythonAvailable: pythonAvailable
+            pythonAvailable: pythonAvailable,
+            permissionStatus: permStatus
         )
         return jsonResponse(statusCode: 200, response)
+    }
+
+    // MARK: - Capture Handlers
+
+    private func handleCaptureStart(body: Data?) -> HTTPResponse {
+        guard let daemon = daemon else {
+            return jsonResponse(statusCode: 500, ErrorResponse(error: "Daemon not available"))
+        }
+
+        guard let body = body else {
+            return jsonResponse(statusCode: 400, ErrorResponse(error: "Request body required"))
+        }
+
+        let request: CaptureStartRequest
+        do {
+            request = try JSONDecoder().decode(CaptureStartRequest.self, from: body)
+        } catch {
+            return jsonResponse(statusCode: 400, ErrorResponse(error: "Invalid JSON: \(error.localizedDescription)"))
+        }
+
+        guard request.mode == "dictation" || request.mode == "notes" else {
+            return jsonResponse(statusCode: 400, ErrorResponse(error: "Mode must be 'dictation' or 'notes'"))
+        }
+
+        // Meeting recording takes priority
+        guard !daemon.isRecording else {
+            return jsonResponse(statusCode: 409, ErrorResponse(error: "Meeting recording in progress"))
+        }
+
+        guard !daemon.isCapturing else {
+            return jsonResponse(statusCode: 409, ErrorResponse(error: "Capture already active"))
+        }
+
+        do {
+            let captureId = try daemon.startCapture(mode: request.mode, source: request.source ?? "mic")
+            return jsonResponse(statusCode: 200, CaptureStartResponse(captureId: captureId, streaming: true))
+        } catch {
+            return jsonResponse(statusCode: 500, ErrorResponse(error: error.localizedDescription))
+        }
+    }
+
+    private func handleCaptureStop() -> HTTPResponse {
+        guard let daemon = daemon else {
+            return jsonResponse(statusCode: 500, ErrorResponse(error: "Daemon not available"))
+        }
+
+        guard daemon.isCapturing else {
+            return jsonResponse(statusCode: 409, ErrorResponse(error: "No capture in progress"))
+        }
+
+        let result = daemon.stopCapture()
+        return jsonResponse(statusCode: 200, CaptureStopResponse(
+            captureId: result?.captureId ?? "unknown",
+            transcript: result?.transcript,
+            wavPath: result?.wavPath
+        ))
+    }
+
+    private func handleCaptureStream() -> HTTPResponse {
+        guard let daemon = daemon else {
+            return jsonResponse(statusCode: 500, ErrorResponse(error: "Daemon not available"))
+        }
+
+        let segments = daemon.captureTranscript
+        return jsonResponse(statusCode: 200, CaptureStreamResponse(segments: segments))
     }
 
     // MARK: - Helpers

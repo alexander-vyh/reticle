@@ -19,6 +19,8 @@ final class RecorderDaemon {
 
     private let micMonitor: MicMonitor
     private var heartbeatTimer: DispatchSourceTimer?
+    private var zombieWatchdogTimer: DispatchSourceTimer?
+    private(set) var wasAutoStopped = false
 
     // File-based health heartbeat (separate from SSE heartbeat above)
     private var fileHeartbeatTimer: DispatchSourceTimer?
@@ -26,6 +28,25 @@ final class RecorderDaemon {
     private var errorCount: Int = 0
     private var lastError: String?
     private var lastErrorAt: Double?
+
+    // Capture session state (hotkey voice capture)
+    private var activeCaptureSession: CaptureSession?
+    private var captureTranscriptSegments: [String] = []
+
+    struct CaptureSession {
+        let captureId: String
+        let mode: String  // "dictation" or "notes"
+        let startTime: Date
+        let wavPath: String?  // nil for dictation mode
+        let pythonProcess: Process?
+        let pythonStdinPipe: Pipe?
+    }
+
+    struct CaptureResult {
+        let captureId: String
+        let transcript: String?
+        let wavPath: String?
+    }
 
     struct RecordingSession {
         let meetingId: String
@@ -65,11 +86,34 @@ final class RecorderDaemon {
     // MARK: - Recording Control
 
     var isRecording: Bool { activeSession != nil }
+    var isCapturing: Bool { activeCaptureSession != nil }
+
+    // Cached permission status — probed once at start and on each recording attempt
+    private var cachedPermissionStatus: String?
+
+    var permissionStatus: String {
+        if let cached = cachedPermissionStatus { return cached }
+        let status = ProcessTapCapture.probePermissionStatus()
+        cachedPermissionStatus = status
+        return status
+    }
+
+    /// Re-probe permission (called before recording attempts)
+    private func refreshPermissionStatus() {
+        cachedPermissionStatus = ProcessTapCapture.probePermissionStatus()
+    }
+
+    var captureTranscript: [String] { captureTranscriptSegments }
 
     var status: [String: Any] {
         if let session = activeSession {
             let duration = Date().timeIntervalSince(session.startTime)
-            let deviceName = deviceManager.getDeviceName(deviceID: session.deviceID) ?? "Unknown"
+            let deviceName: String
+            if session.captureMode == "tap" {
+                deviceName = "Process Tap"
+            } else {
+                deviceName = deviceManager.getDeviceName(deviceID: session.deviceID) ?? "Unknown"
+            }
             return [
                 "recording": true,
                 "meetingId": session.meetingId,
@@ -98,6 +142,9 @@ final class RecorderDaemon {
 
         // Start Python live transcription subprocess
         let (pythonProcess, stdinPipe) = launchLiveTranscriber()
+
+        // Re-probe TCC permission before each recording attempt
+        refreshPermissionStatus()
 
         // Resolve audio source: try Process Tap first, fall back to AUHAL
         let audioSource = resolveAudioSource(browserMeeting: browserMeeting)
@@ -198,6 +245,9 @@ final class RecorderDaemon {
             processTap: tapCapture
         )
 
+        // Start zombie watchdog timer
+        startZombieWatchdog(maxDuration: TimeInterval(config.maxRecordingDurationSeconds))
+
         // Start reading live transcript from Python stdout
         if let process = pythonProcess {
             readLiveTranscript(from: process)
@@ -206,6 +256,8 @@ final class RecorderDaemon {
 
     @discardableResult
     func stopRecording() -> String? {
+        cancelZombieWatchdog()
+
         guard let session = activeSession else {
             logger.warning("stopRecording called but no active session")
             return nil
@@ -224,19 +276,6 @@ final class RecorderDaemon {
         // Close Python stdin to signal EOF -> triggers graceful shutdown
         session.pythonStdinPipe?.fileHandleForWriting.closeFile()
 
-        // Wait for Python to finish (it exits on stdin EOF)
-        if let process = session.pythonProcess, process.isRunning {
-            DispatchQueue.global().async {
-                process.waitUntilExit()
-            }
-            // Give it up to 5 seconds to finish
-            Thread.sleep(forTimeInterval: 5.0)
-            if process.isRunning {
-                logger.warning("Python live transcriber didn't exit cleanly, terminating")
-                process.terminate()
-            }
-        }
-
         // Persist live transcript and metrics
         liveStore?.notifyStopped()
         liveStore?.persist(to: config.resolvedRecordingsDir)
@@ -250,17 +289,13 @@ final class RecorderDaemon {
         // Stop heartbeat
         stopHeartbeat()
 
-        // Launch batch post-processing in background
-        launchPostProcessor(session: session)
-
-        // Clear session immediately so new recordings can start without waiting
+        // Clear session immediately so status reflects stopped state
         activeSession = nil
 
-        // Python cleanup and post-processing happen in background — don't block HTTP response
+        // Python cleanup and post-processing happen in background — don't block
         DispatchQueue.global(qos: .utility).async { [weak self] in
             // Wait for Python live transcriber to finish
             if let process = session.pythonProcess, process.isRunning {
-                // Give it up to 5 seconds to exit cleanly on EOF
                 Thread.sleep(forTimeInterval: 5.0)
                 if process.isRunning {
                     self?.logger.warning("Python live transcriber didn't exit cleanly, terminating")
@@ -500,6 +535,9 @@ final class RecorderDaemon {
     private func writeFileHeartbeat() {
         guard let writer = heartbeatWriter else { return }
 
+        let currentPermissionStatus = permissionStatus
+        let heartbeatStatus = wasAutoStopped ? "auto-stopped" : "ok"
+
         let metrics: HeartbeatMetricsPayload
         if let session = activeSession {
             let duration = Date().timeIntervalSince(session.startTime)
@@ -507,10 +545,11 @@ final class RecorderDaemon {
                 recording: true,
                 meetingId: session.meetingId,
                 duration: round(duration * 10) / 10,
-                captureMode: "device"
+                captureMode: session.captureMode,
+                permissionStatus: currentPermissionStatus
             )
         } else {
-            metrics = HeartbeatMetricsPayload()
+            metrics = HeartbeatMetricsPayload(permissionStatus: currentPermissionStatus)
         }
 
         let errors = HeartbeatErrorsPayload(
@@ -519,7 +558,183 @@ final class RecorderDaemon {
             countSinceStart: errorCount
         )
 
-        writer.write(status: "ok", errors: errors, metrics: metrics)
+        writer.write(status: heartbeatStatus, errors: errors, metrics: metrics)
+    }
+
+    // MARK: - Zombie Watchdog
+
+    private func startZombieWatchdog(maxDuration: TimeInterval) {
+        logger.warning("Zombie watchdog armed: max recording duration = \(Int(maxDuration))s")
+        let timer = DispatchSource.makeTimerSource(queue: .global(qos: .utility))
+        timer.schedule(deadline: .now() + maxDuration)
+        timer.setEventHandler { [weak self] in
+            self?.logger.warning("Recording exceeded max duration (\(Int(maxDuration))s), auto-stopping")
+            self?.wasAutoStopped = true
+            self?.stopRecording()
+        }
+        timer.resume()
+        zombieWatchdogTimer = timer
+    }
+
+    private func cancelZombieWatchdog() {
+        zombieWatchdogTimer?.cancel()
+        zombieWatchdogTimer = nil
+    }
+
+    // MARK: - Voice Capture (Hotkey)
+
+    func startCapture(mode: String, source: String) throws -> String {
+        // Auto-stop any active capture
+        if activeCaptureSession != nil {
+            _ = stopCapture()
+        }
+
+        let captureId = "cap-\(UUID().uuidString.prefix(8))"
+        captureTranscriptSegments = []
+
+        // Only save WAV in notes mode
+        var wavPath: String? = nil
+        if mode == "notes" {
+            let dateStr = ISO8601DateFormatter().string(from: Date())
+                .replacingOccurrences(of: ":", with: "-")
+            wavPath = "\(config.resolvedRecordingsDir)/capture-\(captureId)-\(dateStr).wav"
+        }
+
+        // Launch Python live transcriber
+        let (pythonProcess, stdinPipe) = launchLiveTranscriber()
+
+        // Resolve mic device for capture
+        let micDeviceID = resolveMicDevice()
+        guard micDeviceID != 0 else {
+            throw RecorderError.noDeviceFound
+        }
+
+        // Start AUHAL capture on mic
+        if let wavPath = wavPath {
+            let wavURL = URL(fileURLWithPath: wavPath)
+            recorder.onAudioChunk = { [weak self] data in
+                guard let pipe = self?.activeCaptureSession?.pythonStdinPipe else { return }
+                pipe.fileHandleForWriting.write(data)
+            }
+            try recorder.startRecording(toOutputFile: wavURL, deviceID: micDeviceID)
+        } else {
+            // Dictation mode: stream audio to Python but don't save WAV
+            recorder.onAudioChunk = { [weak self] data in
+                guard let pipe = self?.activeCaptureSession?.pythonStdinPipe else { return }
+                pipe.fileHandleForWriting.write(data)
+            }
+            // Still need to start recording to an output for the recorder to work
+            let tempPath = NSTemporaryDirectory() + "capture-\(captureId).wav"
+            let tempURL = URL(fileURLWithPath: tempPath)
+            try recorder.startRecording(toOutputFile: tempURL, deviceID: micDeviceID)
+        }
+
+        activeCaptureSession = CaptureSession(
+            captureId: captureId,
+            mode: mode,
+            startTime: Date(),
+            wavPath: wavPath,
+            pythonProcess: pythonProcess,
+            pythonStdinPipe: stdinPipe
+        )
+
+        // Read transcript segments from Python stdout
+        if let process = pythonProcess {
+            readCaptureTranscript(from: process)
+        }
+
+        logger.notice("Capture started: id=\(captureId), mode=\(mode)")
+        return captureId
+    }
+
+    @discardableResult
+    func stopCapture() -> CaptureResult? {
+        guard let session = activeCaptureSession else { return nil }
+
+        logger.notice("Stopping capture: id=\(session.captureId), mode=\(session.mode)")
+
+        // Stop AUHAL recorder
+        recorder.onAudioChunk = nil
+        recorder.stopRecording()
+
+        // Snapshot transcript before clearing session
+        let transcript = captureTranscriptSegments.isEmpty ? nil : captureTranscriptSegments.joined(separator: " ")
+        let result = CaptureResult(
+            captureId: session.captureId,
+            transcript: transcript,
+            wavPath: session.wavPath
+        )
+
+        // Clear session immediately so status reflects stopped state
+        activeCaptureSession = nil
+
+        // Close Python stdin to signal EOF, clean up async
+        let capturedSession = session
+        let capturedSegments = captureTranscriptSegments
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            capturedSession.pythonStdinPipe?.fileHandleForWriting.closeFile()
+
+            if let process = capturedSession.pythonProcess, process.isRunning {
+                Thread.sleep(forTimeInterval: 2.0)
+                if process.isRunning {
+                    self?.logger.warning("Capture transcriber didn't exit cleanly, terminating")
+                    process.terminate()
+                }
+            }
+
+            // In notes mode, save transcript JSON alongside WAV
+            if capturedSession.mode == "notes", let wavPath = capturedSession.wavPath {
+                let transcriptPath = wavPath.replacingOccurrences(of: ".wav", with: "-transcript.json")
+                let transcriptData: [String: Any] = [
+                    "captureId": capturedSession.captureId,
+                    "mode": capturedSession.mode,
+                    "startTime": ISO8601DateFormatter().string(from: capturedSession.startTime),
+                    "endTime": ISO8601DateFormatter().string(from: Date()),
+                    "segments": capturedSegments,
+                    "transcript": transcript ?? "",
+                ]
+                if let json = try? JSONSerialization.data(withJSONObject: transcriptData, options: .prettyPrinted) {
+                    try? json.write(to: URL(fileURLWithPath: transcriptPath))
+                }
+            }
+
+            // In dictation mode, clean up temp WAV
+            if capturedSession.mode == "dictation" {
+                let tempPath = NSTemporaryDirectory() + "capture-\(capturedSession.captureId).wav"
+                try? FileManager.default.removeItem(atPath: tempPath)
+            }
+        }
+        logger.notice("Capture stopped: id=\(session.captureId)")
+        return result
+    }
+
+    private func readCaptureTranscript(from process: Process) {
+        guard let stdoutPipe = process.standardOutput as? Pipe else { return }
+
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let handle = stdoutPipe.fileHandleForReading
+            var buffer = Data()
+
+            while true {
+                let chunk = handle.availableData
+                if chunk.isEmpty { break }
+
+                buffer.append(chunk)
+
+                while let newlineIndex = buffer.firstIndex(of: UInt8(ascii: "\n")) {
+                    let lineData = buffer[buffer.startIndex..<newlineIndex]
+                    buffer = Data(buffer[buffer.index(after: newlineIndex)...])
+
+                    guard let line = String(data: lineData, encoding: .utf8),
+                          !line.isEmpty,
+                          let data = line.data(using: .utf8),
+                          let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                          let text = json["text"] as? String else { continue }
+
+                    self?.captureTranscriptSegments.append(text)
+                }
+            }
+        }
     }
 
     // MARK: - Post-Processing
