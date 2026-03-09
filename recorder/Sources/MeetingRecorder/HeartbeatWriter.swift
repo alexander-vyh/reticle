@@ -112,17 +112,20 @@ struct HeartbeatMetricsPayload: Codable {
     let meetingId: String?
     let duration: Double?
     let captureMode: String?
+    let permissionStatus: String?
 
-    init(recording: Bool = false, meetingId: String? = nil, duration: Double? = nil, captureMode: String? = nil) {
+    init(recording: Bool = false, meetingId: String? = nil, duration: Double? = nil,
+         captureMode: String? = nil, permissionStatus: String? = nil) {
         self.recording = recording
         self.meetingId = meetingId
         self.duration = duration
         self.captureMode = captureMode
+        self.permissionStatus = permissionStatus
     }
 
     // Encode nil as null (not absent) to match JS heartbeat format
     enum CodingKeys: String, CodingKey {
-        case recording, meetingId, duration, captureMode
+        case recording, meetingId, duration, captureMode, permissionStatus
     }
 
     func encode(to encoder: Encoder) throws {
@@ -131,5 +134,6 @@ struct HeartbeatMetricsPayload: Codable {
         try container.encode(meetingId, forKey: .meetingId)
         try container.encode(duration, forKey: .duration)
         try container.encode(captureMode, forKey: .captureMode)
+        try container.encode(permissionStatus, forKey: .permissionStatus)
     }
 }

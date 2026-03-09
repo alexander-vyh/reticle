@@ -100,6 +100,56 @@ final class ProcessTapCapture {
         return false
     }
 
+    // MARK: - Permission Probing
+
+    /// Probe TCC permission by creating a minimal tap and immediately destroying it.
+    /// Returns "authorized", "denied", or "unknown".
+    @available(macOS 14.2, *)
+    static func checkPermission() -> String {
+        // Find a running audio process to use as a tap target.
+        // We can't use our own PID directly as an AudioObjectID — we need
+        // a real AudioObjectID from the process object list.
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioHardwarePropertyProcessObjectList,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        var propertySize: UInt32 = 0
+        var queryStatus = AudioObjectGetPropertyDataSize(
+            AudioObjectID(kAudioObjectSystemObject), &address, 0, nil, &propertySize
+        )
+        guard queryStatus == noErr, propertySize > 0 else { return "unknown" }
+
+        let count = Int(propertySize) / MemoryLayout<AudioObjectID>.size
+        var processObjects = [AudioObjectID](repeating: 0, count: count)
+        queryStatus = AudioObjectGetPropertyData(
+            AudioObjectID(kAudioObjectSystemObject), &address, 0, nil, &propertySize, &processObjects
+        )
+        guard queryStatus == noErr, !processObjects.isEmpty else { return "unknown" }
+
+        // Use the first audio process object as probe target
+        let desc = CATapDescription(stereoMixdownOfProcesses: [processObjects[0]])
+        desc.isPrivate = true
+        var tapID: AudioObjectID = kAudioObjectUnknown
+        let status = AudioHardwareCreateProcessTap(desc, &tapID)
+        if status == noErr && tapID != kAudioObjectUnknown {
+            AudioHardwareDestroyProcessTap(tapID)
+            return "authorized"
+        }
+        if status == -1 { return "denied" }
+        return "unknown"
+    }
+
+    /// Non-availability-gated wrapper for permission probing.
+    /// Returns "authorized", "denied", "unknown", or "unavailable".
+    static func probePermissionStatus() -> String {
+        guard isAvailable else { return "unavailable" }
+        if #available(macOS 14.2, *) {
+            return checkPermission()
+        }
+        return "unknown"
+    }
+
     // MARK: - Process Enumeration
 
     /// Find AudioObjectIDs for running processes matching our target bundle IDs.
@@ -228,9 +278,19 @@ final class ProcessTapCapture {
         tapID = tapObjectID
         logger.notice("Process Tap created: objectID=\(tapObjectID)")
 
+        // Step 2b: Query the tap's UID string (needed for aggregate device config)
+        let tapUID = queryTapUID(tapID: tapObjectID)
+        guard let tapUID = tapUID else {
+            logger.error("Failed to get tap UID string")
+            AudioHardwareDestroyProcessTap(tapObjectID)
+            tapID = kAudioObjectUnknown
+            throw CaptureError.aggregateDeviceFailed
+        }
+        logger.notice("Process Tap UID: \(tapUID)")
+
         // Step 3: Create private aggregate device with the tap attached
         do {
-            try createAggregateDevice(tapID: tapObjectID)
+            try createAggregateDevice(tapUID: tapUID)
         } catch {
             // Clean up tap on failure
             AudioHardwareDestroyProcessTap(tapObjectID)
@@ -323,15 +383,38 @@ final class ProcessTapCapture {
 
     var isCurrentlyRunning: Bool { isRunning }
 
+    // MARK: - Tap UID
+
+    /// Query the tap's persistent UID string via kAudioTapPropertyUID.
+    /// The aggregate device's sub-tap list requires this UID, NOT the numeric AudioObjectID.
+    private func queryTapUID(tapID: AudioObjectID) -> String? {
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioTapPropertyUID,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+
+        var uidRef: Unmanaged<CFString>?
+        var size = UInt32(MemoryLayout<Unmanaged<CFString>?>.size)
+        let status = AudioObjectGetPropertyData(tapID, &address, 0, nil, &size, &uidRef)
+
+        guard status == noErr, let uid = uidRef?.takeRetainedValue() else {
+            logger.error("Failed to query tap UID: \(status)")
+            return nil
+        }
+
+        return uid as String
+    }
+
     // MARK: - Aggregate Device
 
-    private func createAggregateDevice(tapID: AudioObjectID) throws {
+    private func createAggregateDevice(tapUID: String) throws {
         let aggregateDesc: [String: Any] = [
             kAudioAggregateDeviceNameKey: "Reticle Process Tap",
             kAudioAggregateDeviceUIDKey: "ai.reticle.process-tap-\(UUID().uuidString)",
             kAudioAggregateDeviceIsPrivateKey: true,
             kAudioAggregateDeviceTapListKey: [
-                [kAudioSubTapUIDKey: "\(tapID)"]
+                [kAudioSubTapUIDKey: tapUID]
             ],
             kAudioAggregateDeviceIsStackedKey: false,
         ]
@@ -349,6 +432,7 @@ final class ProcessTapCapture {
     }
 
     private func queryStreamFormat() throws {
+        // Try aggregate device input format first
         var address = AudioObjectPropertyAddress(
             mSelector: kAudioDevicePropertyStreamFormat,
             mScope: kAudioDevicePropertyScopeInput,
@@ -356,7 +440,7 @@ final class ProcessTapCapture {
         )
 
         var formatSize = UInt32(MemoryLayout<AudioStreamBasicDescription>.size)
-        let status = AudioObjectGetPropertyData(
+        var status = AudioObjectGetPropertyData(
             aggregateDeviceID,
             &address,
             0, nil,
@@ -364,8 +448,26 @@ final class ProcessTapCapture {
             &streamFormat
         )
 
+        // Fallback: query the tap's own format property
+        if status != noErr {
+            logger.warning("Aggregate device format query failed (\(status)), trying tap format")
+            var tapAddress = AudioObjectPropertyAddress(
+                mSelector: kAudioTapPropertyFormat,
+                mScope: kAudioObjectPropertyScopeGlobal,
+                mElement: kAudioObjectPropertyElementMain
+            )
+            formatSize = UInt32(MemoryLayout<AudioStreamBasicDescription>.size)
+            status = AudioObjectGetPropertyData(
+                tapID,
+                &tapAddress,
+                0, nil,
+                &formatSize,
+                &streamFormat
+            )
+        }
+
         guard status == noErr else {
-            logger.error("Failed to query aggregate device stream format: \(status)")
+            logger.error("Failed to query stream format from aggregate or tap: \(status)")
             throw CaptureError.aggregateDeviceFailed
         }
 

@@ -5,6 +5,7 @@ struct ReticleApp: App {
     @StateObject private var gateway = GatewayClient()
     @StateObject private var serviceStore = ServiceStore()
     @StateObject private var appState = AppState()
+    @StateObject private var captureManager = CaptureManager()
     @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
 
     var body: some Scene {
@@ -12,7 +13,11 @@ struct ReticleApp: App {
             TrayMenu()
                 .environmentObject(serviceStore)
                 .environmentObject(appState)
-                .onAppear { serviceStore.startPolling() }
+                .environmentObject(captureManager)
+                .onAppear {
+                    serviceStore.startPolling()
+                    captureManager.registerHotkeys()
+                }
         } label: {
             Image(nsImage: ReticleIcon.menuBarImage(statusColor: serviceStore.statusColor))
         }

@@ -12,6 +12,7 @@ struct RecorderConfig: Codable {
     var language: String = "auto"
     var micDevice: String = ""
     var micVadThreshold: Double = 0.01
+    var maxRecordingDurationSeconds: Int = 14400
     var heartbeatDir: String = "~/.reticle/heartbeats"
     var meetingApps: [String] = [
         "us.zoom.xos",              // Zoom
@@ -24,6 +25,31 @@ struct RecorderConfig: Codable {
         "org.mozilla.firefox",
         "company.thebrowser.Browser" // Arc
     ]
+
+    // Custom decoder: all fields optional so partial JSON configs work
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        httpPort = try c.decodeIfPresent(UInt16.self, forKey: .httpPort) ?? 9847
+        preferredDevices = try c.decodeIfPresent([String].self, forKey: .preferredDevices) ?? ["BlackHole 2ch", "ZoomAudioDevice"]
+        chunkDurationSeconds = try c.decodeIfPresent(Double.self, forKey: .chunkDurationSeconds) ?? 0.1
+        transcriptsDir = try c.decodeIfPresent(String.self, forKey: .transcriptsDir) ?? "~/.config/reticle/transcripts"
+        recordingsDir = try c.decodeIfPresent(String.self, forKey: .recordingsDir) ?? "~/.config/reticle/recordings"
+        pythonVenvPath = try c.decodeIfPresent(String.self, forKey: .pythonVenvPath) ?? "~/.config/reticle/recorder-venv"
+        whisperModel = try c.decodeIfPresent(String.self, forKey: .whisperModel) ?? "mlx-community/whisper-large-v3-turbo"
+        language = try c.decodeIfPresent(String.self, forKey: .language) ?? "auto"
+        micDevice = try c.decodeIfPresent(String.self, forKey: .micDevice) ?? ""
+        micVadThreshold = try c.decodeIfPresent(Double.self, forKey: .micVadThreshold) ?? 0.01
+        maxRecordingDurationSeconds = try c.decodeIfPresent(Int.self, forKey: .maxRecordingDurationSeconds) ?? 14400
+        heartbeatDir = try c.decodeIfPresent(String.self, forKey: .heartbeatDir) ?? "~/.reticle/heartbeats"
+        meetingApps = try c.decodeIfPresent([String].self, forKey: .meetingApps) ?? [
+            "us.zoom.xos", "com.microsoft.teams2", "com.tinyspeck.slackmacgap"
+        ]
+        browserApps = try c.decodeIfPresent([String].self, forKey: .browserApps) ?? [
+            "com.apple.Safari", "com.google.Chrome", "org.mozilla.firefox", "company.thebrowser.Browser"
+        ]
+    }
+
+    init() {}
 
     static let configPath = NSString("~/.config/reticle/recorder.json").expandingTildeInPath
     private static let logger = Logger(subsystem: "ai.reticle.meeting-recorder", category: "Config")

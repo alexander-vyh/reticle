@@ -111,5 +111,33 @@ assert('rejects malicious zoom-like domain',
   { platform: 'calendar', url: 'https://calendar.google.com/event?eid=999' }
 );
 
+// Test 7: WebEx link detection
+console.log('\nWebEx detection:');
+assert('finds webex link in description',
+  parser.extractMeetingLink({
+    description: 'Join: https://acme.webex.com/acme/j.php?MTID=m123',
+    location: '',
+    htmlLink: 'https://calendar.google.com/event?eid=600'
+  }),
+  { platform: 'webex', url: 'https://acme.webex.com/acme/j.php?MTID=m123' }
+);
+
+assert('finds webex link in location',
+  parser.extractMeetingLink({
+    description: '',
+    location: 'https://meet.webex.com/meet123',
+    htmlLink: 'https://calendar.google.com/event?eid=601'
+  }),
+  { platform: 'webex', url: 'https://meet.webex.com/meet123' }
+);
+
+// Test 8: isBrowserMeeting
+console.log('\nisBrowserMeeting:');
+assert('meet is browser meeting', parser.isBrowserMeeting('meet'), true);
+assert('webex is browser meeting', parser.isBrowserMeeting('webex'), true);
+assert('calendar is browser meeting', parser.isBrowserMeeting('calendar'), true);
+assert('zoom is NOT browser meeting', parser.isBrowserMeeting('zoom'), false);
+assert('teams is NOT browser meeting', parser.isBrowserMeeting('teams'), false);
+
 console.log(`\n${passed} passed, ${failed} failed`);
 process.exit(failed > 0 ? 1 : 0);
