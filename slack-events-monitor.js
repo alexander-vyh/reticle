@@ -410,7 +410,11 @@ async function handleEvent(event, db) {
 
   // Track conversation in follow-ups database
   if (event.type === 'message' && !event.subtype && event.user !== CONFIG.myUserId) {
-    trackSlackConversation(db, event, 'incoming');
+    try {
+      trackSlackConversation(db, event, 'incoming');
+    } catch (err) {
+      log.warn({ err, channel: event.channel }, 'Failed to track conversation — continuing');
+    }
   }
 
   // Capture all non-bot messages to raw_messages for organizational memory
@@ -1387,7 +1391,7 @@ async function main() {
   try {
     followupsDbConn = reticleDb.initDatabase();
     const primaryAccount = reticleDb.upsertAccount(followupsDbConn, {
-      email: CONFIG.gmailAccount,
+      email: config.gmailAccount,
       provider: 'gmail',
       display_name: 'Primary',
       is_primary: 1

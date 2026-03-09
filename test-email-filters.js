@@ -2,10 +2,15 @@
 'use strict';
 
 const assert = require('assert');
+const config = require('./lib/config');
 
 // --- Test: AI triage wiring for noisy group mailboxes ---
 // DW group and licensing group emails are 95% noise but 5% important.
 // Instead of batch-surfacing everything, route them through AI triage.
+
+// Derive test addresses from config so tests work in any environment
+const DW_GROUP_EMAIL = config.filterPatterns.dwGroupEmail || 'digitalworkplace@testcorp.com';
+const COMPANY_DOMAIN = config.filterPatterns.companyDomain || 'testcorp.com';
 
 // We need applyRuleBasedFilter to be importable from gmail-monitor.js
 let applyRuleBasedFilter;
@@ -49,9 +54,9 @@ async function runTests() {
 
   test('DW group email without onboarding/offboarding returns ai-triage', () => {
     const email = {
-      from: 'Someone via Digital Workplace <digitalworkplace@example.com>',
+      from: `Someone via Digital Workplace <${DW_GROUP_EMAIL}>`,
       subject: 'New request: laptop setup for John Smith',
-      to: 'alexanderv@example.com'
+      to: `user@${COMPANY_DOMAIN}`
     };
     const result = applyRuleBasedFilter(email);
     assert.strictEqual(result.action, 'ai-triage', `Expected ai-triage but got ${result.action}`);
@@ -59,9 +64,9 @@ async function runTests() {
 
   test('DW group onboarding email still gets archived (existing rule)', () => {
     const email = {
-      from: 'Someone via Digital Workplace <digitalworkplace@example.com>',
+      from: `Someone via Digital Workplace <${DW_GROUP_EMAIL}>`,
       subject: 'Onboarding: New hire starting Monday',
-      to: 'alexanderv@example.com'
+      to: `user@${COMPANY_DOMAIN}`
     };
     const result = applyRuleBasedFilter(email);
     assert.strictEqual(result.action, 'archive', `Expected archive but got ${result.action}`);
@@ -69,9 +74,9 @@ async function runTests() {
 
   test('DW group offboarding email still gets archived (existing rule)', () => {
     const email = {
-      from: 'Someone via Digital Workplace <digitalworkplace@example.com>',
+      from: `Someone via Digital Workplace <${DW_GROUP_EMAIL}>`,
       subject: 'Offboarding checklist for Jane Doe',
-      to: 'alexanderv@example.com'
+      to: `user@${COMPANY_DOMAIN}`
     };
     const result = applyRuleBasedFilter(email);
     assert.strictEqual(result.action, 'archive', `Expected archive but got ${result.action}`);
@@ -79,9 +84,9 @@ async function runTests() {
 
   test('DW duplicate senders still get archived (existing rule)', () => {
     const email = {
-      from: 'Datadog via Digital Workplace <digitalworkplace@example.com>',
+      from: `Datadog via Digital Workplace <${DW_GROUP_EMAIL}>`,
       subject: 'Alert: CPU usage high',
-      to: 'alexanderv@example.com'
+      to: `user@${COMPANY_DOMAIN}`
     };
     const result = applyRuleBasedFilter(email);
     assert.strictEqual(result.action, 'archive', `Expected archive but got ${result.action}`);
@@ -95,7 +100,7 @@ async function runTests() {
     const email = {
       from: 'Vendor Support <support@vendor.com>',
       subject: 'Your license renewal reminder',
-      to: 'licensing@example.com'
+      to: `licensing@${COMPANY_DOMAIN}`
     };
     const result = applyRuleBasedFilter(email);
     assert.strictEqual(result.action, 'ai-triage', `Expected ai-triage but got ${result.action}`);
@@ -105,7 +110,7 @@ async function runTests() {
     const email = {
       from: 'billing@vendor.com',
       subject: 'Payment failed for your subscription',
-      to: 'licensing@example.com'
+      to: `licensing@${COMPANY_DOMAIN}`
     };
     const result = applyRuleBasedFilter(email);
     assert.strictEqual(result.action, 'ai-triage', `Expected ai-triage but got ${result.action}`);
@@ -119,7 +124,7 @@ async function runTests() {
     const email = {
       from: 'no-reply@zoom.us',
       subject: 'Recording available',
-      to: 'alexanderv@example.com'
+      to: `user@${COMPANY_DOMAIN}`
     };
     const result = applyRuleBasedFilter(email);
     assert.strictEqual(result.action, 'archive');
@@ -127,9 +132,9 @@ async function runTests() {
 
   test('normal internal email still passes filters', () => {
     const email = {
-      from: 'colleague@example.com',
+      from: `colleague@${COMPANY_DOMAIN}`,
       subject: 'Quick question about the project',
-      to: 'alexanderv@example.com'
+      to: `user@${COMPANY_DOMAIN}`
     };
     const result = applyRuleBasedFilter(email);
     assert.strictEqual(result.action, 'keep');
