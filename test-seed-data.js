@@ -38,10 +38,11 @@ function testSeedCreatesTeams() {
   seedData.seedAll(db, mainDb);
 
   const teams = db.prepare("SELECT * FROM entities WHERE entity_type = 'team'").all();
-  assert.strictEqual(teams.length, 3);
+  assert.strictEqual(teams.length, 4);
   assert.ok(teams.find(t => t.canonical_name === 'Corporate Systems Engineering'));
   assert.ok(teams.find(t => t.canonical_name === 'Desktop Support'));
   assert.ok(teams.find(t => t.canonical_name === 'Security'));
+  assert.ok(teams.find(t => t.canonical_name === 'Platform & Endpoint Security'));
   db.close(); mainDb.close(); cleanup();
   console.log('  PASS: seed creates teams');
 }
@@ -55,6 +56,8 @@ function testSeedCreatesPeople() {
   assert.ok(people.length >= 7, `Expected at least 7 people, got ${people.length}`);
   assert.ok(people.find(p => p.canonical_name === 'Kinski Wu'));
   assert.ok(people.find(p => p.canonical_name === 'Keshon Bowman'));
+  assert.ok(people.find(p => p.canonical_name === 'Bill Price'));
+  assert.ok(people.find(p => p.canonical_name === 'Geoffrey Schuette'));
   db.close(); mainDb.close(); cleanup();
   console.log('  PASS: seed creates people');
 }
@@ -98,7 +101,7 @@ function testSeedIsIdempotent() {
   assert.strictEqual(kinski.length, 1, 'Should not duplicate Kinski Wu');
 
   const teams = db.prepare("SELECT * FROM entities WHERE entity_type = 'team'").all();
-  assert.strictEqual(teams.length, 3, 'Should not duplicate teams');
+  assert.strictEqual(teams.length, 4, 'Should not duplicate teams');
 
   db.close(); mainDb.close(); cleanup();
   console.log('  PASS: seed is idempotent');
@@ -174,6 +177,115 @@ function testSeedFromMonitoredPeopleIsIdempotent() {
   console.log('  PASS: seed from monitored_people is idempotent');
 }
 
+// --- seedDwTeam tests ---
+
+const DW_TEAM_INPUT = [
+  { name: 'Kinski Wu', team: 'CSE', slackId: 'U_KW_001', jiraAccountId: 'jira-kw-001' },
+  { name: 'Bill Price', team: 'CSE', slackId: 'U_BP_002', jiraAccountId: 'jira-bp-002' },
+  { name: 'Daniel Richardson', team: 'CSE', slackId: 'U_DR_003', jiraAccountId: 'jira-dr-003' },
+  { name: 'Geoffrey Schuette', team: 'PIE', slackId: 'U_GS_004', jiraAccountId: 'jira-gs-004' },
+  { name: "Daniel 'D' Sherr", team: 'PIE', slackId: 'U_DS_005', jiraAccountId: 'jira-ds-005' },
+  { name: 'Ken Dominiec', team: 'Desktop Support', slackId: 'U_KD_006', jiraAccountId: 'jira-kd-006' },
+  { name: 'Keshon Bowman', team: 'Desktop Support', slackId: 'U_KB_007', jiraAccountId: 'jira-kb-007' },
+];
+
+function testSeedDwTeamCreatesEntities() {
+  const { db, mainDb } = freshDbs();
+  const seedData = require('./lib/seed-data');
+  seedData.seedDwTeam(db, DW_TEAM_INPUT);
+
+  const people = db.prepare("SELECT * FROM entities WHERE entity_type = 'person'").all();
+  assert.strictEqual(people.length, 7, `Expected 7 people, got ${people.length}`);
+  assert.ok(people.find(p => p.canonical_name === 'Kinski Wu'));
+  assert.ok(people.find(p => p.canonical_name === 'Bill Price'));
+  assert.ok(people.find(p => p.canonical_name === "Daniel 'D' Sherr"));
+  assert.ok(people.find(p => p.canonical_name === 'Keshon Bowman'));
+  db.close(); mainDb.close(); cleanup();
+  console.log('  PASS: seedDwTeam creates person entities');
+}
+
+function testSeedDwTeamCreatesSlackIdentities() {
+  const { db, mainDb } = freshDbs();
+  const seedData = require('./lib/seed-data');
+  seedData.seedDwTeam(db, DW_TEAM_INPUT);
+
+  const kg = require('./lib/knowledge-graph');
+  // Verify Slack identity resolution works
+  const entityId = kg.resolveIdentity(db, 'slack', 'U_KW_001');
+  assert.ok(entityId, 'Should resolve Kinski Wu by Slack ID');
+
+  const entity = db.prepare('SELECT * FROM entities WHERE id = ?').get(entityId);
+  assert.strictEqual(entity.canonical_name, 'Kinski Wu');
+  db.close(); mainDb.close(); cleanup();
+  console.log('  PASS: seedDwTeam creates Slack identities');
+}
+
+function testSeedDwTeamCreatesJiraIdentities() {
+  const { db, mainDb } = freshDbs();
+  const seedData = require('./lib/seed-data');
+  seedData.seedDwTeam(db, DW_TEAM_INPUT);
+
+  const kg = require('./lib/knowledge-graph');
+  const entityId = kg.resolveIdentity(db, 'jira', 'jira-gs-004');
+  assert.ok(entityId, 'Should resolve Geoffrey Schuette by Jira account ID');
+
+  const entity = db.prepare('SELECT * FROM entities WHERE id = ?').get(entityId);
+  assert.strictEqual(entity.canonical_name, 'Geoffrey Schuette');
+  db.close(); mainDb.close(); cleanup();
+  console.log('  PASS: seedDwTeam creates Jira identities');
+}
+
+function testSeedDwTeamStoresTeamAsFact() {
+  const { db, mainDb } = freshDbs();
+  const seedData = require('./lib/seed-data');
+  seedData.seedDwTeam(db, DW_TEAM_INPUT);
+
+  const kg = require('./lib/knowledge-graph');
+  const entityId = kg.resolveIdentity(db, 'slack', 'U_GS_004');
+  const state = kg.getCurrentState(db, entityId);
+  assert.strictEqual(state.team, 'PIE', 'Geoffrey should have team=PIE');
+  db.close(); mainDb.close(); cleanup();
+  console.log('  PASS: seedDwTeam stores team as state fact');
+}
+
+function testSeedDwTeamIsIdempotent() {
+  const { db, mainDb } = freshDbs();
+  const seedData = require('./lib/seed-data');
+  seedData.seedDwTeam(db, DW_TEAM_INPUT);
+  seedData.seedDwTeam(db, DW_TEAM_INPUT); // Run twice
+
+  const people = db.prepare("SELECT * FROM entities WHERE entity_type = 'person'").all();
+  assert.strictEqual(people.length, 7, 'Should not duplicate people');
+
+  const identities = db.prepare("SELECT * FROM identity_map WHERE source = 'slack'").all();
+  assert.strictEqual(identities.length, 7, 'Should not duplicate Slack identities');
+
+  const jiraIdentities = db.prepare("SELECT * FROM identity_map WHERE source = 'jira'").all();
+  assert.strictEqual(jiraIdentities.length, 7, 'Should not duplicate Jira identities');
+
+  db.close(); mainDb.close(); cleanup();
+  console.log('  PASS: seedDwTeam is idempotent');
+}
+
+function testSeedDwTeamHandlesMissingOptionalIds() {
+  const { db, mainDb } = freshDbs();
+  const seedData = require('./lib/seed-data');
+  // Seed with a member that has no Jira ID
+  seedData.seedDwTeam(db, [
+    { name: 'Partial Person', team: 'CSE', slackId: 'U_PP_001' },
+  ]);
+
+  const kg = require('./lib/knowledge-graph');
+  const entityId = kg.resolveIdentity(db, 'slack', 'U_PP_001');
+  assert.ok(entityId, 'Should still create entity with Slack ID');
+
+  const jiraId = kg.resolveIdentity(db, 'jira', undefined);
+  assert.strictEqual(jiraId, null, 'Should not create Jira identity when missing');
+
+  db.close(); mainDb.close(); cleanup();
+  console.log('  PASS: seedDwTeam handles missing optional IDs');
+}
+
 // Run all tests
 console.log('seed-data tests:');
 testSeedCreatesTeams();
@@ -184,4 +296,10 @@ testSeedIsIdempotent();
 testSeedFromMonitoredPeople();
 testSeedFromMonitoredPeopleWithJiraId();
 testSeedFromMonitoredPeopleIsIdempotent();
+testSeedDwTeamCreatesEntities();
+testSeedDwTeamCreatesSlackIdentities();
+testSeedDwTeamCreatesJiraIdentities();
+testSeedDwTeamStoresTeamAsFact();
+testSeedDwTeamIsIdempotent();
+testSeedDwTeamHandlesMissingOptionalIds();
 console.log('All seed-data tests passed.');
