@@ -6,7 +6,8 @@
 const PATTERNS = {
   zoom: /https?:\/\/(?:[a-z0-9-]+\.)*zoom\.us\/[^\s<>"')]+/i,
   meet: /https?:\/\/meet\.google\.com\/[^\s<>"')]+/i,
-  teams: /https?:\/\/teams\.microsoft\.com\/[^\s<>"')]+/i
+  teams: /https?:\/\/teams\.microsoft\.com\/[^\s<>"')]+/i,
+  webex: /https?:\/\/(?:[a-z0-9-]+\.)*webex\.com\/[^\s<>"')]+/i
 };
 
 /**
@@ -55,4 +56,13 @@ function extractMeetingLink(event) {
   return { platform: 'calendar', url: event.htmlLink };
 }
 
-module.exports = { extractMeetingLink, PATTERNS };
+/**
+ * Check if a meeting platform runs in the browser (needs browser process tap).
+ * @param {string} platform - Platform identifier from extractMeetingLink
+ * @returns {boolean}
+ */
+function isBrowserMeeting(platform) {
+  return ['meet', 'webex', 'calendar'].includes(platform);
+}
+
+module.exports = { extractMeetingLink, isBrowserMeeting, PATTERNS };

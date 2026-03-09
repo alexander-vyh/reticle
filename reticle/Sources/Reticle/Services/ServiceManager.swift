@@ -17,6 +17,14 @@ struct HeartbeatErrors: Codable {
     let countSinceStart: Int
 }
 
+struct HeartbeatMetrics: Codable {
+    let recording: Bool?
+    let meetingId: String?
+    let duration: Double?
+    let captureMode: String?
+    let permissionStatus: String?
+}
+
 struct HeartbeatData: Codable {
     let service: String?
     let pid: Int?
@@ -25,6 +33,7 @@ struct HeartbeatData: Codable {
     let checkInterval: Double?
     let status: String?
     let errors: HeartbeatErrors?
+    let metrics: HeartbeatMetrics?
 }
 
 struct HeartbeatHealth: Equatable {
