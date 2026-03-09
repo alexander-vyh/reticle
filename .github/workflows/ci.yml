@@ -23,7 +23,7 @@ jobs:
         run: |
           mkdir -p ~/.reticle/config
           echo '{"slackBotToken":"xoxb-test","slackUserId":"UTEST","gmailAccount":"test@test.com"}' > ~/.reticle/config/secrets.json
-          echo '{"reports":[]}' > ~/.reticle/config/team.json
+          echo '{"reports":[],"filterPatterns":{"companyDomain":"testcorp.com","dwGroupEmail":"digitalworkplace@testcorp.com"}}' > ~/.reticle/config/team.json
 
       - name: Run tests
         run: npm test
