@@ -21,6 +21,31 @@ function cleanup(dbPath) {
   try { fs.unlinkSync(dbPath + '-shm'); } catch {}
 }
 
+// --- Test: author_ext_id is stored on raw_message ---
+{
+  const { db, path: p } = tmpDb();
+  try {
+    const result = captureJiraActivity(db, {
+      issueKey: 'EXT-1',
+      summary: 'Test ext id',
+      status: 'Open',
+      assigneeAccountId: 'jira-acct-999',
+      assigneeName: 'Test Person',
+      projectKey: 'EXT',
+      updatedAt: 1709900000,
+      changeType: 'created',
+      changeDetail: null,
+    });
+
+    assert.strictEqual(result.author_ext_id, 'jira-acct-999',
+      'author_ext_id should store the source system user ID');
+    console.log('PASS: author_ext_id is stored on raw_message');
+  } finally {
+    db.close();
+    cleanup(p);
+  }
+}
+
 // --- Test: basic capture inserts a raw_message ---
 {
   const { db, path: p } = tmpDb();
@@ -181,6 +206,43 @@ function cleanup(dbPath) {
     assert.ok(result.content.includes('created'), 'content should include change type');
     assert.ok(!result.content.includes('null'), 'content should not include literal "null"');
     console.log('PASS: content formatting with null changeDetail');
+  } finally {
+    db.close();
+    cleanup(p);
+  }
+}
+
+// --- Test: metadata includes Jira-specific fields ---
+{
+  const { db, path: p } = tmpDb();
+  try {
+    const result = captureJiraActivity(db, {
+      issueKey: 'META-1',
+      summary: 'Test metadata',
+      status: 'Done',
+      assigneeAccountId: 'jira-acct-meta',
+      assigneeName: 'Meta Person',
+      projectKey: 'META',
+      updatedAt: 1709900000,
+      changeType: 'status',
+      changeDetail: 'In Progress -> Done',
+      changelogId: '99887',
+    });
+
+    const meta = JSON.parse(result.metadata);
+    assert.strictEqual(meta.event_type, 'status_change',
+      'metadata event_type should be status_change');
+    assert.strictEqual(meta.source_msg_id, '99887',
+      'metadata source_msg_id should store changelog ID');
+    assert.strictEqual(meta.source_parent_ref, 'META-1',
+      'metadata source_parent_ref should be the issue key');
+    assert.strictEqual(meta.field, 'status',
+      'metadata should include the changed field');
+    assert.strictEqual(meta.from, 'In Progress',
+      'metadata should include from value');
+    assert.strictEqual(meta.to, 'Done',
+      'metadata should include to value');
+    console.log('PASS: metadata includes Jira-specific fields');
   } finally {
     db.close();
     cleanup(p);
