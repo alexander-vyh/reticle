@@ -230,4 +230,56 @@ function seedPerson(db, { name, team, slackId, jiraId, messages }) {
   }
 }
 
+// --- Test: buildReport includes unresolved authors via author_ext_id fallback ---
+{
+  const { db, path: p } = tmpDb();
+  try {
+    const now = Math.floor(Date.now() / 1000);
+
+    // Seed a resolved person
+    seedPerson(db, {
+      name: 'Known Person',
+      team: 'Desktop Support',
+      slackId: 'U_KNOWN',
+      messages: [
+        { source: 'slack', sourceId: 'kn:1', channelName: 'eng-platform', content: 'Known person message', occurredAt: now - 600 },
+      ]
+    });
+
+    // Insert an unresolved message (no author_id, but has author_ext_id)
+    kg.insertRawMessage(db, {
+      source: 'slack',
+      sourceId: 'unresolved:1',
+      channelId: 'C_TEAM',
+      channelName: 'eng-platform',
+      authorExtId: 'U_MYSTERY',
+      authorId: null,
+      authorName: 'Mystery Person',
+      content: 'Unresolved author message',
+      occurredAt: now - 300,
+    });
+
+    const report = buildReport(db, { sinceDays: 7, now });
+    const md = formatReport(report);
+
+    // The unresolved person should appear under Unassigned
+    const unassigned = report.teams.find(t => t.name === 'Unassigned');
+    assert.ok(unassigned, 'should have Unassigned team for unresolved authors');
+    assert.strictEqual(unassigned.members[0].name, 'Mystery Person');
+    assert.strictEqual(unassigned.members[0].slackMessages.length, 1);
+
+    // The known person should still be in their team
+    const desktop = report.teams.find(t => t.name === 'Desktop Support');
+    assert.ok(desktop, 'resolved person should still be in their team');
+
+    assert.ok(md.includes('Mystery Person'), 'markdown should include unresolved author name');
+    assert.ok(md.includes('Unresolved author message'), 'markdown should include their message');
+
+    console.log('PASS: buildReport includes unresolved authors via author_ext_id fallback');
+  } finally {
+    db.close();
+    cleanup(p);
+  }
+}
+
 console.log('\nAll dw-weekly-report tests passed.');

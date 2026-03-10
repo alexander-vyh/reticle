@@ -91,6 +91,7 @@ async function collectAndCapture(db, { searchIssuesFn, getIssueChangelogFn, proj
         updatedAt,
         changeType: change.field,
         changeDetail,
+        changelogId: change.changelogId || null,
       });
       captured++;
     }
