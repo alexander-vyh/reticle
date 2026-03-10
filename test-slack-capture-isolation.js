@@ -127,9 +127,64 @@ function testMultipleMessagesAccumulate() {
   console.log('  PASS: multiple messages accumulate correctly');
 }
 
+// --- Test 4: author_ext_id stores the Slack user ID ---
+function testAuthorExtId() {
+  const db = freshDb();
+  const capture = require('./lib/slack-capture');
+
+  const result = capture.captureMessage(db, {
+    channel: 'C_EXT_TEST',
+    channelName: 'ext-test',
+    ts: '1709900000.000099',
+    user: 'U_TEST_EXT_99',
+    userName: 'Aragorn King',
+    text: 'Testing author_ext_id storage',
+    threadTs: null,
+    channelType: 'channel',
+  });
+
+  assert.strictEqual(result.author_ext_id, 'U_TEST_EXT_99',
+    'author_ext_id should store the Slack user ID');
+
+  db.close();
+  console.log('  PASS: author_ext_id stores the Slack user ID');
+}
+
+// --- Test 5: metadata includes source-specific fields ---
+function testMetadataEnrichment() {
+  const db = freshDb();
+  const capture = require('./lib/slack-capture');
+
+  const result = capture.captureMessage(db, {
+    channel: 'C_META_TEST',
+    channelName: 'meta-test',
+    ts: '1709900000.000088',
+    user: 'U_META_01',
+    userName: 'Meta User',
+    text: 'Testing metadata enrichment',
+    threadTs: '1709900000.000001',
+    channelType: 'channel',
+    clientMsgId: 'abc-def-123',
+    subtype: null,
+  });
+
+  const meta = JSON.parse(result.metadata);
+  assert.strictEqual(meta.event_type, 'message',
+    'metadata should include event_type');
+  assert.strictEqual(meta.source_msg_id, 'abc-def-123',
+    'metadata should include source_msg_id from client_msg_id');
+  assert.strictEqual(meta.source_parent_ref, 'C_META_TEST:1709900000.000001',
+    'metadata should include source_parent_ref for threaded messages');
+
+  db.close();
+  console.log('  PASS: metadata includes source-specific fields');
+}
+
 // Run all tests
 console.log('slack-capture-isolation tests:');
 testCaptureMessageIntoTempDb();
 testCaptureWorksAfterPriorThrow();
 testMultipleMessagesAccumulate();
+testAuthorExtId();
+testMetadataEnrichment();
 console.log('All slack-capture-isolation tests passed.');

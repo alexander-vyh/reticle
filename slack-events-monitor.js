@@ -435,6 +435,8 @@ async function handleEvent(event, db) {
         text: event.text,
         threadTs: event.thread_ts || null,
         channelType: event.channel_type,
+        clientMsgId: event.client_msg_id || null,
+        subtype: event.subtype || null,
       });
     } catch (err) {
       log.warn({ err, channel: event.channel, ts: event.ts }, 'Failed to capture message to org-memory');
