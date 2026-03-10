@@ -218,6 +218,8 @@ async function backfillChannel(db, channel, oldest, knownIds, dryRun) {
         text: msg.text,
         threadTs: msg.thread_ts || null,
         channelType: 'channel',
+        clientMsgId: msg.client_msg_id || null,
+        subtype: msg.subtype || null,
       });
       captured++;
     } catch (err) {
