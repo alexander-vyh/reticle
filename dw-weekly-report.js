@@ -30,40 +30,48 @@ function buildReport(db, { sinceDays = 7, now } = {}) {
     'SELECT * FROM raw_messages WHERE occurred_at >= ? ORDER BY occurred_at DESC'
   ).all(since);
 
-  // Group messages by author_id
-  const byAuthor = new Map();
+  // Group messages by author — prefer author_id (resolved entity), fall back to author_ext_id
+  const byAuthor = new Map(); // key → { authorId, extId, messages[] }
   for (const msg of messages) {
-    if (!msg.author_id) continue;
-    if (!byAuthor.has(msg.author_id)) byAuthor.set(msg.author_id, []);
-    byAuthor.get(msg.author_id).push(msg);
+    const key = msg.author_id || msg.author_ext_id;
+    if (!key) continue;
+    if (!byAuthor.has(key)) byAuthor.set(key, { authorId: msg.author_id, extId: msg.author_ext_id, messages: [] });
+    byAuthor.get(key).messages.push(msg);
   }
 
   // Resolve each author to entity + team
-  const teamMap = new Map(); // team name → { name, members: Map<entityId, memberData> }
+  const teamMap = new Map(); // team name → { name, members: Map<key, memberData> }
 
-  for (const [authorId, authorMessages] of byAuthor) {
-    const entity = kg.getEntity(db, authorId);
-    if (!entity || entity.entity_type !== 'person') continue;
+  for (const [key, { authorId, extId, messages: authorMessages }] of byAuthor) {
+    let entityName = null;
+    let teamName = 'Unassigned';
 
-    // Get team from current state facts
-    const state = kg.getCurrentState(db, authorId);
-    const teamName = state.team || 'Unassigned';
+    if (authorId) {
+      const entity = kg.getEntity(db, authorId);
+      if (!entity || entity.entity_type !== 'person') continue;
+      entityName = entity.canonical_name;
+      const state = kg.getCurrentState(db, authorId);
+      teamName = state.team || 'Unassigned';
+    } else {
+      // Unresolved author — use author_name from the first message
+      entityName = authorMessages[0].author_name || extId;
+    }
 
     if (!teamMap.has(teamName)) {
       teamMap.set(teamName, { name: teamName, members: new Map() });
     }
 
     const team = teamMap.get(teamName);
-    if (!team.members.has(authorId)) {
-      team.members.set(authorId, {
-        name: entity.canonical_name,
-        entityId: authorId,
+    if (!team.members.has(key)) {
+      team.members.set(key, {
+        name: entityName,
+        entityId: authorId || null,
         slackMessages: [],
         jiraMessages: [],
       });
     }
 
-    const member = team.members.get(authorId);
+    const member = team.members.get(key);
     for (const msg of authorMessages) {
       if (msg.source === 'slack') {
         member.slackMessages.push(msg);
