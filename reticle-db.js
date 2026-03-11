@@ -288,7 +288,7 @@ function initDatabase() {
       title TEXT,
       start_time INTEGER NOT NULL,
       end_time INTEGER,
-      duration_sec REAL,
+      duration_sec INTEGER,
       attendee_emails TEXT,
       capture_mode TEXT,
       review_status TEXT NOT NULL DEFAULT 'new',
