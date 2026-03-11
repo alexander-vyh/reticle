@@ -54,6 +54,27 @@ struct ReportRatio: Codable {
     let total: Int
 }
 
+struct Commitment: Codable, Identifiable {
+    let id: String
+    let attribute: String
+    let value: String
+    let entityName: String
+    let priority: String
+    let ageDays: Int
+    let isStale: Bool
+}
+
+struct CommitmentSummary: Codable {
+    let total: Int
+    let byAttribute: [String: Int]
+    let byPriority: [String: Int]
+}
+
+struct CommitmentsResponse: Codable {
+    let commitments: [Commitment]
+    let summary: CommitmentSummary
+}
+
 // MARK: - Client
 
 @MainActor
@@ -121,5 +142,20 @@ class GatewayClient: ObservableObject {
 
     func fetchStats() async throws -> FeedbackStats {
         return try await request("/feedback/stats")
+    }
+
+    // MARK: - Commitments
+
+    func listCommitments() async throws -> CommitmentsResponse {
+        return try await request("/api/commitments")
+    }
+
+    func resolveCommitment(id: String) async throws {
+        struct Response: Decodable { let ok: Bool }
+        let _: Response = try await request(
+            "/api/commitments/\(id)/resolve",
+            method: "POST",
+            body: ["resolution": "completed"]
+        )
     }
 }

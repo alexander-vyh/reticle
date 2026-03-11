@@ -96,6 +96,92 @@ app.get('/feedback/stats', (req, res) => {
   res.json({ weekly, monthly, ratios });
 });
 
+// --- Commitments (org-memory knowledge graph) ---
+
+let orgMemDb = null;
+function getOrgMemDb() {
+  if (!orgMemDb) {
+    const { initDatabase: initOrgMemory } = require('./lib/org-memory-db');
+    orgMemDb = initOrgMemory();
+  }
+  return orgMemDb;
+}
+
+// GET /api/commitments — open event facts from knowledge graph
+app.get('/api/commitments', (req, res) => {
+  const omDb = getOrgMemDb();
+  const now = Math.floor(Date.now() / 1000);
+  const staleDays = parseInt(req.query.staleDays) || 7;
+  const staleThreshold = now - (staleDays * 24 * 3600);
+
+  const facts = omDb.prepare(`
+    SELECT f.id, f.attribute, f.value, f.fact_type, f.valid_from, f.resolution,
+           f.source_message_id, e.canonical_name as entity_name, e.id as entity_id
+    FROM facts f
+    JOIN entities e ON f.entity_id = e.id
+    WHERE f.fact_type = 'event'
+      AND (f.resolution IS NULL OR f.resolution = 'open')
+      AND f.attribute IN ('committed_to', 'asked_to', 'raised_risk', 'decided')
+    ORDER BY f.valid_from DESC
+  `).all();
+
+  const items = facts.map(f => {
+    const ageSeconds = now - f.valid_from;
+    const isStale = f.valid_from < staleThreshold;
+    let priority;
+    if (f.attribute === 'raised_risk') {
+      priority = isStale ? 'high' : 'normal';
+    } else if (isStale) {
+      priority = ageSeconds > 14 * 86400 ? 'critical' : 'high';
+    } else {
+      priority = 'normal';
+    }
+
+    return {
+      id: f.id,
+      attribute: f.attribute,
+      value: f.value,
+      entityName: f.entity_name,
+      entityId: f.entity_id,
+      priority,
+      ageSeconds,
+      ageDays: Math.floor(ageSeconds / 86400),
+      validFrom: f.valid_from,
+      isStale,
+    };
+  });
+
+  const summary = {
+    total: items.length,
+    byAttribute: {},
+    byPriority: {},
+  };
+  for (const item of items) {
+    summary.byAttribute[item.attribute] = (summary.byAttribute[item.attribute] || 0) + 1;
+    summary.byPriority[item.priority] = (summary.byPriority[item.priority] || 0) + 1;
+  }
+
+  res.json({ commitments: items, summary });
+});
+
+// POST /api/commitments/:id/resolve — mark a fact as completed/abandoned
+app.post('/api/commitments/:id/resolve', (req, res) => {
+  const { resolution } = req.body;
+  if (!resolution || !['completed', 'abandoned', 'superseded'].includes(resolution)) {
+    return res.status(400).json({ error: 'resolution must be completed, abandoned, or superseded' });
+  }
+
+  const omDb = getOrgMemDb();
+  const fact = omDb.prepare('SELECT * FROM facts WHERE id = ?').get(req.params.id);
+  if (!fact) return res.status(404).json({ error: 'fact not found' });
+
+  const now = Math.floor(Date.now() / 1000);
+  omDb.prepare('UPDATE facts SET resolution = ?, resolved_at = ? WHERE id = ?')
+    .run(resolution, now, req.params.id);
+
+  res.json({ ok: true, id: req.params.id, resolution });
+});
+
 // Health check
 app.get('/health', (req, res) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString() });
