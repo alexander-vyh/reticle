@@ -6,7 +6,7 @@ const log = require('./lib/logger')('digest-daily');
 const heartbeat = require('./lib/heartbeat');
 const { validatePrerequisites } = require('./lib/startup-validation');
 const { sendSlackDM } = require('./lib/slack');
-const { collectFollowups, collectEmail, collectO3, collectCalendar } = require('./lib/digest-collectors');
+const { collectFollowups, collectEmail, collectO3, collectCalendar, collectCommitments } = require('./lib/digest-collectors');
 const { deduplicateItems } = require('./lib/digest-item');
 const { narrateDaily, formatFallback } = require('./lib/digest-narration');
 const calendarAuth = require('./calendar-auth');
@@ -111,6 +111,18 @@ async function main() {
       VALUES (?, ?, ?, ?, ?, ?, ?)
     `).run(accountId, item.counterparty, item.authority,
         item.rawArtifact, item.feedbackDraft, item.feedbackType, item.entityId);
+  }
+
+  // Commitments collector (uses org-memory DB)
+  try {
+    const { initDatabase: initOrgMemory } = require('./lib/org-memory-db');
+    const orgMemDb = initOrgMemory();
+    const commitmentItems = collectCommitments(orgMemDb);
+    allItems.push(...commitmentItems);
+    log.info({ count: commitmentItems.length }, 'Commitments collector complete');
+  } catch (err) {
+    log.error({ err }, 'Commitments collector failed');
+    failedCollectors.push('commitments');
   }
 
   if (allItems.length === 0 && failedCollectors.length === collectors.length) {

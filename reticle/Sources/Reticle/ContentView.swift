@@ -1,6 +1,7 @@
 import SwiftUI
 
 enum SidebarSection: String, CaseIterable, Identifiable {
+    case commitments = "Commitments"
     case people = "People"
     case feedback = "Feedback"
     case messages = "Messages"
@@ -11,6 +12,7 @@ enum SidebarSection: String, CaseIterable, Identifiable {
 
     var icon: String {
         switch self {
+        case .commitments: return "list.bullet.clipboard"
         case .people: return "person.2"
         case .feedback: return "bubble.left.and.bubble.right"
         case .messages: return "envelope"
@@ -21,14 +23,14 @@ enum SidebarSection: String, CaseIterable, Identifiable {
 
     var isAvailable: Bool {
         switch self {
-        case .people, .feedback: return true
+        case .commitments, .people, .feedback: return true
         default: return false
         }
     }
 }
 
 struct ContentView: View {
-    @State private var selectedSection: SidebarSection = .feedback
+    @State private var selectedSection: SidebarSection = .commitments
 
     var body: some View {
         NavigationSplitView {
@@ -40,6 +42,8 @@ struct ContentView: View {
             .navigationSplitViewColumnWidth(160)
         } detail: {
             switch selectedSection {
+            case .commitments:
+                CommitmentsView()
             case .people:
                 PeopleView()
             case .feedback:
