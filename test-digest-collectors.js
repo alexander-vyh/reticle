@@ -302,3 +302,58 @@ assert.ok(!nobodyItem, 'Should not flag meeting with attendee who has no open fo
 console.log('PASS: meeting without open followups not flagged');
 
 console.log('\n=== CALENDAR COLLECTOR TESTS PASSED ===');
+
+// --- collectMeetings ---
+const { collectMeetings } = require('./lib/digest-collectors');
+
+reticleDb.createMeeting(db, {
+  id: 'digest-meeting-001',
+  title: 'Architecture Review',
+  startTime: now - 3600,
+  endTime: now,
+  durationSec: 3600,
+  attendeeEmails: ['alex@test.com']
+});
+
+reticleDb.saveMeetingSummary(db, {
+  meetingId: 'digest-meeting-001',
+  summary: 'Reviewed architecture decisions',
+  topics: ['architecture'],
+  flaggedItems: [{ type: 'unresolved_speaker', label: 'SPEAKER_01', segmentCount: 5 }],
+  modelUsed: 'sonnet',
+  inputTokens: 3000,
+  outputTokens: 800
+});
+
+const meetingItems = collectMeetings(db);
+assert.ok(meetingItems.length >= 1);
+const archItem = meetingItems.find(i => i.observation.includes('Architecture Review'));
+assert.ok(archItem, 'should find Architecture Review meeting');
+assert.strictEqual(archItem.priority, 'high');
+assert.strictEqual(archItem.collector, 'meeting');
+console.log('PASS: collectMeetings returns meetings with flagged items at high priority');
+
+// Meeting without flags should be normal priority
+reticleDb.createMeeting(db, {
+  id: 'digest-meeting-002',
+  title: 'Clean Standup',
+  startTime: now - 900,
+  endTime: now,
+  durationSec: 900,
+  attendeeEmails: ['alex@test.com']
+});
+reticleDb.saveMeetingSummary(db, {
+  meetingId: 'digest-meeting-002',
+  summary: 'All good',
+  flaggedItems: [],
+  modelUsed: 'sonnet',
+  inputTokens: 500,
+  outputTokens: 200
+});
+const cleanItems = collectMeetings(db);
+const cleanItem = cleanItems.find(i => i.observation.includes('Clean Standup'));
+assert.ok(cleanItem, 'should include unflagged meeting');
+assert.strictEqual(cleanItem.priority, 'normal');
+console.log('PASS: collectMeetings returns unflagged meetings at normal priority');
+
+console.log('\n=== MEETING COLLECTOR TESTS PASSED ===');
