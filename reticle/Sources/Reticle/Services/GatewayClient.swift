@@ -205,8 +205,8 @@ class GatewayClient: ObservableObject {
 
     // MARK: - Commitments
 
-    func listCommitments() async throws -> CommitmentsResponse {
-        return try await request("/api/commitments")
+    func listCommitments(staleDays: Int = 7) async throws -> CommitmentsResponse {
+        return try await request("/api/commitments?staleDays=\(staleDays)")
     }
 
     func resolveCommitment(id: String) async throws {
