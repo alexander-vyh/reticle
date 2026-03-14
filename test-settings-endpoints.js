@@ -236,12 +236,117 @@ async function testFeedbackSettingsEndpoints() {
   }
 }
 
+async function testAccountsEndpoints() {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'reticle-accounts-test-'));
+  const reticleDbPath = path.join(tmpDir, 'reticle.db');
+  const orgMemDbPath = path.join(tmpDir, 'org-memory.db');
+  const configDir = path.join(tmpDir, 'config');
+  fs.mkdirSync(configDir, { recursive: true });
+
+  // Write a minimal secrets.json in the temp config dir
+  const secrets = {
+    slackBotToken: 'xoxb-test-token',
+    slackAppToken: 'xapp-test-token',
+    slackUserId: 'U0TEST',
+    slackUsername: 'testuser',
+    gmailAccount: 'test@example.com',
+    jiraBaseUrl: 'https://test.atlassian.net',
+    jiraUserEmail: 'test@example.com',
+    jiraApiToken: 'jira-secret',
+    gatewayPort: 3001
+  };
+  fs.writeFileSync(path.join(configDir, 'secrets.json'), JSON.stringify(secrets, null, 2));
+
+  // team.json required by lib/config.js
+  fs.writeFileSync(path.join(configDir, 'team.json'), JSON.stringify({ vips: [], directReports: [], dwTeamEmails: [] }, null, 2));
+
+  process.env.RETICLE_DB_PATH = reticleDbPath;
+  process.env.ORG_MEMORY_DB_PATH = orgMemDbPath;
+  process.env.RETICLE_CONFIG_DIR = configDir;
+
+  delete require.cache[require.resolve('./gateway')];
+  delete require.cache[require.resolve('./reticle-db')];
+  delete require.cache[require.resolve('./lib/config')];
+
+  const app = require('./gateway');
+  const server = app.listen(0);
+  const port = server.address().port;
+
+  try {
+    // Test 1: GET /config/accounts returns expected shape without raw tokens
+    const getRes = await httpRequest(port, 'GET', '/config/accounts');
+    assert.strictEqual(getRes.status, 200, `expected 200, got ${getRes.status}: ${JSON.stringify(getRes.body)}`);
+    const accts = getRes.body;
+    assert.ok(accts.slack, 'should have slack key');
+    assert.ok(accts.gmail, 'should have gmail key');
+    assert.ok(accts.jira, 'should have jira key');
+    // Connected flags
+    assert.strictEqual(accts.slack.connected, true, 'slack should be connected');
+    assert.strictEqual(accts.gmail.connected, true, 'gmail should be connected');
+    assert.strictEqual(accts.jira.connected, true, 'jira should be connected');
+    // Non-secret fields present
+    assert.strictEqual(accts.slack.userId, 'U0TEST');
+    assert.strictEqual(accts.slack.username, 'testuser');
+    assert.strictEqual(accts.gmail.account, 'test@example.com');
+    assert.strictEqual(accts.jira.baseUrl, 'https://test.atlassian.net');
+    assert.strictEqual(accts.jira.userEmail, 'test@example.com');
+    // Token presence flags
+    assert.strictEqual(accts.slack.hasToken, true, 'slack hasToken should be true');
+    assert.strictEqual(accts.slack.hasAppToken, true, 'slack hasAppToken should be true');
+    assert.strictEqual(accts.jira.hasToken, true, 'jira hasToken should be true');
+    // Raw tokens MUST NOT be present
+    assert.ok(!('slackBotToken' in accts.slack), 'slack raw bot token must not be returned');
+    assert.ok(!('slackAppToken' in accts.slack), 'slack raw app token must not be returned');
+    assert.ok(!('jiraApiToken' in accts.jira), 'jira raw api token must not be returned');
+    console.log('  PASS: GET /config/accounts returns shape without raw tokens');
+
+    // Test 2: PATCH /config/accounts updates non-secret fields in secrets.json
+    const patchRes = await httpRequest(port, 'PATCH', '/config/accounts', {
+      slackUsername: 'updateduser',
+      jiraBaseUrl: 'https://updated.atlassian.net'
+    });
+    assert.strictEqual(patchRes.status, 200, `expected 200, got ${patchRes.status}: ${JSON.stringify(patchRes.body)}`);
+    assert.strictEqual(patchRes.body.ok, true);
+    // Verify secrets.json was written atomically
+    const updated = JSON.parse(fs.readFileSync(path.join(configDir, 'secrets.json'), 'utf-8'));
+    assert.strictEqual(updated.slackUsername, 'updateduser');
+    assert.strictEqual(updated.jiraBaseUrl, 'https://updated.atlassian.net');
+    // Existing fields preserved
+    assert.strictEqual(updated.slackBotToken, 'xoxb-test-token');
+    console.log('  PASS: PATCH /config/accounts updates allowed fields atomically');
+
+    // Test 3: PATCH /config/accounts rejects unknown keys (they are silently ignored)
+    const patchUnknownRes = await httpRequest(port, 'PATCH', '/config/accounts', {
+      unknownField: 'should-be-ignored',
+      slackUserId: 'U0UPDATED'
+    });
+    assert.strictEqual(patchUnknownRes.status, 200);
+    const afterUnknown = JSON.parse(fs.readFileSync(path.join(configDir, 'secrets.json'), 'utf-8'));
+    assert.ok(!('unknownField' in afterUnknown), 'unknown fields must not be written to secrets.json');
+    assert.strictEqual(afterUnknown.slackUserId, 'U0UPDATED');
+    console.log('  PASS: PATCH /config/accounts ignores unknown keys and allows allowed keys');
+
+  } finally {
+    server.close();
+    try { fs.unlinkSync(reticleDbPath); } catch {}
+    try { fs.unlinkSync(reticleDbPath + '-wal'); } catch {}
+    try { fs.unlinkSync(reticleDbPath + '-shm'); } catch {}
+    try { fs.unlinkSync(orgMemDbPath); } catch {}
+    try { fs.unlinkSync(orgMemDbPath + '-wal'); } catch {}
+    try { fs.unlinkSync(orgMemDbPath + '-shm'); } catch {}
+    try { fs.rmSync(tmpDir, { recursive: true }); } catch {}
+    // Reset RETICLE_CONFIG_DIR so subsequent tests use the default
+    delete process.env.RETICLE_CONFIG_DIR;
+  }
+}
+
 // --- Run tests ---
 console.log('settings endpoint tests:');
 
 testSettingsEndpoints()
   .then(() => testSeedingIdempotency())
   .then(() => testFeedbackSettingsEndpoints())
+  .then(() => testAccountsEndpoints())
   .then(() => {
     console.log('All settings endpoint tests passed');
     process.exit(0);

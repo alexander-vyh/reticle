@@ -87,6 +87,35 @@ struct FeedbackSettingsResponse: Codable {
     let scanWindowHours: String?
 }
 
+struct SlackAccountInfo: Codable {
+    let identifier: String?
+    let connected: Bool
+    let hasToken: Bool?
+    let hasAppToken: Bool?
+    let userId: String?
+    let username: String?
+}
+
+struct GmailAccountInfo: Codable {
+    let identifier: String?
+    let connected: Bool
+    let account: String?
+}
+
+struct JiraAccountInfo: Codable {
+    let identifier: String?
+    let connected: Bool
+    let baseUrl: String?
+    let userEmail: String?
+    let hasToken: Bool?
+}
+
+struct AccountsResponse: Codable {
+    let slack: SlackAccountInfo
+    let gmail: GmailAccountInfo
+    let jira: JiraAccountInfo
+}
+
 // MARK: - Client
 
 @MainActor
@@ -187,5 +216,17 @@ class GatewayClient: ObservableObject {
             method: "POST",
             body: ["resolution": "completed"]
         )
+    }
+
+    // MARK: - Accounts
+
+    func fetchAccounts() async throws -> AccountsResponse {
+        return try await request("/config/accounts")
+    }
+
+    func updateAccounts(fields: [String: String]) async throws {
+        struct Response: Decodable { let ok: Bool }
+        let body: [String: Any] = fields
+        let _: Response = try await request("/config/accounts", method: "PATCH", body: body)
     }
 }

@@ -1,6 +1,8 @@
 #!/usr/bin/env node
 'use strict';
 
+const fs = require('fs');
+const path = require('path');
 const express = require('express');
 const reticleDb = require('./reticle-db');
 const peopleStore = require('./lib/people-store');
@@ -257,6 +259,60 @@ app.post('/api/commitments/:id/resolve', (req, res) => {
     .run(resolution, now, req.params.id);
 
   res.json({ ok: true, id: req.params.id, resolution });
+});
+
+// GET /config/accounts — returns account identifiers + connection status (NO raw tokens)
+app.get('/config/accounts', (req, res) => {
+  try {
+    const accounts = {
+      slack: {
+        identifier: config.slackUsername || config.slackUserId || null,
+        connected: !!config.slackBotToken,
+        hasToken: !!config.slackBotToken,
+        hasAppToken: !!config.slackAppToken,
+        userId: config.slackUserId || '',
+        username: config.slackUsername || ''
+      },
+      gmail: {
+        identifier: config.gmailAccount || null,
+        connected: !!config.gmailAccount,
+        account: config.gmailAccount || ''
+      },
+      jira: {
+        identifier: config.jiraBaseUrl || null,
+        connected: !!(config.jiraApiToken && config.jiraBaseUrl),
+        baseUrl: config.jiraBaseUrl || '',
+        userEmail: config.jiraUserEmail || '',
+        hasToken: !!config.jiraApiToken
+      }
+    };
+    res.json(accounts);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// PATCH /config/accounts — update secrets.json fields
+app.patch('/config/accounts', (req, res) => {
+  try {
+    const secretsPath = path.join(config.configDir, 'secrets.json');
+    const current = JSON.parse(fs.readFileSync(secretsPath, 'utf-8'));
+    const allowed = [
+      'slackBotToken', 'slackAppToken', 'slackSigningSecret',
+      'slackUserId', 'slackUsername', 'slackUserToken',
+      'gmailAccount', 'jiraApiToken', 'jiraBaseUrl', 'jiraUserEmail'
+    ];
+    for (const [key, value] of Object.entries(req.body)) {
+      if (allowed.includes(key)) current[key] = value;
+    }
+    // Atomic write
+    const tmpPath = secretsPath + '.tmp';
+    fs.writeFileSync(tmpPath, JSON.stringify(current, null, 2));
+    fs.renameSync(tmpPath, secretsPath);
+    res.json({ ok: true, note: 'Restart services to apply credential changes' });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 // Health check
