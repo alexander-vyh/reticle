@@ -187,14 +187,66 @@ async function testSeedingIdempotency() {
   }
 }
 
+async function testFeedbackSettingsEndpoints() {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'reticle-fdbk-settings-test-'));
+  const reticleDbPath = path.join(tmpDir, 'reticle.db');
+  const orgMemDbPath = path.join(tmpDir, 'org-memory.db');
+
+  process.env.RETICLE_DB_PATH = reticleDbPath;
+  process.env.ORG_MEMORY_DB_PATH = orgMemDbPath;
+
+  // Clear module cache so gateway.js picks up the new DB path
+  delete require.cache[require.resolve('./gateway')];
+  delete require.cache[require.resolve('./reticle-db')];
+
+  const app = require('./gateway');
+  const server = app.listen(0);
+  const port = server.address().port;
+
+  try {
+    // Test 1: GET /feedback/settings returns defaults
+    const getRes = await httpRequest(port, 'GET', '/feedback/settings');
+    assert.strictEqual(getRes.status, 200, `expected 200, got ${getRes.status}: ${JSON.stringify(getRes.body)}`);
+    assert.strictEqual(getRes.body.weeklyTarget, '3', `expected weeklyTarget='3', got '${getRes.body.weeklyTarget}'`);
+    assert.strictEqual(getRes.body.scanWindowHours, '24', `expected scanWindowHours='24', got '${getRes.body.scanWindowHours}'`);
+    console.log('  PASS: GET /feedback/settings returns defaults');
+
+    // Test 2: PATCH /feedback/settings updates values
+    const patchRes = await httpRequest(port, 'PATCH', '/feedback/settings', { weeklyTarget: 5, scanWindowHours: 48 });
+    assert.strictEqual(patchRes.status, 200, `expected 200, got ${patchRes.status}: ${JSON.stringify(patchRes.body)}`);
+    assert.strictEqual(patchRes.body.ok, true);
+    console.log('  PASS: PATCH /feedback/settings updates values');
+
+    // Test 3: GET /feedback/settings returns updated values after PATCH
+    const getAfterRes = await httpRequest(port, 'GET', '/feedback/settings');
+    assert.strictEqual(getAfterRes.status, 200);
+    assert.strictEqual(getAfterRes.body.weeklyTarget, '5', `expected weeklyTarget='5', got '${getAfterRes.body.weeklyTarget}'`);
+    assert.strictEqual(getAfterRes.body.scanWindowHours, '48', `expected scanWindowHours='48', got '${getAfterRes.body.scanWindowHours}'`);
+    console.log('  PASS: GET /feedback/settings returns updated values after PATCH');
+
+  } finally {
+    server.close();
+    try { fs.unlinkSync(reticleDbPath); } catch {}
+    try { fs.unlinkSync(reticleDbPath + '-wal'); } catch {}
+    try { fs.unlinkSync(reticleDbPath + '-shm'); } catch {}
+    try { fs.unlinkSync(orgMemDbPath); } catch {}
+    try { fs.unlinkSync(orgMemDbPath + '-wal'); } catch {}
+    try { fs.unlinkSync(orgMemDbPath + '-shm'); } catch {}
+    try { fs.rmdirSync(tmpDir); } catch {}
+  }
+}
+
 // --- Run tests ---
 console.log('settings endpoint tests:');
 
-testSettingsEndpoints().then(() => testSeedingIdempotency()).then(() => {
-  console.log('All settings endpoint tests passed');
-  process.exit(0);
-}).catch(err => {
-  console.error('FAIL:', err.message);
-  console.error(err.stack);
-  process.exit(1);
-});
+testSettingsEndpoints()
+  .then(() => testSeedingIdempotency())
+  .then(() => testFeedbackSettingsEndpoints())
+  .then(() => {
+    console.log('All settings endpoint tests passed');
+    process.exit(0);
+  }).catch(err => {
+    console.error('FAIL:', err.message);
+    console.error(err.stack);
+    process.exit(1);
+  });

@@ -145,6 +145,34 @@ app.get('/feedback/stats', (req, res) => {
   res.json({ weekly, monthly, ratios });
 });
 
+// GET /feedback/settings
+app.get('/feedback/settings', (req, res) => {
+  try {
+    const rows = db.prepare('SELECT key, value FROM feedback_settings').all();
+    const settings = Object.fromEntries(rows.map(r => [r.key, r.value]));
+    res.json(settings);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// PATCH /feedback/settings
+app.patch('/feedback/settings', (req, res) => {
+  try {
+    const { weeklyTarget, scanWindowHours } = req.body;
+    const now = Math.floor(Date.now() / 1000);
+    if (weeklyTarget !== undefined) {
+      db.prepare("INSERT OR REPLACE INTO feedback_settings (key, value, updated_at) VALUES ('weeklyTarget', ?, ?)").run(String(weeklyTarget), now);
+    }
+    if (scanWindowHours !== undefined) {
+      db.prepare("INSERT OR REPLACE INTO feedback_settings (key, value, updated_at) VALUES ('scanWindowHours', ?, ?)").run(String(scanWindowHours), now);
+    }
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // --- Commitments (org-memory knowledge graph) ---
 
 let orgMemDb = null;

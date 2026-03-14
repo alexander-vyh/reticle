@@ -198,4 +198,52 @@ const { addPerson, listPeopleByRole, getVipEmails, getDirectReports, listTeamMem
   db.close();
 }
 
+// --- Task 7: feedback_settings table + default seeds ---
+
+// --- Test: feedback_settings table exists ---
+{
+  const db = reticleDb.initDatabase();
+
+  const tables = db.prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name='feedback_settings'`).all();
+  assert.strictEqual(tables.length, 1, 'feedback_settings table should exist');
+
+  console.log('PASS: feedback_settings table exists');
+  db.close();
+}
+
+// --- Test: feedback_settings has default weeklyTarget=3 ---
+{
+  const db = reticleDb.initDatabase();
+
+  const row = db.prepare(`SELECT value FROM feedback_settings WHERE key = 'weeklyTarget'`).get();
+  assert.ok(row, 'weeklyTarget default should be seeded');
+  assert.strictEqual(row.value, '3', `expected weeklyTarget='3', got '${row.value}'`);
+
+  console.log("PASS: feedback_settings weeklyTarget defaults to '3'");
+  db.close();
+}
+
+// --- Test: feedback_settings has default scanWindowHours=24 ---
+{
+  const db = reticleDb.initDatabase();
+
+  const row = db.prepare(`SELECT value FROM feedback_settings WHERE key = 'scanWindowHours'`).get();
+  assert.ok(row, 'scanWindowHours default should be seeded');
+  assert.strictEqual(row.value, '24', `expected scanWindowHours='24', got '${row.value}'`);
+
+  console.log("PASS: feedback_settings scanWindowHours defaults to '24'");
+  db.close();
+}
+
+// --- Test: seed is idempotent (re-init does not duplicate rows) ---
+{
+  const db = reticleDb.initDatabase();
+
+  const count = db.prepare(`SELECT COUNT(*) as c FROM feedback_settings`).get().c;
+  assert.strictEqual(count, 2, `expected exactly 2 rows, got ${count}`);
+
+  console.log('PASS: feedback_settings seed is idempotent (exactly 2 rows after re-init)');
+  db.close();
+}
+
 console.log('\nAll settings migration tests passed.');

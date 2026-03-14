@@ -270,7 +270,20 @@ function initDatabase() {
       status      TEXT NOT NULL DEFAULT 'pending'
     );
     CREATE INDEX IF NOT EXISTS idx_feedback_status ON feedback_candidates(status);
+
+    CREATE TABLE IF NOT EXISTS feedback_settings (
+      key        TEXT PRIMARY KEY,
+      value      TEXT NOT NULL,
+      updated_at INTEGER DEFAULT (strftime('%s','now'))
+    );
   `);
+
+  // Seed feedback_settings defaults (idempotent)
+  const fsCount = db.prepare('SELECT COUNT(*) as count FROM feedback_settings').get();
+  if (fsCount.count === 0) {
+    db.prepare("INSERT INTO feedback_settings (key, value) VALUES (?, ?)").run('weeklyTarget', '3');
+    db.prepare("INSERT INTO feedback_settings (key, value) VALUES (?, ?)").run('scanWindowHours', '24');
+  }
 
   // Idempotent migrations for existing databases
   const mpCols = db.pragma('table_info(monitored_people)').map(c => c.name);
