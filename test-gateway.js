@@ -7,13 +7,17 @@ function setupTestDb() {
   const db = new Database(':memory:');
   db.exec(`
     CREATE TABLE IF NOT EXISTS monitored_people (
-      id          TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(8)))),
-      email       TEXT UNIQUE NOT NULL,
-      name        TEXT,
-      slack_id    TEXT,
-      jira_id     TEXT,
-      resolved_at INTEGER,
-      created_at  INTEGER NOT NULL DEFAULT (strftime('%s','now'))
+      id               TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(8)))),
+      email            TEXT UNIQUE NOT NULL,
+      name             TEXT,
+      slack_id         TEXT,
+      jira_id          TEXT,
+      resolved_at      INTEGER,
+      created_at       INTEGER NOT NULL DEFAULT (strftime('%s','now')),
+      role             TEXT DEFAULT 'peer',
+      escalation_tier  TEXT,
+      title            TEXT,
+      team             TEXT
     );
   `);
   return db;
