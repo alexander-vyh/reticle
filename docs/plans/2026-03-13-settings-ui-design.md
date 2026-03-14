@@ -145,9 +145,9 @@ metaphor applied to escalation configuration.
 
 **Escalation tier options:** Immediate, Within 4h, Daily digest, Weekly digest.
 
-**Add flow:** Popover from the [+ Add] button (or tab-specific [+]) with fields
-appropriate to the selected tab. Sheet for 3+ field forms. Popover for 2-field
-forms (VIPs: email + title).
+**Add flow:** Single [+ Add] button in the toolbar. Opens a popover with fields
+appropriate to the currently selected tab. Popover for 2-field forms (VIPs:
+email + title). Sheet for 3+ field forms (Direct Reports: name, email, slackId).
 
 **Delete flow:** Swipe-to-delete with inline "Removed — Undo" notice that
 auto-dismisses after 5 seconds. No confirmation dialog.
@@ -155,6 +155,11 @@ auto-dismisses after 5 seconds. No confirmation dialog.
 **Identity badges:** Keep [Slack ✓/✗] and [Jira ✓/✗] on Monitored tab only.
 Remove the Gmail badge (always green = meaningless). VIPs and Direct Reports
 do not show identity badges — they are reference data, not pipeline entities.
+
+**Team tab is the UI for `dwTeamEmails`.** The team directory currently lives
+in `team.json` as `dwTeamEmails` and is used by `lib/seed-data.js` for
+identity seeding. After Phase 2, these are seeded into `monitored_people`
+with `role = 'peer'` and a non-null `team` field.
 
 **Email filter patterns:** Collapsible `DisclosureGroup` at the bottom of the
 People view (below the tab content), labeled "Monitoring Filters." Contains
@@ -187,11 +192,11 @@ Rules:
 - Never show deficit ("1 remaining")
 - Never show progress bars or completion percentages
 - Never reset to 0/3 on Monday morning
-- Show previous week as anchor until mid-week ("Last week: 3/3")
+- Show previous week as anchor until Wednesday EOD ("Last week: 3/3")
 
 **Controls:**
 - Weekly target: `Stepper` with range 1-20
-- Scan window: `Picker` with `.segmented` style, options: 14d, 24h, 48h, 72h
+- Scan window: `Picker` with `.segmented` style, options: 24h, 48h, 72h, 14d
 
 **Auto-save:** Changes write through to the database immediately via
 `PATCH /feedback/settings`.
@@ -205,7 +210,9 @@ or inline control in the existing `SummaryBar`.
 Summary: 12 total · 3 stale        Stale after: [7 ▾] days
 ```
 
-`Picker` with options: 3, 5, 7, 14, 30 days. Auto-save.
+`Picker` with options: 3, 5, 7, 14, 30 days. Auto-save. Persisted in
+`settings.json` under `commitments.staleDays`. SwiftUI view passes the value
+as a query parameter to `GET /api/commitments?staleDays=N`.
 
 ### 4. Settings View
 
@@ -324,6 +331,9 @@ Section("Services") {
 
 **Service status dots:** Green = running, red = error/failed, gray = stopped.
 Buttons use `.bordered` `.controlSize(.small)`. No `.borderedProminent`.
+Start/stop calls `ServiceManager.startService()`/`stopService()` directly
+from Swift via `launchctl` (existing implementation). No gateway endpoint
+needed — these are OS-level process controls, not data operations.
 
 **Hotkey recording:** Click-to-record pattern (click field, press desired
 combo, done). Backed by `CaptureManager.saveHotkeyConfig()` which already
@@ -357,7 +367,26 @@ ALTER TABLE monitored_people ADD COLUMN escalation_tier TEXT;
 -- NULL = use role default. Values: 'immediate', '4h', 'daily', 'weekly'
 ```
 
-**3. New `feedback_settings` table:**
+**3. Add `title` and `team` columns to `monitored_people`:**
+
+```sql
+ALTER TABLE monitored_people ADD COLUMN title TEXT;
+-- VIP title (e.g., "VP Engineering"). NULL for non-VIPs.
+
+ALTER TABLE monitored_people ADD COLUMN team TEXT;
+-- Team affiliation (e.g., "Platform", "Frontend"). NULL unless imported from dwTeamEmails.
+```
+
+**Tab-to-query mapping:**
+
+| Tab | Query predicate |
+|-----|----------------|
+| Monitored | `WHERE role = 'peer' AND team IS NULL` |
+| Direct Reports | `WHERE role = 'direct_report'` |
+| VIPs | `WHERE role = 'vip'` |
+| Team | `WHERE team IS NOT NULL AND role = 'peer'` |
+
+**4. New `feedback_settings` table:**
 
 ```sql
 CREATE TABLE IF NOT EXISTS feedback_settings (
@@ -369,7 +398,7 @@ CREATE TABLE IF NOT EXISTS feedback_settings (
 
 Initial rows: `weeklyTarget` = `3`, `scanWindowHours` = `24`.
 
-**4. New `~/.reticle/config/settings.json`:**
+**5. New `~/.reticle/config/settings.json`:**
 
 ```json
 {
@@ -405,7 +434,7 @@ Initial rows: `weeklyTarget` = `3`, `scanWindowHours` = `24`.
 
 Optional file. Missing keys fall back to hardcoded defaults via `??` operator.
 
-**5. `team.json` after migration:**
+**6. `team.json` after migration:**
 
 ```json
 {
@@ -434,7 +463,7 @@ VIPs, directReports, and feedback sections removed.
 | GET | `/settings` | Read settings.json, return parsed JSON |
 | PATCH | `/settings` | Validate + write settings.json atomically, SIGHUP affected services |
 | GET | `/config/accounts` | Read secrets.json (return identifiers + connection health, never raw tokens for GET) |
-| PATCH | `/config/accounts` | Write specific fields to secrets.json atomically |
+| PATCH | `/config/accounts` | Write specific fields to secrets.json atomically. Gateway re-reads secrets into memory after write. Other services require restart (inline caption in UI). |
 
 ### Write Path
 
@@ -467,6 +496,25 @@ process.on('SIGHUP', () => {
 Gateway looks up service PIDs from heartbeat files to send signals.
 Atomic file write (tmp + rename) prevents partial-read races.
 
+**SIGHUP targeting:** The gateway maintains a mapping from settings.json key
+prefixes to affected service heartbeat names:
+
+| Settings key prefix | Service heartbeat |
+|---------------------|-------------------|
+| `polling.gmailIntervalMinutes` | `gmail-monitor` |
+| `polling.slackResponseTimeoutMinutes` | `slack-events` |
+| `polling.followupCheckIntervalMinutes` | `followup-checker` |
+| `polling.meetingAlertPollIntervalSeconds` | `meeting-alerts` |
+| `notifications.*` | `meeting-alerts` |
+| `thresholds.*` | `followup-checker` |
+| `o3.*` | `meeting-alerts` |
+| `digest.*` | No SIGHUP (launchd-scheduled, reads on next run) |
+
+**Stale PID protection:** Before sending SIGHUP, verify the PID from the
+heartbeat file is still alive via `process.kill(pid, 0)` (existence check).
+If the PID is stale, skip the signal — launchd will restart the service and
+it will read the current settings.json on startup.
+
 ### Failure Modes
 
 | Scenario | Behavior |
@@ -475,6 +523,7 @@ Atomic file write (tmp + rename) prevents partial-read races.
 | Service crashed | launchd restarts; reads current settings.json fresh |
 | Settings.json corrupt | Service falls back to hardcoded defaults; logs warning |
 | SIGHUP not received | Next launchd restart applies settings; tray can show "pending" |
+| Stale PID in heartbeat | `process.kill(pid, 0)` check fails; skip signal; service picks up on next launchd restart |
 | Concurrent DB access | SQLite WAL mode handles atomically |
 
 ## Migration Plan
@@ -492,14 +541,24 @@ gains segmented tabs and role display.
 **Phase 3: Switch service reads** — Services read VIPs and direct reports from
 DB per-cycle instead of config at startup. No restart needed for people changes.
 
-**Phase 4: Strip team.json** — Remove vips, directReports, and feedback
-sections from team.json. Update lib/config.js exports. Update
-config/team.example.json.
+**Phase 4: Feedback settings migration** — Add feedback_settings table +
+endpoints. Build FeedbackView settings strip. Switch `digest-daily.js` and
+`feedback-collector.js` to read from DB instead of `config.feedback`. Update
+`lib/config.js` to stop exporting `feedback` (now DB-backed).
 
-**Phase 5: Settings view + settings.json** — Add feedback_settings table +
-endpoints. Build FeedbackView settings strip. Create settings.json with
+**Phase 5: Strip team.json** — Remove vips, directReports, and feedback
+sections from team.json. Update remaining lib/config.js exports. Update
+config/team.example.json. `dwTeamEmails` stays in team.json (one-shot
+seeding data, not runtime-queried).
+
+**Phase 6: Settings view + settings.json** — Create settings.json with
 defaults. Build Settings view (Accounts, Notifications, System). Wire services
-to read from settings.json with fallback defaults.
+to read from settings.json with fallback defaults. Add SIGHUP reload handlers.
+
+**Note on `gatewayPort`:** Stays in `secrets.json` (not moved to
+`settings.json`). It is a bootstrap value needed before the gateway can serve
+settings endpoints. Changing it requires gateway restart, which is appropriate
+for an infrastructure value.
 
 ## SwiftUI Implementation Notes
 
