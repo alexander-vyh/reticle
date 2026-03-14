@@ -165,13 +165,27 @@ struct CommitmentRow: View {
                 Text(item.value)
                     .font(.body)
                     .lineLimit(2)
-                HStack(spacing: 8) {
+                HStack(spacing: 6) {
                     Text(item.entityName)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Text("·")
+                        .font(.caption)
+                        .foregroundStyle(.tertiary)
+                    Text(sourceLabel)
                         .font(.caption)
                         .foregroundStyle(.secondary)
                     Text(ageLabel)
                         .font(.caption)
                         .foregroundStyle(item.isStale ? .red : .secondary)
+                    if let urlString = item.sourceUrl, let url = URL(string: urlString) {
+                        Link(destination: url) {
+                            Image(systemName: "arrow.up.right.square")
+                                .font(.caption)
+                                .foregroundStyle(.blue)
+                        }
+                        .buttonStyle(.plain)
+                    }
                 }
             }
 
@@ -188,6 +202,15 @@ struct CommitmentRow: View {
 
     private var priorityColor: Color {
         item.priority == "high" ? .red : .blue
+    }
+
+    private var sourceLabel: String {
+        if item.source == "slack", let ch = item.channelName {
+            return "#\(ch)"
+        } else if item.source == "jira" {
+            return "Jira"
+        }
+        return item.source ?? ""
     }
 
     private var ageLabel: String {

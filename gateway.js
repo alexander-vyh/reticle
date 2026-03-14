@@ -107,18 +107,73 @@ function getOrgMemDb() {
   return orgMemDb;
 }
 
+// Fetch Slack workspace URL once and cache it (used for permalink construction)
+let slackWorkspaceUrl = null;
+async function getSlackWorkspaceUrl() {
+  if (slackWorkspaceUrl) return slackWorkspaceUrl;
+  try {
+    const https = require('https');
+    const result = await new Promise((resolve, reject) => {
+      const req = https.request({
+        hostname: 'slack.com',
+        path: '/api/auth.test',
+        method: 'GET',
+        headers: { 'Authorization': `Bearer ${config.slackBotToken}` }
+      }, (res) => {
+        let body = '';
+        res.on('data', chunk => body += chunk);
+        res.on('end', () => {
+          try { resolve(JSON.parse(body)); } catch (e) { reject(e); }
+        });
+      });
+      req.on('error', reject);
+      req.end();
+    });
+    if (result.ok && result.url) {
+      slackWorkspaceUrl = result.url.replace(/\/$/, ''); // e.g. https://simpli-fi.slack.com
+    }
+  } catch (e) {
+    slackWorkspaceUrl = null;
+  }
+  return slackWorkspaceUrl;
+}
+
+function buildSourceUrl(source, sourceId, channelId, jiraBaseUrl, slackBase) {
+  if (!source || !sourceId) return null;
+  if (source === 'slack' && slackBase && channelId) {
+    // source_id format: "CHANNEL_ID:message.ts"
+    const ts = sourceId.split(':')[1];
+    if (ts) {
+      const tsForUrl = 'p' + ts.replace('.', '');
+      return `${slackBase}/archives/${channelId}/${tsForUrl}`;
+    }
+  }
+  if (source === 'jira' && jiraBaseUrl) {
+    // source_id format: "ISSUE_KEY:field:timestamp"
+    const issueKey = sourceId.split(':')[0];
+    if (issueKey && /^[A-Z]+-\d+$/.test(issueKey)) {
+      return `${jiraBaseUrl}/browse/${issueKey}`;
+    }
+  }
+  return null;
+}
+
 // GET /api/commitments — open event facts from knowledge graph
-app.get('/api/commitments', (req, res) => {
+app.get('/api/commitments', async (req, res) => {
   const omDb = getOrgMemDb();
   const now = Math.floor(Date.now() / 1000);
   const staleDays = parseInt(req.query.staleDays) || 7;
   const staleThreshold = now - (staleDays * 24 * 3600);
+  const jiraBaseUrl = config.jiraBaseUrl || null;
+  const slackBase = await getSlackWorkspaceUrl();
 
   const facts = omDb.prepare(`
     SELECT f.id, f.attribute, f.value, f.fact_type, f.valid_from, f.resolution,
-           f.source_message_id, e.canonical_name as entity_name, e.id as entity_id
+           f.source_message_id, e.canonical_name as entity_name, e.id as entity_id,
+           rm.source, rm.source_id, rm.channel_id, rm.channel_name
     FROM facts f
     JOIN entities e ON f.entity_id = e.id
+    LEFT JOIN raw_messages rm ON rm.id = f.source_message_id
     WHERE f.fact_type = 'event'
       AND (f.resolution IS NULL OR f.resolution = 'open')
       AND f.attribute IN ('committed_to', 'asked_to', 'raised_risk', 'decided')
@@ -137,6 +192,8 @@ app.get('/api/commitments', (req, res) => {
       priority = 'normal';
     }
 
+    const sourceUrl = buildSourceUrl(f.source, f.source_id, f.channel_id, jiraBaseUrl, slackBase);
+
     return {
       id: f.id,
       attribute: f.attribute,
@@ -148,6 +205,9 @@ app.get('/api/commitments', (req, res) => {
       ageDays: Math.floor(ageSeconds / 86400),
       validFrom: f.valid_from,
       isStale,
+      source: f.source || null,
+      channelName: f.channel_name || null,
+      sourceUrl,
     };
   });
 
@@ -180,6 +240,202 @@ app.post('/api/commitments/:id/resolve', (req, res) => {
     .run(resolution, now, req.params.id);
 
   res.json({ ok: true, id: req.params.id, resolution });
+});
+
+// --- Entities (org-memory knowledge graph) ---
+
+// GET /api/entities — all person entities with commitment counts and identities
+app.get('/api/entities', (req, res) => {
+  const omDb = getOrgMemDb();
+
+  const entities = omDb.prepare(`
+    SELECT e.id, e.canonical_name, e.monitored, e.is_active,
+           COUNT(f.id) as commitment_count
+    FROM entities e
+    LEFT JOIN facts f ON f.entity_id = e.id
+      AND f.fact_type = 'event'
+      AND (f.resolution IS NULL OR f.resolution = 'open')
+      AND f.attribute IN ('committed_to', 'asked_to', 'raised_risk', 'decided')
+    WHERE e.entity_type = 'person'
+    GROUP BY e.id
+    ORDER BY e.canonical_name
+  `).all();
+
+  const identities = omDb.prepare(`
+    SELECT entity_id, source, external_id, display_name
+    FROM identity_map
+  `).all();
+
+  const identityByEntity = {};
+  for (const row of identities) {
+    if (!identityByEntity[row.entity_id]) identityByEntity[row.entity_id] = {};
+    identityByEntity[row.entity_id][row.source] = row.external_id;
+  }
+
+  const result = entities.map(e => ({
+    id: e.id,
+    canonicalName: e.canonical_name,
+    monitored: e.monitored === 1,
+    isActive: e.is_active === 1,
+    commitmentCount: e.commitment_count,
+    slackId: identityByEntity[e.id]?.slack || null,
+    jiraId: identityByEntity[e.id]?.jira || null,
+  }));
+
+  res.json({ entities: result });
+});
+
+// POST /api/entities/:id/monitor — set monitored = 1
+app.post('/api/entities/:id/monitor', (req, res) => {
+  const omDb = getOrgMemDb();
+  const entity = omDb.prepare('SELECT id FROM entities WHERE id = ?').get(req.params.id);
+  if (!entity) return res.status(404).json({ error: 'entity not found' });
+
+  omDb.prepare('UPDATE entities SET monitored = 1 WHERE id = ?').run(req.params.id);
+  res.json({ ok: true, id: req.params.id, monitored: true });
+});
+
+// GET /api/entities/:id — single entity detail
+app.get('/api/entities/:id', (req, res) => {
+  const omDb = getOrgMemDb();
+
+  const entity = omDb.prepare(`
+    SELECT e.id, e.canonical_name, e.monitored, e.is_active,
+           COUNT(f.id) as commitment_count
+    FROM entities e
+    LEFT JOIN facts f ON f.entity_id = e.id
+      AND f.fact_type = 'event'
+      AND (f.resolution IS NULL OR f.resolution = 'open')
+      AND f.attribute IN ('committed_to', 'asked_to', 'raised_risk', 'decided')
+    WHERE e.id = ?
+    GROUP BY e.id
+  `).get(req.params.id);
+
+  if (!entity) return res.status(404).json({ error: 'entity not found' });
+
+  const identities = omDb.prepare(
+    `SELECT source, external_id FROM identity_map WHERE entity_id = ?`
+  ).all(req.params.id);
+
+  const idMap = {};
+  for (const row of identities) idMap[row.source] = row.external_id;
+
+  res.json({
+    entity: {
+      id: entity.id,
+      canonicalName: entity.canonical_name,
+      monitored: entity.monitored === 1,
+      isActive: entity.is_active === 1,
+      commitmentCount: entity.commitment_count,
+      slackId: idMap.slack || null,
+      jiraId: idMap.jira || null,
+    }
+  });
+});
+
+// GET /api/entities/:id/commitments — open event facts for one entity
+app.get('/api/entities/:id/commitments', async (req, res) => {
+  const omDb = getOrgMemDb();
+  const now = Math.floor(Date.now() / 1000);
+  const staleDays = parseInt(req.query.staleDays) || 7;
+  const staleThreshold = now - (staleDays * 24 * 3600);
+  const jiraBaseUrl = config.jiraBaseUrl || null;
+  const slackBase = await getSlackWorkspaceUrl();
+
+  const entity = omDb.prepare('SELECT id FROM entities WHERE id = ?').get(req.params.id);
+  if (!entity) return res.status(404).json({ error: 'entity not found' });
+
+  const facts = omDb.prepare(`
+    SELECT f.id, f.attribute, f.value, f.fact_type, f.valid_from, f.resolution,
+           f.source_message_id, e.canonical_name as entity_name, e.id as entity_id,
+           rm.source, rm.source_id, rm.channel_id, rm.channel_name
+    FROM facts f
+    JOIN entities e ON f.entity_id = e.id
+    LEFT JOIN raw_messages rm ON rm.id = f.source_message_id
+    WHERE f.entity_id = ?
+      AND f.fact_type = 'event'
+      AND (f.resolution IS NULL OR f.resolution = 'open')
+      AND f.attribute IN ('committed_to', 'asked_to', 'raised_risk', 'decided')
+    ORDER BY f.valid_from DESC
+  `).all(req.params.id);
+
+  const commitments = facts.map(f => {
+    const ageSeconds = now - f.valid_from;
+    const isStale = f.valid_from < staleThreshold;
+    let priority;
+    if (f.attribute === 'raised_risk') {
+      priority = isStale ? 'high' : 'normal';
+    } else if (isStale) {
+      priority = ageSeconds > 14 * 86400 ? 'critical' : 'high';
+    } else {
+      priority = 'normal';
+    }
+    return {
+      id: f.id,
+      attribute: f.attribute,
+      value: f.value,
+      entityName: f.entity_name,
+      entityId: f.entity_id,
+      priority,
+      ageSeconds,
+      ageDays: Math.floor(ageSeconds / 86400),
+      validFrom: f.valid_from,
+      isStale,
+      source: f.source || null,
+      channelName: f.channel_name || null,
+      sourceUrl: buildSourceUrl(f.source, f.source_id, f.channel_id, jiraBaseUrl, slackBase),
+    };
+  });
+
+  res.json({ commitments });
+});
+
+// POST /api/entities/:id/merge — merge source into target, reassign facts and identities
+app.post('/api/entities/:id/merge', (req, res) => {
+  const { targetId } = req.body;
+  if (!targetId) return res.status(400).json({ error: 'targetId required' });
+  if (targetId === req.params.id) return res.status(400).json({ error: 'cannot merge entity into itself' });
+
+  const omDb = getOrgMemDb();
+  const source = omDb.prepare('SELECT id FROM entities WHERE id = ?').get(req.params.id);
+  if (!source) return res.status(404).json({ error: 'source entity not found' });
+  const target = omDb.prepare('SELECT id FROM entities WHERE id = ?').get(targetId);
+  if (!target) return res.status(404).json({ error: 'target entity not found' });
+
+  const now = Math.floor(Date.now() / 1000);
+
+  omDb.transaction(() => {
+    // Reassign all facts from source to target
+    omDb.prepare('UPDATE facts SET entity_id = ? WHERE entity_id = ?').run(targetId, req.params.id);
+
+    // Move identity_map entries to target.
+    // PK is (source, external_id) — if target already owns it, delete source's duplicate.
+    // Otherwise reassign by updating entity_id.
+    const srcIdentities = omDb.prepare('SELECT source, external_id FROM identity_map WHERE entity_id = ?').all(req.params.id);
+    for (const row of srcIdentities) {
+      const claimedByTarget = omDb.prepare('SELECT 1 FROM identity_map WHERE entity_id = ? AND source = ? AND external_id = ?').get(targetId, row.source, row.external_id);
+      if (claimedByTarget) {
+        omDb.prepare('DELETE FROM identity_map WHERE entity_id = ? AND source = ? AND external_id = ?').run(req.params.id, row.source, row.external_id);
+      } else {
+        omDb.prepare('UPDATE identity_map SET entity_id = ? WHERE source = ? AND external_id = ?').run(targetId, row.source, row.external_id);
+      }
+    }
+
+    // Deactivate source
+    omDb.prepare('UPDATE entities SET is_active = 0 WHERE id = ?').run(req.params.id);
+  })();
+
+  res.json({ ok: true, sourceId: req.params.id, targetId, mergedAt: now });
+});
+
+// POST /api/entities/:id/unmonitor — set monitored = 0
+app.post('/api/entities/:id/unmonitor', (req, res) => {
+  const omDb = getOrgMemDb();
+  const entity = omDb.prepare('SELECT id FROM entities WHERE id = ?').get(req.params.id);
+  if (!entity) return res.status(404).json({ error: 'entity not found' });
+
+  omDb.prepare('UPDATE entities SET monitored = 0 WHERE id = ?').run(req.params.id);
+  res.json({ ok: true, id: req.params.id, monitored: false });
 });
 
 // Health check

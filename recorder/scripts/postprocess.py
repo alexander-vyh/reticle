@@ -31,7 +31,7 @@ logging.basicConfig(
 log = logging.getLogger(__name__)
 
 # Paths for video-transcription-analysis integration
-VTA_CONFIG_DIR = Path.home() / ".config" / "claudia"
+VTA_CONFIG_DIR = Path.home() / ".config" / "reticle"
 SPEAKER_DB_PATH = VTA_CONFIG_DIR / "speaker-db.json"
 VOCABULARY_PATH = VTA_CONFIG_DIR / "vocabulary.yaml"
 CORRECTIONS_PATH = VTA_CONFIG_DIR / "corrections.yaml"
@@ -155,7 +155,13 @@ def run_diarization(wav_path: str) -> list[dict]:
 
         # Pre-load audio with scipy to avoid torchcodec/FFmpeg issues
         audio = load_audio(wav_path)
-        diarization = pipeline(audio)
+        result = pipeline(audio)
+
+        # pyannote 4.x returns DiarizeOutput; extract the Annotation object
+        if hasattr(result, 'speaker_diarization'):
+            diarization = result.speaker_diarization
+        else:
+            diarization = result  # pyannote 3.x returns Annotation directly
     except Exception as e:
         log.warning("Diarization failed (continuing without speaker labels): %s", e)
         return []
@@ -369,6 +375,40 @@ def build_output(
     }
 
 
+def check_audio_present(wav_path: str, threshold_rms: float = 0.003, sample_size: int = 50_000) -> bool:
+    """Return False if the WAV is mostly digital silence, True if real audio is present.
+
+    Samples up to `sample_size` frames to avoid reading large files fully.
+    Threshold: ~-50 dBFS — above noise floor, below any speech.
+    """
+    import wave
+    import struct
+    import math
+
+    try:
+        with wave.open(wav_path, "rb") as wf:
+            n_frames = wf.getnframes()
+            sampwidth = wf.getsampwidth()
+            if n_frames == 0 or sampwidth == 0:
+                return False
+            frames_to_read = min(n_frames, sample_size)
+            raw = wf.readframes(frames_to_read)
+            if sampwidth == 2:
+                samples = struct.unpack(f"{len(raw) // 2}h", raw)
+                rms = math.sqrt(sum(s * s for s in samples) / len(samples)) / 32768.0
+            else:
+                return True  # Non-16-bit: assume present
+    except Exception as e:
+        log.warning("Audio presence check failed (%s), proceeding anyway", e)
+        return True
+
+    if rms < threshold_rms:
+        log.warning("Audio below silence threshold (rms=%.6f < %.3f) — skipping transcription", rms, threshold_rms)
+        return False
+    log.info("Audio presence confirmed (rms=%.4f)", rms)
+    return True
+
+
 def main():
     args = parse_args()
 
@@ -378,6 +418,11 @@ def main():
     output_dir.mkdir(parents=True, exist_ok=True)
 
     log.info("Post-processing: %s (%s)", metadata.get("title", "?"), wav_path)
+
+    # Pre-check: skip Whisper entirely if the WAV is silent (phantom recording guard)
+    if not check_audio_present(wav_path):
+        log.warning("Skipping transcription: WAV is silent. No transcript will be written.")
+        return
 
     # Step 1: Transcribe
     whisper_result = transcribe_audio(wav_path, args.model, args.language)
