@@ -7,6 +7,7 @@ enum SidebarSection: String, CaseIterable, Identifiable {
     case messages = "Messages"
     case todos = "To-dos"
     case goals = "Goals"
+    case settings = "Settings"
 
     var id: String { rawValue }
 
@@ -18,12 +19,13 @@ enum SidebarSection: String, CaseIterable, Identifiable {
         case .messages: return "envelope"
         case .todos: return "checklist"
         case .goals: return "target"
+        case .settings: return "gearshape"
         }
     }
 
     var isAvailable: Bool {
         switch self {
-        case .commitments, .people, .feedback: return true
+        case .commitments, .people, .feedback, .settings: return true
         default: return false
         }
     }
@@ -34,10 +36,23 @@ struct ContentView: View {
 
     var body: some View {
         NavigationSplitView {
-            List(SidebarSection.allCases, selection: $selectedSection) { section in
-                Label(section.rawValue, systemImage: section.icon)
-                    .foregroundStyle(section.isAvailable ? .primary : .tertiary)
-                    .tag(section)
+            List(selection: $selectedSection) {
+                Section {
+                    ForEach(SidebarSection.allCases.filter { $0 != .settings }) { section in
+                        if section.isAvailable {
+                            Label(section.rawValue, systemImage: section.icon)
+                                .tag(section)
+                        } else {
+                            Label(section.rawValue, systemImage: section.icon)
+                                .foregroundStyle(.tertiary)
+                        }
+                    }
+                }
+
+                Section {
+                    Label(SidebarSection.settings.rawValue, systemImage: SidebarSection.settings.icon)
+                        .tag(SidebarSection.settings)
+                }
             }
             .navigationSplitViewColumnWidth(160)
         } detail: {
@@ -48,6 +63,8 @@ struct ContentView: View {
                 PeopleView()
             case .feedback:
                 FeedbackView()
+            case .settings:
+                SettingsView()
             default:
                 ContentUnavailableView(
                     "\(selectedSection.rawValue) Coming Soon",
