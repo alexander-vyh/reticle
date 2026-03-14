@@ -56,6 +56,13 @@ struct SettingsView: View {
     @State private var jiraApiToken: String = ""
     @State private var jiraConnected: Bool = false
 
+    // Notification fields (wired to gateway in Task 17)
+    @State private var gmailInterval = 5
+    @State private var followupInterval = 15
+    @State private var emailEscalationHours = 48
+    @State private var slackDmEscalationHours = 72
+    @State private var slackMentionEscalationHours = 168
+
     @State private var loadError: String? = nil
 
     var body: some View {
@@ -143,17 +150,59 @@ struct SettingsView: View {
             }
 
             // MARK: Notifications
-            Section("Notifications") {
-                Text("Coming in next task")
-                    .foregroundStyle(.secondary)
+            Section("Gmail") {
+                Picker("Check interval", selection: $gmailInterval) {
+                    Text("1 min").tag(1)
+                    Text("5 min").tag(5)
+                    Text("15 min").tag(15)
+                    Text("30 min").tag(30)
+                }
+                .pickerStyle(.segmented)
+            }
+
+            Section("Follow-ups") {
+                Picker("Check interval", selection: $followupInterval) {
+                    Text("5 min").tag(5)
+                    Text("15 min").tag(15)
+                    Text("30 min").tag(30)
+                }
+                .pickerStyle(.segmented)
+
+                Stepper("Email escalation: \(emailEscalationHours)h",
+                        value: $emailEscalationHours, in: 1...168)
+                Stepper("Slack DM escalation: \(slackDmEscalationHours)h",
+                        value: $slackDmEscalationHours, in: 1...168)
+                Stepper("Slack mention escalation: \(slackMentionEscalationHours)h",
+                        value: $slackMentionEscalationHours, in: 1...336)
             }
 
             // MARK: System
-            Section("System") {
+            Section("General") {
                 Toggle("Launch at login", isOn: Binding(
                     get: { appState.isLoginItemEnabled },
                     set: { _ in appState.toggleLoginItem() }
                 ))
+            }
+
+            Section("Services") {
+                ForEach(serviceStore.services, id: \.definition.launchdLabel) { service in
+                    HStack {
+                        Circle()
+                            .fill(serviceStatusColor(service))
+                            .frame(width: 8, height: 8)
+                        Text(service.definition.label)
+                        Spacer()
+                        Button(service.status == .running ? "Stop" : "Start") {
+                            if service.status == .running {
+                                serviceStore.stop(service.definition.launchdLabel)
+                            } else {
+                                serviceStore.start(service.definition.launchdLabel)
+                            }
+                        }
+                        .buttonStyle(.bordered)
+                        .controlSize(.small)
+                    }
+                }
             }
         }
         .formStyle(.grouped)
@@ -216,5 +265,17 @@ struct SettingsView: View {
         if !jiraApiToken.isEmpty { fields["jiraApiToken"] = jiraApiToken }
         guard !fields.isEmpty else { return }
         Task { try? await gateway.updateAccounts(fields: fields) }
+    }
+
+    // MARK: - Service status color
+
+    private func serviceStatusColor(_ service: ServiceState) -> Color {
+        let effective = serviceStore.effectiveStatus(service)
+        switch effective {
+        case .running: return .green
+        case .error, .startupFailed: return .red
+        case .unresponsive, .degraded: return .yellow
+        default: return .gray
+        }
     }
 }
