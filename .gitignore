@@ -58,6 +58,9 @@ recorder/scripts/.venv/
 # direnv
 .envrc
 
+# Environment variables
+.env
+
 # Reticle app
 reticle/.build/
 reticle/DerivedData/
