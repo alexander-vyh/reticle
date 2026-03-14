@@ -15,6 +15,31 @@ app.use(express.json());
 
 const db = reticleDb.initDatabase();
 
+// Seed monitored_people from team.json if no VIPs/reports exist yet
+const existingVips = peopleStore.listPeopleByRole(db, 'vip');
+const existingReports = peopleStore.listPeopleByRole(db, 'direct_report');
+if (existingVips.length === 0 && config.vips && config.vips.length > 0) {
+  for (const v of config.vips) {
+    peopleStore.addPerson(db, { email: v.email, name: null, role: 'vip', title: v.title });
+  }
+  console.log(`Seeded ${config.vips.length} VIPs from team.json`);
+}
+if (existingReports.length === 0 && config.directReports && config.directReports.length > 0) {
+  for (const r of config.directReports) {
+    peopleStore.addPerson(db, { email: r.email, name: r.name, role: 'direct_report' });
+    if (r.slackId) peopleStore.updateSlackId(db, r.email, r.slackId);
+  }
+  console.log(`Seeded ${config.directReports.length} direct reports from team.json`);
+}
+// Seed team directory from dwTeamEmails
+const existingTeam = peopleStore.listTeamMembers(db);
+if (existingTeam.length === 0 && config.dwTeamEmails && config.dwTeamEmails.length > 0) {
+  for (const t of config.dwTeamEmails) {
+    peopleStore.addPerson(db, { email: t.email, name: t.name, team: t.team });
+  }
+  console.log(`Seeded ${config.dwTeamEmails.length} team members from team.json`);
+}
+
 // GET /people — list all monitored people
 app.get('/people', (req, res) => {
   const people = peopleStore.listPeople(db);

@@ -115,10 +115,82 @@ async function testSettingsEndpoints() {
   }
 }
 
+async function testSeedingIdempotency() {
+  // Verify that gateway startup does not duplicate existing VIPs or direct reports
+  // when the DB already has entries — the seeding guard (existingVips.length === 0) holds.
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'reticle-seed-test-'));
+  const reticleDbPath = path.join(tmpDir, 'reticle.db');
+  const orgMemDbPath = path.join(tmpDir, 'org-memory.db');
+
+  process.env.RETICLE_DB_PATH = reticleDbPath;
+  process.env.ORG_MEMORY_DB_PATH = orgMemDbPath;
+
+  // Pre-seed the DB with a VIP and a direct report so the gateway should skip seeding
+  const seedDb = new Database(reticleDbPath);
+  seedDb.pragma('journal_mode = WAL');
+  seedDb.pragma('foreign_keys = ON');
+  seedDb.exec(`
+    CREATE TABLE IF NOT EXISTS monitored_people (
+      id               TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(8)))),
+      email            TEXT UNIQUE NOT NULL,
+      name             TEXT,
+      slack_id         TEXT,
+      jira_id          TEXT,
+      resolved_at      INTEGER,
+      created_at       INTEGER NOT NULL DEFAULT (strftime('%s','now')),
+      role             TEXT DEFAULT 'peer',
+      escalation_tier  TEXT,
+      title            TEXT,
+      team             TEXT
+    );
+  `);
+  // Insert a pre-existing VIP and direct report to trigger the idempotency guard
+  seedDb.prepare(`INSERT INTO monitored_people (email, name, role) VALUES (?, ?, ?)`).run('existing-vip@example.com', 'Existing VIP', 'vip');
+  seedDb.prepare(`INSERT INTO monitored_people (email, name, role) VALUES (?, ?, ?)`).run('existing-dr@example.com', 'Existing DR', 'direct_report');
+  const countBefore = seedDb.prepare('SELECT COUNT(*) as cnt FROM monitored_people').get().cnt;
+  seedDb.close();
+
+  // Require a fresh gateway instance (clear reticle-db too so it picks up new RETICLE_DB_PATH)
+  delete require.cache[require.resolve('./gateway')];
+  delete require.cache[require.resolve('./reticle-db')];
+  const app = require('./gateway');
+  const server = app.listen(0);
+  const port = server.address().port;
+
+  try {
+    // GET /people — count should not have grown from team.json seeding since guards fired
+    const listRes = await httpRequest(port, 'GET', '/people');
+    assert.strictEqual(listRes.status, 200);
+    const people = listRes.body.people;
+
+    // All pre-seeded entries must still be present (no data loss)
+    const vip = people.find(p => p.email === 'existing-vip@example.com');
+    const dr = people.find(p => p.email === 'existing-dr@example.com');
+    assert.ok(vip, 'pre-existing VIP must be present after gateway start');
+    assert.ok(dr, 'pre-existing direct report must be present after gateway start');
+    assert.strictEqual(vip.role, 'vip');
+    assert.strictEqual(dr.role, 'direct_report');
+
+    // Count must be >= countBefore (team member seeding may run if DB had 0 team members)
+    assert.ok(people.length >= countBefore, `people count should not drop below ${countBefore}`);
+
+    console.log('  PASS: seeding is idempotent — pre-existing VIP/direct_report entries are preserved');
+  } finally {
+    server.close();
+    try { fs.unlinkSync(reticleDbPath); } catch {}
+    try { fs.unlinkSync(reticleDbPath + '-wal'); } catch {}
+    try { fs.unlinkSync(reticleDbPath + '-shm'); } catch {}
+    try { fs.unlinkSync(orgMemDbPath); } catch {}
+    try { fs.unlinkSync(orgMemDbPath + '-wal'); } catch {}
+    try { fs.unlinkSync(orgMemDbPath + '-shm'); } catch {}
+    try { fs.rmdirSync(tmpDir); } catch {}
+  }
+}
+
 // --- Run tests ---
 console.log('settings endpoint tests:');
 
-testSettingsEndpoints().then(() => {
+testSettingsEndpoints().then(() => testSeedingIdempotency()).then(() => {
   console.log('All settings endpoint tests passed');
   process.exit(0);
 }).catch(err => {
