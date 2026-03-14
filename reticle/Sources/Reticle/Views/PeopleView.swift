@@ -1,76 +1,139 @@
 import SwiftUI
 
+enum PeopleFilter: String, CaseIterable {
+    case all = "All"
+    case monitored = "Monitored"
+}
+
 struct PeopleView: View {
     @EnvironmentObject var gateway: GatewayClient
-    @State private var people: [Person] = []
-    @State private var newEmail = ""
-    @State private var newName = ""
+    @State private var entities: [Entity] = []
+    @State private var filter: PeopleFilter = .all
+    @State private var isLoading = false
     @State private var error: String?
 
-    var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            List {
-                ForEach(people) { person in
-                    PersonRow(person: person)
-                }
-                .onDelete { offsets in
-                    for index in offsets {
-                        let email = people[index].email
-                        Task {
-                            try? await gateway.removePerson(email: email)
-                            await loadPeople()
-                        }
-                    }
-                }
-            }
-
-            Divider()
-
-            HStack {
-                TextField("Name", text: $newName)
-                    .textFieldStyle(.roundedBorder)
-                    .frame(width: 150)
-                TextField("Email address", text: $newEmail)
-                    .textFieldStyle(.roundedBorder)
-                Button("Add") {
-                    guard !newEmail.isEmpty else { return }
-                    Task {
-                        try? await gateway.addPerson(email: newEmail, name: newName)
-                        newEmail = ""
-                        newName = ""
-                        await loadPeople()
-                    }
-                }
-                .disabled(newEmail.isEmpty)
-            }
-            .padding()
+    private var displayed: [Entity] {
+        switch filter {
+        case .all: return entities
+        case .monitored: return entities.filter { $0.monitored }
         }
-        .navigationTitle("People")
-        .task { await loadPeople() }
     }
 
-    func loadPeople() async {
-        people = (try? await gateway.listPeople()) ?? []
+    var body: some View {
+        NavigationStack {
+        VStack(alignment: .leading, spacing: 0) {
+            Picker("Filter", selection: $filter) {
+                ForEach(PeopleFilter.allCases, id: \.self) { f in
+                    Text(f.rawValue).tag(f)
+                }
+            }
+            .pickerStyle(.segmented)
+            .padding(.horizontal)
+            .padding(.vertical, 8)
+
+            if isLoading && entities.isEmpty {
+                ProgressView("Loading people...")
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else if let error = error, entities.isEmpty {
+                ContentUnavailableView(
+                    "Unable to Load",
+                    systemImage: "exclamationmark.triangle",
+                    description: Text(error)
+                )
+            } else if displayed.isEmpty {
+                ContentUnavailableView(
+                    filter == .monitored ? "No Monitored People" : "No People",
+                    systemImage: "person.slash",
+                    description: Text(filter == .monitored ? "Toggle monitor on people in the All tab." : "No entities found.")
+                )
+            } else {
+                List(displayed) { entity in
+                    NavigationLink(value: entity) {
+                        EntityRow(entity: entity) {
+                            Task { await toggle(entity) }
+                        }
+                    }
+                    .buttonStyle(.plain)
+                }
+                .navigationDestination(for: Entity.self) { entity in
+                    PersonDetailView(entity: entity)
+                }
+            }
+        }
+        .navigationTitle("People")
+        .toolbar {
+            ToolbarItem {
+                Button(action: { Task { await loadEntities() } }) {
+                    Label("Refresh", systemImage: "arrow.clockwise")
+                }
+            }
+        }
+        .task { await loadEntities() }
+        } // NavigationStack
+    }
+
+    func loadEntities() async {
+        isLoading = true
+        error = nil
+        do {
+            entities = try await gateway.listEntities()
+        } catch {
+            self.error = error.localizedDescription
+        }
+        isLoading = false
+    }
+
+    func toggle(_ entity: Entity) async {
+        do {
+            if entity.monitored {
+                try await gateway.unmonitorEntity(id: entity.id)
+            } else {
+                try await gateway.monitorEntity(id: entity.id)
+            }
+            await loadEntities()
+        } catch {
+            self.error = error.localizedDescription
+        }
     }
 }
 
-struct PersonRow: View {
-    let person: Person
+// MARK: - Entity Row
+
+struct EntityRow: View {
+    let entity: Entity
+    let onToggle: () -> Void
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Text(person.name ?? person.email)
-                .font(.headline)
-            Text(person.email)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-            HStack(spacing: 12) {
-                IdentityBadge(label: "Slack", value: person.slackId)
-                IdentityBadge(label: "Jira", value: person.jiraId)
-                IdentityBadge(label: "Gmail", value: person.email)
+        HStack(spacing: 8) {
+            VStack(alignment: .leading, spacing: 3) {
+                Text(entity.canonicalName)
+                    .font(.headline)
+                HStack(spacing: 10) {
+                    if let slackId = entity.slackId {
+                        IdentityBadge(label: "Slack", value: slackId)
+                    }
+                    if let jiraId = entity.jiraId {
+                        IdentityBadge(label: "Jira", value: jiraId)
+                    }
+                    if entity.commitmentCount > 0 {
+                        Label("\(entity.commitmentCount) open", systemImage: "checkmark.circle")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+                }
             }
+
+            Spacer()
+
+            Button(entity.monitored ? "Unmonitor" : "Monitor") {
+                onToggle()
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.small)
+            .tint(entity.monitored ? .secondary : .accentColor)
         }
-        .padding(.vertical, 4)
+        .padding(.vertical, 2)
+        .opacity(entity.isActive ? 1 : 0.5)
     }
 }
 

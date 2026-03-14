@@ -3,10 +3,12 @@ set -euo pipefail
 
 # Reticle Deploy Script
 # Usage: bin/deploy [--skip-pull] [--skip-install]
+# Env:   APPS_DIR=/Applications  — override app install location (default: /Applications)
 
 RETICLE_HOME="$HOME/.reticle"
 REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 PLIST_DIR="$HOME/Library/LaunchAgents"
+APPS_DIR="${APPS_DIR:-/Applications}"
 UID_VAL=$(id -u)
 
 # Colors
@@ -113,12 +115,13 @@ cd "$REPO_DIR/reticle"
 swift build -c release 2>&1 | tail -5
 
 # Assemble Reticle.app
-RETICLE_APP="$RETICLE_HOME/Reticle.app"
+RETICLE_APP="$APPS_DIR/Reticle.app"
 info "Assembling Reticle.app..."
 rm -rf "$RETICLE_APP"
 mkdir -p "$RETICLE_APP/Contents/MacOS"
 mkdir -p "$RETICLE_APP/Contents/Resources"
 cp .build/release/Reticle "$RETICLE_APP/Contents/MacOS/"
+cp "$REPO_DIR/tray/build/icon.icns" "$RETICLE_APP/Contents/Resources/AppIcon.icns"
 
 cat > "$RETICLE_APP/Contents/Info.plist" <<'INFOPLIST'
 <?xml version="1.0" encoding="UTF-8"?>
@@ -132,6 +135,8 @@ cat > "$RETICLE_APP/Contents/Info.plist" <<'INFOPLIST'
   <string>Reticle</string>
   <key>CFBundleExecutable</key>
   <string>Reticle</string>
+  <key>CFBundleIconFile</key>
+  <string>AppIcon</string>
   <key>CFBundleVersion</key>
   <string>1.0</string>
   <key>CFBundleShortVersionString</key>
@@ -184,6 +189,7 @@ info "Generating launchd plists..."
 
 # Service definitions: label|js_file
 SERVICES=(
+  "gateway|gateway.js"
   "gmail-monitor|gmail-monitor.js"
   "slack-events|slack-events-monitor.js"
   "meeting-alerts|meeting-alert-monitor.js"
@@ -245,6 +251,7 @@ SCHEDULED_SERVICES=(
   "digest-weekly|digest-weekly.js"
   "jira-activity-collector|jira-activity-collector.js"
   "dw-weekly-report|dw-weekly-report.js"
+  "knowledge-extractor|knowledge-extractor.js"
 )
 
 # Daily digest: weekdays at 6:00 PM
@@ -399,6 +406,41 @@ cat > "$PLIST_DIR/ai.reticle.dw-weekly-report.plist" <<PLIST
 </plist>
 PLIST
 
+# Knowledge extractor: nightly at 11:00 PM (7 days a week — stays current on weekends)
+cat > "$PLIST_DIR/ai.reticle.knowledge-extractor.plist" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>ai.reticle.knowledge-extractor</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/opt/homebrew/bin/node</string>
+    <string>$RETICLE_HOME/app/knowledge-extractor.js</string>
+  </array>
+  <key>StartCalendarInterval</key>
+  <dict><key>Hour</key><integer>23</integer><key>Minute</key><integer>0</integer></dict>
+  <key>KeepAlive</key>
+  <false/>
+  <key>ProcessType</key>
+  <string>Background</string>
+  <key>StandardOutPath</key>
+  <string>$RETICLE_HOME/logs/knowledge-extractor.log</string>
+  <key>StandardErrorPath</key>
+  <string>$RETICLE_HOME/logs/knowledge-extractor-error.log</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>HOME</key>
+    <string>$HOME</string>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+  </dict>
+</dict>
+</plist>
+PLIST
+
 # --- Step 8: Unload old openclaw plists ---
 OLD_LABELS=(
   "ai.openclaw.gmail-monitor"
@@ -488,7 +530,9 @@ done
 
 echo ""
 info "Launching Reticle.app..."
-open "$RETICLE_HOME/Reticle.app"
+pkill -x Reticle 2>/dev/null || true
+sleep 0.5
+open "$RETICLE_APP"
 
 echo ""
 info "Deploy complete!"

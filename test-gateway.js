@@ -125,7 +125,7 @@ function setupOrgMemoryDb(dbPath) {
     );
     CREATE TABLE IF NOT EXISTS entities (
       id TEXT PRIMARY KEY, entity_type TEXT NOT NULL, canonical_name TEXT NOT NULL,
-      is_active INTEGER DEFAULT 1, created_at INTEGER NOT NULL
+      is_active INTEGER DEFAULT 1, monitored INTEGER DEFAULT 0, created_at INTEGER NOT NULL
     );
     CREATE TABLE IF NOT EXISTS facts (
       id TEXT PRIMARY KEY, entity_id TEXT NOT NULL REFERENCES entities(id),
@@ -138,10 +138,10 @@ function setupOrgMemoryDb(dbPath) {
     );
     CREATE TABLE IF NOT EXISTS identity_map (
       entity_id TEXT NOT NULL REFERENCES entities(id),
-      platform TEXT NOT NULL, platform_id TEXT NOT NULL,
-      display_name TEXT, email TEXT, slack_id TEXT, jira_id TEXT,
-      resolved_at INTEGER, created_at INTEGER NOT NULL,
-      PRIMARY KEY (platform, platform_id)
+      source TEXT NOT NULL, external_id TEXT NOT NULL,
+      display_name TEXT, jira_id TEXT,
+      resolved_at INTEGER, metadata TEXT,
+      PRIMARY KEY (source, external_id)
     );
   `);
   return db;
@@ -258,6 +258,186 @@ async function testCommitmentsEndpoints() {
   }
 }
 
+async function testEntitiesEndpoints() {
+  const os = require('os');
+  const path = require('path');
+  const fs = require('fs');
+
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'reticle-ent-test-'));
+  const orgMemDbPath = path.join(tmpDir, 'org-memory.db');
+  const reticleDbPath = path.join(tmpDir, 'reticle.db');
+
+  process.env.ORG_MEMORY_DB_PATH = orgMemDbPath;
+  process.env.RETICLE_DB_PATH = reticleDbPath;
+
+  const omDb = setupOrgMemoryDb(orgMemDbPath);
+  const now = Math.floor(Date.now() / 1000);
+
+  omDb.prepare(`INSERT INTO entities (id, entity_type, canonical_name, monitored, created_at)
+    VALUES (?, ?, ?, ?, ?)`).run('ent-a', 'person', 'Alice', 0, now);
+  omDb.prepare(`INSERT INTO entities (id, entity_type, canonical_name, monitored, created_at)
+    VALUES (?, ?, ?, ?, ?)`).run('ent-b', 'person', 'Bob', 1, now);
+  omDb.prepare(`INSERT INTO facts (id, entity_id, attribute, value, fact_type, valid_from, resolution, extracted_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)`).run('f-a1', 'ent-a', 'committed_to', 'Do the thing', 'event', now - 3600, 'open', now);
+  omDb.prepare(`INSERT INTO facts (id, entity_id, attribute, value, fact_type, valid_from, resolution, extracted_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)`).run('f-a2', 'ent-a', 'asked_to', 'Review PR', 'event', now - 7200, null, now);
+  omDb.prepare(`INSERT INTO identity_map (entity_id, source, external_id, display_name)
+    VALUES (?, ?, ?, ?)`).run('ent-a', 'slack', 'U123', 'Alice');
+  omDb.close();
+
+  // Reset gateway's lazy-loaded cache so it picks up the new DB path
+  jest_clearGatewayCache();
+
+  const app = require('./gateway');
+  const server = app.listen(0);
+  const port = server.address().port;
+
+  try {
+    // Test 1: GET /api/entities returns all persons with shape
+    const listRes = await httpRequest(port, 'GET', '/api/entities');
+    assert.strictEqual(listRes.status, 200);
+    assert.ok(Array.isArray(listRes.body.entities), 'entities should be array');
+    assert.strictEqual(listRes.body.entities.length, 2);
+    const alice = listRes.body.entities.find(e => e.id === 'ent-a');
+    const bob = listRes.body.entities.find(e => e.id === 'ent-b');
+    assert.ok(alice, 'should find Alice');
+    assert.strictEqual(alice.canonicalName, 'Alice');
+    assert.strictEqual(alice.monitored, false);
+    assert.strictEqual(alice.commitmentCount, 2);
+    assert.strictEqual(alice.slackId, 'U123');
+    assert.strictEqual(bob.monitored, true);
+    assert.strictEqual(bob.commitmentCount, 0);
+    console.log('  PASS: GET /api/entities returns entities with correct shape');
+
+    // Test 2: POST /api/entities/:id/monitor sets flag
+    const monRes = await httpRequest(port, 'POST', '/api/entities/ent-a/monitor');
+    assert.strictEqual(monRes.status, 200);
+    assert.strictEqual(monRes.body.ok, true);
+    const afterMon = await httpRequest(port, 'GET', '/api/entities');
+    const aliceAfter = afterMon.body.entities.find(e => e.id === 'ent-a');
+    assert.strictEqual(aliceAfter.monitored, true);
+    console.log('  PASS: POST /api/entities/:id/monitor sets monitored flag');
+
+    // Test 3: POST /api/entities/:id/unmonitor clears flag
+    const unmonRes = await httpRequest(port, 'POST', '/api/entities/ent-b/unmonitor');
+    assert.strictEqual(unmonRes.status, 200);
+    assert.strictEqual(unmonRes.body.ok, true);
+    const afterUnmon = await httpRequest(port, 'GET', '/api/entities');
+    const bobAfter = afterUnmon.body.entities.find(e => e.id === 'ent-b');
+    assert.strictEqual(bobAfter.monitored, false);
+    console.log('  PASS: POST /api/entities/:id/unmonitor clears monitored flag');
+
+    // Test 4: monitor/unmonitor on unknown id returns 404
+    const notFound = await httpRequest(port, 'POST', '/api/entities/no-such-id/monitor');
+    assert.strictEqual(notFound.status, 404);
+    console.log('  PASS: monitor on unknown entity returns 404');
+  } finally {
+    server.close();
+    try { fs.unlinkSync(orgMemDbPath); } catch {}
+    try { fs.unlinkSync(reticleDbPath); } catch {}
+    try { fs.unlinkSync(orgMemDbPath + '-wal'); } catch {}
+    try { fs.unlinkSync(orgMemDbPath + '-shm'); } catch {}
+    try { fs.rmdirSync(tmpDir); } catch {}
+  }
+}
+
+// Clear gateway's module-level cached DB between test runs
+function jest_clearGatewayCache() {
+  // gateway.js and its deps cache DBs at module level; clear all so each test
+  // suite gets a fresh instance pointing to the correct temp DB paths
+  for (const mod of ['./gateway', './lib/org-memory-db', './reticle-db']) {
+    const resolved = require.resolve(mod);
+    delete require.cache[resolved];
+  }
+}
+
+async function testEntityDetailAndMerge() {
+  const os = require('os');
+  const path = require('path');
+  const fs = require('fs');
+
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'reticle-merge-test-'));
+  const orgMemDbPath = path.join(tmpDir, 'org-memory.db');
+  const reticleDbPath = path.join(tmpDir, 'reticle.db');
+
+  process.env.ORG_MEMORY_DB_PATH = orgMemDbPath;
+  process.env.RETICLE_DB_PATH = reticleDbPath;
+
+  const omDb = setupOrgMemoryDb(orgMemDbPath);
+  const now = Math.floor(Date.now() / 1000);
+
+  omDb.prepare(`INSERT INTO entities (id, entity_type, canonical_name, monitored, created_at)
+    VALUES (?, ?, ?, ?, ?)`).run('src-1', 'person', 'Gimli Stone', 0, now);
+  omDb.prepare(`INSERT INTO entities (id, entity_type, canonical_name, monitored, created_at)
+    VALUES (?, ?, ?, ?, ?)`).run('tgt-1', 'person', 'Gimli Stone', 1, now);
+  omDb.prepare(`INSERT INTO facts (id, entity_id, attribute, value, fact_type, valid_from, resolution, extracted_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)`).run('fm-1', 'src-1', 'committed_to', 'Ship it', 'event', now - 3600, 'open', now);
+  omDb.prepare(`INSERT INTO facts (id, entity_id, attribute, value, fact_type, valid_from, resolution, extracted_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)`).run('fm-2', 'tgt-1', 'asked_to', 'Review PR', 'event', now - 7200, null, now);
+  omDb.prepare(`INSERT INTO identity_map (entity_id, source, external_id, display_name)
+    VALUES (?, ?, ?, ?)`).run('src-1', 'slack', 'USRC', 'Dan');
+  omDb.close();
+
+  jest_clearGatewayCache();
+  const app = require('./gateway');
+  const server = app.listen(0);
+  const port = server.address().port;
+
+  try {
+    // Test 1: GET /api/entities/:id returns entity with shape
+    const detailRes = await httpRequest(port, 'GET', '/api/entities/src-1');
+    assert.strictEqual(detailRes.status, 200);
+    assert.strictEqual(detailRes.body.entity.id, 'src-1');
+    assert.strictEqual(detailRes.body.entity.canonicalName, 'Gimli Stone');
+    assert.strictEqual(detailRes.body.entity.slackId, 'USRC');
+    console.log('  PASS: GET /api/entities/:id returns entity shape');
+
+    // Test 2: GET /api/entities/:id/commitments returns that entity's open facts
+    const comRes = await httpRequest(port, 'GET', '/api/entities/src-1/commitments');
+    assert.strictEqual(comRes.status, 200);
+    assert.ok(Array.isArray(comRes.body.commitments));
+    assert.strictEqual(comRes.body.commitments.length, 1);
+    assert.strictEqual(comRes.body.commitments[0].id, 'fm-1');
+    assert.strictEqual(comRes.body.commitments[0].entityName, 'Gimli Stone');
+    console.log('  PASS: GET /api/entities/:id/commitments returns that entity\'s facts');
+
+    // Test 3: GET /api/entities/:id returns 404 for unknown id
+    const notFound = await httpRequest(port, 'GET', '/api/entities/no-such');
+    assert.strictEqual(notFound.status, 404);
+    console.log('  PASS: GET /api/entities/:id returns 404 for unknown');
+
+    // Test 4: POST /api/entities/:id/merge reassigns facts and identities to target
+    const mergeRes = await httpRequest(port, 'POST', '/api/entities/src-1/merge', { targetId: 'tgt-1' });
+    assert.strictEqual(mergeRes.status, 200);
+    assert.strictEqual(mergeRes.body.ok, true);
+
+    // Source should be inactive
+    const srcDetail = await httpRequest(port, 'GET', '/api/entities/src-1');
+    assert.strictEqual(srcDetail.body.entity.isActive, false);
+
+    // Target should now have both facts
+    const tgtCom = await httpRequest(port, 'GET', '/api/entities/tgt-1/commitments');
+    assert.strictEqual(tgtCom.body.commitments.length, 2);
+
+    // Target should have inherited slack identity
+    const tgtDetail = await httpRequest(port, 'GET', '/api/entities/tgt-1');
+    assert.strictEqual(tgtDetail.body.entity.slackId, 'USRC');
+    console.log('  PASS: POST /api/entities/:id/merge reassigns facts and identities');
+
+    // Test 5: merge with invalid targetId returns 400
+    const badMerge = await httpRequest(port, 'POST', '/api/entities/tgt-1/merge', { targetId: 'no-such' });
+    assert.strictEqual(badMerge.status, 404);
+    console.log('  PASS: merge with unknown targetId returns 404');
+  } finally {
+    server.close();
+    try { fs.unlinkSync(orgMemDbPath); } catch {}
+    try { fs.unlinkSync(reticleDbPath); } catch {}
+    try { fs.unlinkSync(orgMemDbPath + '-wal'); } catch {}
+    try { fs.unlinkSync(orgMemDbPath + '-shm'); } catch {}
+    try { fs.rmdirSync(tmpDir); } catch {}
+  }
+}
+
 // --- Run all tests ---
 
 console.log('gateway tests:');
@@ -268,11 +448,14 @@ testGatewayDeleteDecodesEmail();
 testFeedbackCandidateFlow();
 
 // Async tests
-testCommitmentsEndpoints().then(() => {
-  console.log('All gateway tests passed');
-  process.exit(0);
-}).catch(err => {
-  console.error('FAIL:', err.message);
-  console.error(err.stack);
-  process.exit(1);
-});
+testCommitmentsEndpoints()
+  .then(() => testEntitiesEndpoints())
+  .then(() => testEntityDetailAndMerge())
+  .then(() => {
+    console.log('All gateway tests passed');
+    process.exit(0);
+  }).catch(err => {
+    console.error('FAIL:', err.message);
+    console.error(err.stack);
+    process.exit(1);
+  });

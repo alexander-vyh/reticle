@@ -14,7 +14,7 @@ const kg = require('./lib/knowledge-graph');
 // --- Valid attributes and fact types (per design doc taxonomy) ---
 const VALID_ATTRIBUTES = new Set([
   'committed_to', 'asked_to', 'decided', 'raised_risk',
-  'status_update', 'role', 'team',
+  'status_update', 'completion_signal', 'role', 'team',
 ]);
 const VALID_FACT_TYPES = new Set(['event', 'state']);
 
@@ -40,15 +40,23 @@ const EXTRACTION_SYSTEM_PROMPT = `You are extracting structured facts from workp
 - Action items (someone is asked to do something)
 - Decisions (a choice is made)
 - Risks (a concern is raised about something that could go wrong)
-- Status updates (someone reports what they're working on or their role)
+- Status updates (someone reports progress, not completion)
+- Completion signals (someone confirms a prior commitment or task is done)
 
 For each fact, return:
 - entity: the person's name (who the fact is about)
-- attribute: one of committed_to, asked_to, decided, raised_risk, status_update, role, team
+- attribute: one of committed_to, asked_to, decided, raised_risk, status_update, completion_signal, role, team
 - value: what specifically (one sentence)
 - fact_type: "event" or "state"
 - confidence: 0.0-1.0
 - source_message_id: the message id it came from
+
+Use completion_signal (not status_update) when someone confirms a task is finished, shipped, merged, done, or closed. Use status_update for progress reports that do NOT indicate completion.
+
+If OPEN COMMITMENTS are listed below, check whether any message resolves one. When a message confirms an open commitment is done, return a completion_signal fact with an additional field:
+- resolves: "attribute:value" — the exact attribute and value text of the open commitment being resolved
+
+Only set resolves when you are confident (>=0.9) the message genuinely indicates completion of that specific commitment. Do not guess.
 
 Note: Jira description or comment changes may contain embedded action items (e.g. "please investigate...", "reach out to..."). Extract those as asked_to facts.
 
@@ -136,8 +144,72 @@ function formatBatchForPrompt(messages) {
 }
 
 /**
- * Store parsed facts into the knowledge graph.
- * Resolves entity names to existing entities or creates new ones.
+ * Fetch open commitments for entities that appear in this batch of messages.
+ * Returns formatted text to inject into the system prompt.
+ * @param {Object} db - org-memory database
+ * @param {Object[]} messages - Messages in the batch (to extract author names)
+ * @returns {string} Formatted open commitments block, or empty string if none
+ */
+function getOpenCommitmentsContext(db, messages) {
+  // Collect unique author names from this batch
+  const authorNames = new Set();
+  for (const m of messages) {
+    if (m.author_name) authorNames.add(m.author_name);
+  }
+  if (authorNames.size === 0) return '';
+
+  const placeholders = [...authorNames].map(() => '?').join(', ');
+
+  // Query both entity-linked and deferred (entity_id IS NULL) open commitments
+  const entityRows = db.prepare(`
+    SELECT e.canonical_name, f.attribute, f.value, f.valid_from
+    FROM facts f
+    JOIN entities e ON e.id = f.entity_id
+    WHERE e.canonical_name IN (${placeholders})
+      AND f.fact_type = 'event'
+      AND f.resolution = 'open'
+      AND f.attribute IN ('committed_to', 'asked_to')
+    ORDER BY e.canonical_name, f.valid_from DESC
+  `).all(...authorNames);
+
+  const deferredRows = db.prepare(`
+    SELECT f.mentioned_name AS canonical_name, f.attribute, f.value, f.valid_from
+    FROM facts f
+    WHERE f.entity_id IS NULL
+      AND f.mentioned_name IN (${placeholders})
+      AND f.fact_type = 'event'
+      AND f.resolution = 'open'
+      AND f.attribute IN ('committed_to', 'asked_to')
+    ORDER BY f.mentioned_name, f.valid_from DESC
+  `).all(...authorNames);
+
+  const rows = [...entityRows, ...deferredRows];
+  if (rows.length === 0) return '';
+
+  // Cap at 10 per person to avoid prompt bloat
+  const byPerson = new Map();
+  for (const r of rows) {
+    if (!byPerson.has(r.canonical_name)) byPerson.set(r.canonical_name, []);
+    const list = byPerson.get(r.canonical_name);
+    if (list.length < 10) list.push(r);
+  }
+
+  const lines = [];
+  for (const [name, commitments] of byPerson) {
+    for (const c of commitments) {
+      const d = new Date(c.valid_from * 1000).toISOString().split('T')[0];
+      lines.push(`- ${name}: "${c.value}" (${c.attribute}, from ${d})`);
+    }
+  }
+
+  return `\n\nOPEN COMMITMENTS (from prior messages — check if any are resolved by the messages below):\n${lines.join('\n')}`;
+}
+
+/**
+ * Store parsed facts into the knowledge graph using deferred attribution.
+ * Facts are stored with entity_id = NULL and mentioned_name set.
+ * No person entities are created from extracted text.
+ * Resolution of open commitments still works by looking up existing entities.
  * @param {Object} db - org-memory database
  * @param {Object[]} facts - Parsed fact objects from AI
  * @returns {{ stored: number, skipped: number }}
@@ -146,37 +218,70 @@ function storeFacts(db, facts) {
   let stored = 0;
   let skipped = 0;
 
-  // Cache entity lookups within this batch
-  const entityCache = new Map();
-
   for (const fact of facts) {
-    const name = fact.entity.trim();
-
-    let entityId = entityCache.get(name);
-    if (!entityId) {
-      // Try to find existing entity by canonical name
-      const existing = db.prepare(
-        "SELECT id FROM entities WHERE entity_type = 'person' AND canonical_name = ?"
-      ).get(name);
-
-      if (existing) {
-        entityId = existing.id;
-      } else {
-        // Create new person entity
-        const created = kg.createEntity(db, { entityType: 'person', canonicalName: name });
-        entityId = created.id;
-      }
-      entityCache.set(name, entityId);
-    }
+    const name = fact.entity.trim().normalize('NFC');
 
     try {
-      kg.upsertFact(db, {
-        entityId,
-        attribute: fact.attribute,
-        value: fact.value,
-        factType: fact.fact_type,
-        sourceMessageId: fact.source_message_id || null,
-      });
+      if (fact.resolves) {
+        // Resolution fact: find the open commitment and resolve it
+        const [targetAttr, ...valueParts] = fact.resolves.split(':');
+        const targetValue = valueParts.join(':');
+
+        // Try to find open commitment by entity canonical_name (read-only lookup)
+        let target;
+        const existingEntity = db.prepare(
+          "SELECT id FROM entities WHERE entity_type = 'person' AND canonical_name = ?"
+        ).get(name);
+
+        if (existingEntity) {
+          target = db.prepare(
+            `SELECT id FROM facts
+             WHERE entity_id = ? AND attribute = ? AND value = ?
+               AND fact_type = 'event' AND resolution = 'open'`
+          ).get(existingEntity.id, targetAttr, targetValue);
+        }
+
+        // Also check deferred facts (entity_id IS NULL, matched by mentioned_name)
+        if (!target) {
+          target = db.prepare(
+            `SELECT id FROM facts
+             WHERE entity_id IS NULL AND mentioned_name = ? AND attribute = ? AND value = ?
+               AND fact_type = 'event' AND resolution = 'open'`
+          ).get(name, targetAttr, targetValue);
+        }
+
+        if (target) {
+          kg.resolveEvent(db, {
+            factId: target.id,
+            entityId: existingEntity ? existingEntity.id : null,
+            attribute: targetAttr,
+            resolution: 'completed',
+            confidence: fact.confidence,
+            sourceMessageId: fact.source_message_id || null,
+            rationale: fact.value,
+          });
+        }
+
+        // Store the completion_signal fact with deferred attribution
+        kg.upsertFact(db, {
+          entityId: null,
+          mentionedName: name,
+          attribute: fact.attribute,
+          value: fact.value,
+          factType: fact.fact_type,
+          sourceMessageId: fact.source_message_id || null,
+        });
+      } else {
+        // Normal fact: store with deferred attribution
+        kg.upsertFact(db, {
+          entityId: null,
+          mentionedName: name,
+          attribute: fact.attribute,
+          value: fact.value,
+          factType: fact.fact_type,
+          sourceMessageId: fact.source_message_id || null,
+        });
+      }
       stored++;
     } catch (err) {
       skipped++;
@@ -187,6 +292,104 @@ function storeFacts(db, facts) {
 }
 
 /**
+ * Resolution sweep: attribute deferred facts (entity_id IS NULL) to known entities.
+ *
+ * Path A (author attribution): For facts with a source_message_id, resolve the
+ * message author's external ID to an entity via identity_map. Only attribute if
+ * the fact's mentioned_name matches one of the author entity's aliases.
+ *
+ * Path B (mention attribution): Exact match on entity_aliases.alias (case-insensitive).
+ * Only matches anchored entities (the alias table enforces this).
+ *
+ * @param {Object} db - org-memory database
+ * @param {Object} [opts]
+ * @param {Object} [opts.log] - Logger
+ * @returns {{ sweepAvailableNullFacts, sweepPathAMatched, sweepPathBMatched, sweepKnownNamesUnattributed }}
+ */
+function runSweep(db, { log } = {}) {
+  const logger = log || { info() {}, warn() {}, debug() {} };
+
+  const nullFacts = db.prepare(`
+    SELECT f.id, f.mentioned_name, f.source_message_id
+    FROM facts f
+    WHERE f.entity_id IS NULL
+  `).all();
+
+  const metrics = {
+    sweepAvailableNullFacts: nullFacts.length,
+    sweepPathAMatched: 0,
+    sweepPathBMatched: 0,
+    sweepKnownNamesUnattributed: 0,
+  };
+
+  if (nullFacts.length === 0) {
+    logger.debug('Sweep: no unattributed facts');
+    return metrics;
+  }
+
+  logger.info({ count: nullFacts.length }, 'Sweep: processing unattributed facts');
+
+  for (const fact of nullFacts) {
+    let attributed = false;
+
+    // Path A: Author attribution (self-referencing facts)
+    if (fact.source_message_id && fact.mentioned_name) {
+      const msg = db.prepare(
+        'SELECT source, author_ext_id FROM raw_messages WHERE id = ?'
+      ).get(fact.source_message_id);
+
+      if (msg && msg.author_ext_id) {
+        const authorEntityId = kg.resolveIdentity(db, msg.source, msg.author_ext_id);
+        if (authorEntityId) {
+          const aliasMatch = db.prepare(
+            'SELECT 1 FROM entity_aliases WHERE entity_id = ? AND LOWER(alias) = LOWER(?)'
+          ).get(authorEntityId, fact.mentioned_name);
+
+          if (aliasMatch) {
+            db.prepare('UPDATE facts SET entity_id = ? WHERE id = ?')
+              .run(authorEntityId, fact.id);
+            metrics.sweepPathAMatched++;
+            attributed = true;
+            logger.debug({ factId: fact.id, mentionedName: fact.mentioned_name, path: 'A' }, 'Sweep: attributed');
+          }
+        }
+      }
+    }
+
+    // Path B: Mention attribution (alias table lookup)
+    if (!attributed && fact.mentioned_name) {
+      const matches = db.prepare(
+        'SELECT entity_id FROM entity_aliases WHERE LOWER(alias) = LOWER(?)'
+      ).all(fact.mentioned_name);
+
+      if (matches.length === 1) {
+        db.prepare('UPDATE facts SET entity_id = ? WHERE id = ?')
+          .run(matches[0].entity_id, fact.id);
+        metrics.sweepPathBMatched++;
+        logger.debug({ factId: fact.id, mentionedName: fact.mentioned_name, path: 'B' }, 'Sweep: attributed');
+      } else if (matches.length > 1) {
+        logger.warn({ mentionedName: fact.mentioned_name, matchCount: matches.length },
+          'Sweep: ambiguous alias match — skipping');
+      }
+    }
+  }
+
+  // Observable failure signal: known aliases remain unattributed
+  const knownUnattributed = db.prepare(`
+    SELECT COUNT(*) as c FROM facts f
+    WHERE f.entity_id IS NULL
+      AND EXISTS (
+        SELECT 1 FROM entity_aliases ea
+        WHERE LOWER(ea.alias) = LOWER(f.mentioned_name)
+      )
+  `).get();
+  metrics.sweepKnownNamesUnattributed = knownUnattributed.c;
+
+  logger.info(metrics, 'Sweep complete');
+  return metrics;
+}
+
+/**
  * Run extraction on a batch of messages via the Anthropic API.
  * @param {Object} client - Anthropic client
  * @param {Object[]} messages - Messages to extract from
@@ -194,13 +397,14 @@ function storeFacts(db, facts) {
  * @param {string} [opts.model='claude-sonnet-4-20250514'] - Model to use
  * @returns {Promise<Object[]>} Parsed facts
  */
-async function extractBatch(client, messages, { model = 'claude-sonnet-4-20250514' } = {}) {
+async function extractBatch(client, messages, { model = 'claude-sonnet-4-20250514', openCommitmentsContext = '' } = {}) {
   const userContent = formatBatchForPrompt(messages);
+  const systemPrompt = EXTRACTION_SYSTEM_PROMPT + openCommitmentsContext;
 
   const response = await client.messages.create({
     model,
     max_tokens: 4000,
-    system: EXTRACTION_SYSTEM_PROMPT,
+    system: systemPrompt,
     messages: [{ role: 'user', content: userContent }],
   });
 
@@ -261,7 +465,8 @@ async function runExtraction(db, client, { limit, since, batchSize = 30, dryRun 
     const batch = batches[i];
     logger.info({ batch: i + 1, channel: batch.channel, messageCount: batch.messages.length }, 'Processing batch');
 
-    const { facts, inputTokens, outputTokens } = await extractBatch(client, batch.messages);
+    const openCommitmentsContext = getOpenCommitmentsContext(db, batch.messages);
+    const { facts, inputTokens, outputTokens } = await extractBatch(client, batch.messages, { openCommitmentsContext });
     totalInputTokens += inputTokens;
     totalOutputTokens += outputTokens;
 
@@ -284,6 +489,17 @@ async function runExtraction(db, client, { limit, since, batchSize = 30, dryRun 
     }
   }
 
+  // Run resolution sweep after extraction
+  let sweepMetrics = { sweepAvailableNullFacts: 0, sweepPathAMatched: 0, sweepPathBMatched: 0, sweepKnownNamesUnattributed: 0 };
+  if (!dryRun) {
+    sweepMetrics = runSweep(db, { log: logger });
+
+    // Vacuous success guard: warn if facts were stored but none are deferred
+    if (totalStored > 0 && sweepMetrics.sweepAvailableNullFacts === 0) {
+      logger.warn('Sweep vacuous success: facts were stored but none had entity_id IS NULL — possible regression to old entity-creation behavior');
+    }
+  }
+
   return {
     messagesProcessed: humanMessages.length,
     factsStored: totalStored,
@@ -291,6 +507,7 @@ async function runExtraction(db, client, { limit, since, batchSize = 30, dryRun 
     totalInputTokens,
     totalOutputTokens,
     batchCount: batches.length,
+    ...sweepMetrics,
   };
 }
 
@@ -339,7 +556,7 @@ async function main() {
 
     heartbeat.write(SERVICE_NAME, {
       checkInterval: 0,
-      status: 'ok',
+      status: stats.sweepKnownNamesUnattributed > 0 ? 'sweep-alert' : 'ok',
       metrics: stats,
     });
 
@@ -349,7 +566,15 @@ async function main() {
   Facts stored: ${stats.factsStored}
   Facts skipped: ${stats.factsSkipped}
   Batches: ${stats.batchCount}
-  Tokens: ${stats.totalInputTokens} in / ${stats.totalOutputTokens} out`);
+  Tokens: ${stats.totalInputTokens} in / ${stats.totalOutputTokens} out
+  Sweep: ${stats.sweepAvailableNullFacts} null facts, ${stats.sweepPathAMatched} Path A, ${stats.sweepPathBMatched} Path B, ${stats.sweepKnownNamesUnattributed} known unattributed`);
+
+    // Observable failure signal: exit non-zero if known aliases remain unattributed
+    if (stats.sweepKnownNamesUnattributed > 0) {
+      log.error({ count: stats.sweepKnownNamesUnattributed },
+        'Known aliases remain unattributed after sweep');
+      process.exit(2);
+    }
   } catch (err) {
     log.error({ err }, 'Extraction failed');
     heartbeat.write(SERVICE_NAME, {
@@ -369,7 +594,9 @@ module.exports = {
   parseAiResponse,
   buildBatches,
   formatBatchForPrompt,
+  getOpenCommitmentsContext,
   storeFacts,
+  runSweep,
   extractBatch,
   runExtraction,
   isLikelyBot,

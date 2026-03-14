@@ -12,7 +12,11 @@ struct RecorderConfig: Codable {
     var language: String = "auto"
     var micDevice: String = ""
     var micVadThreshold: Double = 0.01
-    var maxRecordingDurationSeconds: Int = 14400
+    var maxRecordingDurationSeconds: Int = 7200
+    /// Auto-stop if no audio detected within this many seconds of recording start (phantom recording guard).
+    var silenceOnsetTimeoutSeconds: Double = 90
+    /// Auto-stop if audio goes silent for this many seconds after being detected (early-exit guard).
+    var silenceExtendedTimeoutSeconds: Double = 300
     var heartbeatDir: String = "~/.reticle/heartbeats"
     var meetingApps: [String] = [
         "us.zoom.xos",              // Zoom
@@ -39,7 +43,9 @@ struct RecorderConfig: Codable {
         language = try c.decodeIfPresent(String.self, forKey: .language) ?? "auto"
         micDevice = try c.decodeIfPresent(String.self, forKey: .micDevice) ?? ""
         micVadThreshold = try c.decodeIfPresent(Double.self, forKey: .micVadThreshold) ?? 0.01
-        maxRecordingDurationSeconds = try c.decodeIfPresent(Int.self, forKey: .maxRecordingDurationSeconds) ?? 14400
+        maxRecordingDurationSeconds = try c.decodeIfPresent(Int.self, forKey: .maxRecordingDurationSeconds) ?? 7200
+        silenceOnsetTimeoutSeconds = try c.decodeIfPresent(Double.self, forKey: .silenceOnsetTimeoutSeconds) ?? 90
+        silenceExtendedTimeoutSeconds = try c.decodeIfPresent(Double.self, forKey: .silenceExtendedTimeoutSeconds) ?? 300
         heartbeatDir = try c.decodeIfPresent(String.self, forKey: .heartbeatDir) ?? "~/.reticle/heartbeats"
         meetingApps = try c.decodeIfPresent([String].self, forKey: .meetingApps) ?? [
             "us.zoom.xos", "com.microsoft.teams2", "com.tinyspeck.slackmacgap"
