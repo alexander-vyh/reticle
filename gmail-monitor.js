@@ -17,6 +17,7 @@ const heartbeat = require('./lib/heartbeat');
 const { validatePrerequisites } = require('./lib/startup-validation');
 const gmailApi = require('./lib/gmail-api');
 const ai = require('./lib/ai');
+const peopleStore = require('./lib/people-store');
 
 // Configuration
 const CONFIG = {
@@ -63,8 +64,8 @@ let accountId = null;
 // Sent-mail detection: use wider window on first run to cover restart gaps
 let sentMailFirstRun = true;
 
-// VIP senders (loaded from ~/.reticle/config/team.json)
-const VIPS = config.vipEmails;
+// VIP senders — refreshed from DB each poll cycle via peopleStore.getVipEmails()
+let VIPS = [];
 
 // VIP title patterns (case-insensitive)
 const VIP_TITLES = ['ceo', 'cto', 'cfo', 'coo', 'cmo', 'ciso', 'cpo', 'vp', 'vice president', 'president'];
@@ -1011,6 +1012,11 @@ async function checkSentEmails() {
  */
 async function checkEmails() {
   log.info('Checking for new emails');
+
+  // Refresh VIPs from DB each cycle so changes take effect without a restart
+  if (followupsDbConn) {
+    VIPS = peopleStore.getVipEmails(followupsDbConn);
+  }
 
   const emails = await getRecentEmails();
   const lastCheck = getLastCheckTime();
