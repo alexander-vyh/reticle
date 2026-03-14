@@ -82,6 +82,11 @@ struct CommitmentsResponse: Codable {
     let summary: CommitmentSummary
 }
 
+struct FeedbackSettingsResponse: Codable {
+    let weeklyTarget: String?
+    let scanWindowHours: String?
+}
+
 // MARK: - Client
 
 @MainActor
@@ -155,6 +160,18 @@ class GatewayClient: ObservableObject {
 
     func fetchStats() async throws -> FeedbackStats {
         return try await request("/feedback/stats")
+    }
+
+    func fetchFeedbackSettings() async throws -> FeedbackSettingsResponse {
+        return try await request("/feedback/settings")
+    }
+
+    func updateFeedbackSettings(weeklyTarget: Int? = nil, scanWindowHours: Int? = nil) async throws {
+        var body: [String: Any] = [:]
+        if let t = weeklyTarget { body["weeklyTarget"] = t }
+        if let s = scanWindowHours { body["scanWindowHours"] = s }
+        struct Response: Decodable { let ok: Bool }
+        let _: Response = try await request("/feedback/settings", method: "PATCH", body: body)
     }
 
     // MARK: - Commitments
