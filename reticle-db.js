@@ -244,13 +244,17 @@ function initDatabase() {
     CREATE UNIQUE INDEX IF NOT EXISTS idx_digest_unique ON digest_snapshots(account_id, snapshot_date, cadence);
 
     CREATE TABLE IF NOT EXISTS monitored_people (
-      id          TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(8)))),
-      email       TEXT UNIQUE NOT NULL,
-      name        TEXT,
-      slack_id    TEXT,
-      jira_id     TEXT,
-      resolved_at INTEGER,
-      created_at  INTEGER NOT NULL DEFAULT (strftime('%s','now'))
+      id               TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(8)))),
+      email            TEXT UNIQUE NOT NULL,
+      name             TEXT,
+      slack_id         TEXT,
+      jira_id          TEXT,
+      resolved_at      INTEGER,
+      created_at       INTEGER NOT NULL DEFAULT (strftime('%s','now')),
+      role             TEXT DEFAULT 'peer',
+      escalation_tier  TEXT,
+      title            TEXT,
+      team             TEXT
     );
 
     CREATE TABLE IF NOT EXISTS feedback_candidates (
@@ -267,6 +271,21 @@ function initDatabase() {
     );
     CREATE INDEX IF NOT EXISTS idx_feedback_status ON feedback_candidates(status);
   `);
+
+  // Idempotent migrations for existing databases
+  const mpCols = db.pragma('table_info(monitored_people)').map(c => c.name);
+  if (!mpCols.includes('role')) {
+    db.exec("ALTER TABLE monitored_people ADD COLUMN role TEXT DEFAULT 'peer'");
+  }
+  if (!mpCols.includes('escalation_tier')) {
+    db.exec('ALTER TABLE monitored_people ADD COLUMN escalation_tier TEXT');
+  }
+  if (!mpCols.includes('title')) {
+    db.exec('ALTER TABLE monitored_people ADD COLUMN title TEXT');
+  }
+  if (!mpCols.includes('team')) {
+    db.exec('ALTER TABLE monitored_people ADD COLUMN team TEXT');
+  }
 
   return db;
 }
