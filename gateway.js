@@ -46,6 +46,30 @@ app.delete('/people/:email', (req, res) => {
   res.json({ ok: true });
 });
 
+// PATCH /people/:email — update person fields (role, escalation_tier, title, team, name, slack_id)
+app.patch('/people/:email', (req, res) => {
+  try {
+    const email = decodeURIComponent(req.params.email);
+    const person = db.prepare('SELECT * FROM monitored_people WHERE email = ?').get(email);
+    if (!person) {
+      return res.status(404).json({ error: 'Person not found' });
+    }
+    const { role, escalation_tier, title, team, name, slack_id } = req.body;
+    const fields = {};
+    if (role !== undefined) fields.role = role;
+    if (escalation_tier !== undefined) fields.escalation_tier = escalation_tier;
+    if (title !== undefined) fields.title = title;
+    if (team !== undefined) fields.team = team;
+    if (name !== undefined) fields.name = name;
+    if (slack_id !== undefined) fields.slack_id = slack_id;
+
+    peopleStore.updatePerson(db, email, fields);
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // GET /feedback/candidates — pending candidates
 app.get('/feedback/candidates', (req, res) => {
   const candidates = db.prepare(
