@@ -19,22 +19,6 @@ app.use(express.json());
 
 const db = reticleDb.initDatabase();
 
-// Seed monitored_people from team.json if no VIPs/reports exist yet
-const existingVips = peopleStore.listPeopleByRole(db, 'vip');
-const existingReports = peopleStore.listPeopleByRole(db, 'direct_report');
-if (existingVips.length === 0 && config.vips && config.vips.length > 0) {
-  for (const v of config.vips) {
-    peopleStore.addPerson(db, { email: v.email, name: null, role: 'vip', title: v.title });
-  }
-  console.log(`Seeded ${config.vips.length} VIPs from team.json`);
-}
-if (existingReports.length === 0 && config.directReports && config.directReports.length > 0) {
-  for (const r of config.directReports) {
-    peopleStore.addPerson(db, { email: r.email, name: r.name, role: 'direct_report' });
-    if (r.slackId) peopleStore.updateSlackId(db, r.email, r.slackId);
-  }
-  console.log(`Seeded ${config.directReports.length} direct reports from team.json`);
-}
 // Seed team directory from dwTeamEmails
 const existingTeam = peopleStore.listTeamMembers(db);
 if (existingTeam.length === 0 && config.dwTeamEmails && config.dwTeamEmails.length > 0) {
@@ -84,6 +68,14 @@ app.patch('/people/:email', (req, res) => {
       return res.status(404).json({ error: 'Person not found' });
     }
     const { role, escalation_tier, title, team, name, slack_id } = req.body;
+    if (escalation_tier !== undefined && escalation_tier !== null) {
+      const validTiers = ['immediate', '4h', 'daily', 'weekly'];
+      if (!validTiers.includes(escalation_tier)) {
+        return res.status(400).json({
+          error: `Invalid escalation_tier. Must be one of: ${validTiers.join(', ')}`
+        });
+      }
+    }
     const fields = {};
     if (role !== undefined) fields.role = role;
     if (escalation_tier !== undefined) fields.escalation_tier = escalation_tier;

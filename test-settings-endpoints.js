@@ -81,7 +81,7 @@ async function testSettingsEndpoints() {
     console.log('  PASS: PATCH /people/:email returns 200 and updates role');
 
     // Test 2: PATCH /people/:email returns 200 and updates escalation_tier
-    const patchTierRes = await httpRequest(port, 'PATCH', `/people/${encodedEmail}`, { escalation_tier: 'high' });
+    const patchTierRes = await httpRequest(port, 'PATCH', `/people/${encodedEmail}`, { escalation_tier: '4h' });
     assert.strictEqual(patchTierRes.status, 200, `expected 200, got ${patchTierRes.status}: ${JSON.stringify(patchTierRes.body)}`);
     assert.strictEqual(patchTierRes.body.ok, true);
     console.log('  PASS: PATCH /people/:email returns 200 and updates escalation_tier');
@@ -99,7 +99,7 @@ async function testSettingsEndpoints() {
     const alice = listRes.body.people.find(p => p.email === 'alice@example.com');
     assert.ok(alice, 'alice should appear in GET /people response');
     assert.strictEqual(alice.role, 'direct_report', `expected role=direct_report, got ${alice.role}`);
-    assert.strictEqual(alice.escalation_tier, 'high', `expected escalation_tier=high, got ${alice.escalation_tier}`);
+    assert.strictEqual(alice.escalation_tier, '4h', `expected escalation_tier=4h, got ${alice.escalation_tier}`);
     console.log('  PASS: GET /people returns updated role and escalation_tier fields');
 
   } finally {
@@ -660,6 +660,60 @@ async function testEscalationThresholdFloors() {
   }
 }
 
+async function testInvalidEscalationTier() {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'reticle-tier-test-'));
+  const reticleDbPath = path.join(tmpDir, 'reticle.db');
+  const orgMemDbPath = path.join(tmpDir, 'org-memory.db');
+
+  process.env.RETICLE_DB_PATH = reticleDbPath;
+  process.env.ORG_MEMORY_DB_PATH = orgMemDbPath;
+
+  const seedDb = new Database(reticleDbPath);
+  seedDb.pragma('journal_mode = WAL');
+  seedDb.pragma('foreign_keys = ON');
+  seedDb.exec(`
+    CREATE TABLE IF NOT EXISTS monitored_people (
+      id               TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(8)))),
+      email            TEXT UNIQUE NOT NULL,
+      name             TEXT,
+      slack_id         TEXT,
+      jira_id          TEXT,
+      resolved_at      INTEGER,
+      created_at       INTEGER NOT NULL DEFAULT (strftime('%s','now')),
+      role             TEXT DEFAULT 'peer',
+      escalation_tier  TEXT,
+      title            TEXT,
+      team             TEXT
+    );
+  `);
+  seedDb.prepare(`INSERT INTO monitored_people (email, name, role) VALUES (?, ?, ?)`).run('tier-test@co.com', null, 'peer');
+  seedDb.close();
+
+  delete require.cache[require.resolve('./gateway')];
+  delete require.cache[require.resolve('./reticle-db')];
+  const app = require('./gateway');
+  const server = app.listen(0);
+  const port = server.address().port;
+
+  try {
+    // Test: PATCH /people/:email rejects invalid escalation_tier
+    const res = await httpRequest(port, 'PATCH', `/people/${encodeURIComponent('tier-test@co.com')}`, {
+      escalation_tier: 'banana'
+    });
+    assert.strictEqual(res.status, 400, `expected 400, got ${res.status}: ${JSON.stringify(res.body)}`);
+    console.log('  PASS: PATCH /people/:email rejects invalid escalation_tier');
+  } finally {
+    server.close();
+    try { fs.unlinkSync(reticleDbPath); } catch {}
+    try { fs.unlinkSync(reticleDbPath + '-wal'); } catch {}
+    try { fs.unlinkSync(reticleDbPath + '-shm'); } catch {}
+    try { fs.unlinkSync(orgMemDbPath); } catch {}
+    try { fs.unlinkSync(orgMemDbPath + '-wal'); } catch {}
+    try { fs.unlinkSync(orgMemDbPath + '-shm'); } catch {}
+    try { fs.rmdirSync(tmpDir); } catch {}
+  }
+}
+
 // --- Run tests ---
 console.log('settings endpoint tests:');
 
@@ -673,6 +727,7 @@ testSettingsEndpoints()
   })
   .then(() => testFilterEndpoints())
   .then(() => testEscalationThresholdFloors())
+  .then(() => testInvalidEscalationTier())
   .then(() => {
     console.log('All settings endpoint tests passed');
     process.exit(0);

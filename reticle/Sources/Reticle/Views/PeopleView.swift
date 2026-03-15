@@ -290,6 +290,7 @@ struct EscalationTierPicker: View {
                 Circle()
                     .fill(Color.orange)
                     .frame(width: 7, height: 7)
+                    .help("Overridden from role default")
             }
             Picker("Tier", selection: Binding(
                 get: { currentTier },
