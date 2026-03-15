@@ -6,6 +6,7 @@ const reticleDb = require('./reticle-db');
 const peopleStore = require('./lib/people-store');
 const slackReader = require('./lib/slack-reader');
 const feedbackTracker = require('./lib/feedback-tracker');
+const kg = require('./lib/knowledge-graph');
 const config = require('./lib/config');
 
 const app = express();
@@ -235,9 +236,13 @@ app.post('/api/commitments/:id/resolve', (req, res) => {
   const fact = omDb.prepare('SELECT * FROM facts WHERE id = ?').get(req.params.id);
   if (!fact) return res.status(404).json({ error: 'fact not found' });
 
-  const now = Math.floor(Date.now() / 1000);
-  omDb.prepare('UPDATE facts SET resolution = ?, resolved_at = ? WHERE id = ?')
-    .run(resolution, now, req.params.id);
+  kg.resolveEvent(omDb, {
+    factId: req.params.id,
+    entityId: fact.entity_id,
+    attribute: fact.attribute,
+    resolution,
+    rationale: 'manual',
+  });
 
   res.json({ ok: true, id: req.params.id, resolution });
 });
@@ -436,6 +441,77 @@ app.post('/api/entities/:id/unmonitor', (req, res) => {
 
   omDb.prepare('UPDATE entities SET monitored = 0 WHERE id = ?').run(req.params.id);
   res.json({ ok: true, id: req.params.id, monitored: false });
+});
+
+// GET /api/entities/:id/facts — all facts for an entity (state + event, open + resolved)
+app.get('/api/entities/:id/facts', (req, res) => {
+  const omDb = getOrgMemDb();
+  const entity = omDb.prepare('SELECT id FROM entities WHERE id = ?').get(req.params.id);
+  if (!entity) return res.status(404).json({ error: 'entity not found' });
+
+  let sql = `
+    SELECT f.id, f.attribute, f.value, f.fact_type, f.valid_from, f.valid_to,
+           f.resolution, f.resolved_at, f.confidence, f.source_message_id,
+           f.resolves_fact_id, f.rationale
+    FROM facts f
+    WHERE f.entity_id = ?
+  `;
+  const params = [req.params.id];
+
+  if (req.query.factType) {
+    sql += ' AND f.fact_type = ?';
+    params.push(req.query.factType);
+  }
+  if (req.query.attribute) {
+    sql += ' AND f.attribute = ?';
+    params.push(req.query.attribute);
+  }
+
+  sql += ' ORDER BY f.valid_from DESC';
+  const rows = omDb.prepare(sql).all(...params);
+
+  res.json({
+    facts: rows.map(f => ({
+      id: f.id,
+      attribute: f.attribute,
+      value: f.value,
+      factType: f.fact_type,
+      validFrom: f.valid_from,
+      validTo: f.valid_to,
+      resolution: f.resolution,
+      resolvedAt: f.resolved_at,
+      confidence: f.confidence,
+      sourceMessageId: f.source_message_id,
+      resolvesFactId: f.resolves_fact_id,
+      rationale: f.rationale,
+    })),
+  });
+});
+
+// GET /api/unattributed — facts with entity_id IS NULL (needs review queue)
+app.get('/api/unattributed', (req, res) => {
+  const omDb = getOrgMemDb();
+
+  const rows = omDb.prepare(`
+    SELECT f.id, f.mentioned_name, f.attribute, f.value, f.fact_type,
+           f.valid_from, f.resolution, f.source_message_id
+    FROM facts f
+    WHERE f.entity_id IS NULL
+    ORDER BY f.valid_from ASC
+  `).all();
+
+  res.json({
+    facts: rows.map(f => ({
+      id: f.id,
+      mentionedName: f.mentioned_name,
+      attribute: f.attribute,
+      value: f.value,
+      factType: f.fact_type,
+      validFrom: f.valid_from,
+      resolution: f.resolution,
+      sourceMessageId: f.source_message_id,
+    })),
+  });
 });
 
 // Health check

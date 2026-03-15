@@ -111,40 +111,8 @@ function testFeedbackCandidateFlow() {
 // --- Commitments endpoint tests (HTTP-level) ---
 
 function setupOrgMemoryDb(dbPath) {
-  const db = new Database(dbPath);
-  db.pragma('journal_mode = WAL');
-  db.pragma('foreign_keys = ON');
-
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS raw_messages (
-      id TEXT PRIMARY KEY, source TEXT NOT NULL, source_id TEXT NOT NULL,
-      channel_id TEXT, channel_name TEXT, author_id TEXT, author_ext_id TEXT,
-      author_name TEXT, content TEXT NOT NULL, thread_id TEXT,
-      occurred_at INTEGER NOT NULL, metadata TEXT, extracted INTEGER DEFAULT 0,
-      created_at INTEGER NOT NULL
-    );
-    CREATE TABLE IF NOT EXISTS entities (
-      id TEXT PRIMARY KEY, entity_type TEXT NOT NULL, canonical_name TEXT NOT NULL,
-      is_active INTEGER DEFAULT 1, monitored INTEGER DEFAULT 0, created_at INTEGER NOT NULL
-    );
-    CREATE TABLE IF NOT EXISTS facts (
-      id TEXT PRIMARY KEY, entity_id TEXT NOT NULL REFERENCES entities(id),
-      attribute TEXT NOT NULL, value TEXT,
-      fact_type TEXT NOT NULL DEFAULT 'state' CHECK(fact_type IN ('state', 'event')),
-      valid_from INTEGER NOT NULL, valid_to INTEGER, confidence REAL DEFAULT 1.0,
-      source_message_id TEXT, last_confirmed_at INTEGER, last_confirmed_source TEXT,
-      resolution TEXT CHECK(resolution IS NULL OR resolution IN ('open', 'completed', 'abandoned', 'superseded')),
-      resolved_at INTEGER, extracted_at INTEGER NOT NULL
-    );
-    CREATE TABLE IF NOT EXISTS identity_map (
-      entity_id TEXT NOT NULL REFERENCES entities(id),
-      source TEXT NOT NULL, external_id TEXT NOT NULL,
-      display_name TEXT, jira_id TEXT,
-      resolved_at INTEGER, metadata TEXT,
-      PRIMARY KEY (source, external_id)
-    );
-  `);
-  return db;
+  const { initDatabase } = require('./lib/org-memory-db');
+  return initDatabase(dbPath);
 }
 
 function httpRequest(port, method, path, body) {
@@ -237,7 +205,14 @@ async function testCommitmentsEndpoints() {
     // Verify it no longer appears in open commitments
     const afterResolve = await httpRequest(port, 'GET', '/api/commitments');
     assert.strictEqual(afterResolve.body.summary.total, 1, 'resolved fact should no longer appear');
-    console.log('  PASS: POST /api/commitments/:id/resolve with valid resolution returns ok');
+    // Verify evidence row was created (not just raw UPDATE)
+    const reopenDb = require('better-sqlite3')(orgMemDbPath);
+    const evidence = reopenDb.prepare('SELECT * FROM facts WHERE resolves_fact_id = ?').get('fact-1');
+    assert.ok(evidence, 'resolve should create an evidence row with resolves_fact_id');
+    assert.strictEqual(evidence.attribute, 'completion_signal');
+    assert.strictEqual(evidence.rationale, 'manual');
+    reopenDb.close();
+    console.log('  PASS: POST /api/commitments/:id/resolve creates evidence row');
 
     // Test 3: POST /api/commitments/:id/resolve with invalid resolution returns 400
     const badRes = await httpRequest(port, 'POST', '/api/commitments/fact-2/resolve', { resolution: 'invalid' });
@@ -438,6 +413,84 @@ async function testEntityDetailAndMerge() {
   }
 }
 
+async function testEntityFactsAndUnattributed() {
+  const os = require('os');
+  const path = require('path');
+  const fs = require('fs');
+
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'reticle-facts-test-'));
+  const orgMemDbPath = path.join(tmpDir, 'org-memory.db');
+  const reticleDbPath = path.join(tmpDir, 'reticle.db');
+
+  process.env.ORG_MEMORY_DB_PATH = orgMemDbPath;
+  process.env.RETICLE_DB_PATH = reticleDbPath;
+
+  const omDb = setupOrgMemoryDb(orgMemDbPath);
+  const now = Math.floor(Date.now() / 1000);
+
+  omDb.prepare(`INSERT INTO entities (id, entity_type, canonical_name, monitored, created_at)
+    VALUES (?, ?, ?, ?, ?)`).run('ent-a', 'person', 'Alice', 1, now);
+  // State facts
+  omDb.prepare(`INSERT INTO facts (id, entity_id, attribute, value, fact_type, valid_from, extracted_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?)`).run('sf-1', 'ent-a', 'role', 'Senior Engineer', 'state', now - 86400, now);
+  omDb.prepare(`INSERT INTO facts (id, entity_id, attribute, value, fact_type, valid_from, extracted_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?)`).run('sf-2', 'ent-a', 'team', 'Platform', 'state', now - 86400, now);
+  // Open commitment
+  omDb.prepare(`INSERT INTO facts (id, entity_id, attribute, value, fact_type, valid_from, resolution, extracted_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)`).run('ef-1', 'ent-a', 'committed_to', 'Ship auth fix', 'event', now - 3600, 'open', now);
+  // Resolved commitment
+  omDb.prepare(`INSERT INTO facts (id, entity_id, attribute, value, fact_type, valid_from, resolution, resolved_at, extracted_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`).run('ef-2', 'ent-a', 'asked_to', 'Review docs', 'event', now - 86400 * 3, 'completed', now - 86400, now);
+  // Unattributed fact
+  omDb.prepare(`INSERT INTO facts (id, entity_id, mentioned_name, attribute, value, fact_type, valid_from, resolution, extracted_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`).run('uf-1', null, 'Unknown Person', 'committed_to', 'Send report', 'event', now - 3600, 'open', now);
+  omDb.prepare(`INSERT INTO facts (id, entity_id, mentioned_name, attribute, value, fact_type, valid_from, resolution, extracted_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`).run('uf-2', null, 'Another Unknown', 'asked_to', 'Fix the build', 'event', now - 7200, 'open', now);
+  omDb.close();
+
+  jest_clearGatewayCache();
+  const app = require('./gateway');
+  const server = app.listen(0);
+  const port = server.address().port;
+
+  try {
+    // Test 1: GET /api/entities/:id/facts returns all facts (state + event, open + resolved)
+    const factsRes = await httpRequest(port, 'GET', '/api/entities/ent-a/facts');
+    assert.strictEqual(factsRes.status, 200);
+    assert.ok(Array.isArray(factsRes.body.facts), 'facts should be an array');
+    assert.strictEqual(factsRes.body.facts.length, 4, 'should return all 4 facts for Alice');
+    const roles = factsRes.body.facts.filter(f => f.attribute === 'role');
+    assert.strictEqual(roles.length, 1, 'should include state facts');
+    assert.strictEqual(roles[0].value, 'Senior Engineer');
+    const resolved = factsRes.body.facts.filter(f => f.resolution === 'completed');
+    assert.strictEqual(resolved.length, 1, 'should include resolved facts');
+    console.log('  PASS: GET /api/entities/:id/facts returns all facts');
+
+    // Test 2: GET /api/entities/:id/facts?factType=state returns only state facts
+    const stateRes = await httpRequest(port, 'GET', '/api/entities/ent-a/facts?factType=state');
+    assert.strictEqual(stateRes.body.facts.length, 2, 'should return only state facts');
+    assert.ok(stateRes.body.facts.every(f => f.factType === 'state'));
+    console.log('  PASS: GET /api/entities/:id/facts?factType=state filters correctly');
+
+    // Test 3: GET /api/unattributed returns facts with entity_id IS NULL
+    const unRes = await httpRequest(port, 'GET', '/api/unattributed');
+    assert.strictEqual(unRes.status, 200);
+    assert.ok(Array.isArray(unRes.body.facts));
+    assert.strictEqual(unRes.body.facts.length, 2);
+    assert.strictEqual(unRes.body.facts[0].mentionedName, 'Another Unknown');
+    assert.strictEqual(unRes.body.facts[1].mentionedName, 'Unknown Person');
+    console.log('  PASS: GET /api/unattributed returns null-entity facts');
+
+  } finally {
+    server.close();
+    try { fs.unlinkSync(orgMemDbPath); } catch {}
+    try { fs.unlinkSync(reticleDbPath); } catch {}
+    try { fs.unlinkSync(orgMemDbPath + '-wal'); } catch {}
+    try { fs.unlinkSync(orgMemDbPath + '-shm'); } catch {}
+    try { fs.rmdirSync(tmpDir); } catch {}
+  }
+}
+
 // --- Run all tests ---
 
 console.log('gateway tests:');
@@ -451,6 +504,7 @@ testFeedbackCandidateFlow();
 testCommitmentsEndpoints()
   .then(() => testEntitiesEndpoints())
   .then(() => testEntityDetailAndMerge())
+  .then(() => testEntityFactsAndUnattributed())
   .then(() => {
     console.log('All gateway tests passed');
     process.exit(0);
