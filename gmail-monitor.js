@@ -31,6 +31,9 @@ const CONFIG = {
   batchQueueFile: path.join(__dirname, 'gmail-batch-queue.json')
 };
 
+// Poll timer — stored so SIGHUP can reset it with updated interval
+let pollTimer = null;
+
 // Batch queue for non-urgent emails
 let batchQueue = [];
 let lastBatchHour = -1;
@@ -1328,7 +1331,7 @@ async function main() {
   await checkEmails();
 
   // Loop
-  setInterval(async () => {
+  pollTimer = setInterval(async () => {
     try {
       await checkEmails();
     } catch (error) {
@@ -1362,6 +1365,24 @@ process.on('SIGHUP', () => {
     }
   } catch (e) {
     log.warn({ error: e.message }, 'Failed to reload settings, keeping current values');
+  }
+
+  // Reset the timer so the new interval takes effect immediately
+  if (pollTimer) {
+    clearInterval(pollTimer);
+    pollTimer = setInterval(async () => {
+      try {
+        await checkEmails();
+      } catch (error) {
+        log.error({ err: error }, 'Check error');
+        heartbeat.write('gmail-monitor', {
+          checkInterval: CONFIG.checkInterval,
+          status: 'error',
+          errors: { lastError: error.message, lastErrorAt: Date.now(), countSinceStart: ++errorCount }
+        });
+      }
+    }, CONFIG.checkInterval);
+    log.info({ newInterval: CONFIG.checkInterval }, 'Poll timer reset');
   }
 });
 

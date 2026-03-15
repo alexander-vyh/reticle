@@ -54,6 +54,9 @@ let last4hCheck = null;
 let lastEodDate = null;
 let errorCount = 0;
 
+// Check timer — stored so SIGHUP can reset it with updated interval
+let checkTimer = null;
+
 /**
  * Send Slack DM
  */
@@ -454,7 +457,7 @@ async function main() {
   await runChecks();
 
   // Set up interval
-  setInterval(runChecks, CONFIG.checkInterval);
+  checkTimer = setInterval(runChecks, CONFIG.checkInterval);
 }
 
 function shutdown(signal) {
@@ -485,6 +488,13 @@ process.on('SIGHUP', () => {
     }
   } catch (e) {
     log.warn({ error: e.message }, 'Failed to reload settings, keeping current values');
+  }
+
+  // Reset the timer so the new interval takes effect immediately
+  if (checkTimer) {
+    clearInterval(checkTimer);
+    checkTimer = setInterval(runChecks, CONFIG.checkInterval);
+    log.info({ newInterval: CONFIG.checkInterval }, 'Poll timer reset');
   }
 });
 
