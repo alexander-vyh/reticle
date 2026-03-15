@@ -209,6 +209,42 @@ struct SettingsView: View {
         .navigationTitle("Settings")
         .task {
             await loadAccounts()
+            await loadSettings()
+        }
+        .onChange(of: gmailInterval) { _, newValue in
+            Task {
+                try? await gateway.updateSettings([
+                    "polling": ["gmailIntervalMinutes": newValue]
+                ])
+            }
+        }
+        .onChange(of: followupInterval) { _, newValue in
+            Task {
+                try? await gateway.updateSettings([
+                    "polling": ["followupCheckIntervalMinutes": newValue]
+                ])
+            }
+        }
+        .onChange(of: emailEscalationHours) { _, newValue in
+            Task {
+                try? await gateway.updateSettings([
+                    "thresholds": ["followupEscalationEmailHours": newValue]
+                ])
+            }
+        }
+        .onChange(of: slackDmEscalationHours) { _, newValue in
+            Task {
+                try? await gateway.updateSettings([
+                    "thresholds": ["followupEscalationSlackDmHours": newValue]
+                ])
+            }
+        }
+        .onChange(of: slackMentionEscalationHours) { _, newValue in
+            Task {
+                try? await gateway.updateSettings([
+                    "thresholds": ["followupEscalationSlackMentionHours": newValue]
+                ])
+            }
         }
     }
 
@@ -236,6 +272,20 @@ struct SettingsView: View {
             loadError = nil
         } catch {
             loadError = error.localizedDescription
+        }
+    }
+
+    private func loadSettings() async {
+        if let settings = try? await gateway.fetchSettings() {
+            if let polling = settings.polling {
+                gmailInterval = polling.gmailIntervalMinutes ?? 5
+                followupInterval = polling.followupCheckIntervalMinutes ?? 15
+            }
+            if let thresholds = settings.thresholds {
+                emailEscalationHours = thresholds.followupEscalationEmailHours ?? 48
+                slackDmEscalationHours = thresholds.followupEscalationSlackDmHours ?? 72
+                slackMentionEscalationHours = thresholds.followupEscalationSlackMentionHours ?? 168
+            }
         }
     }
 

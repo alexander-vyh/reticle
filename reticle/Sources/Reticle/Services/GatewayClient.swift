@@ -116,6 +116,21 @@ struct AccountsResponse: Codable {
     let jira: JiraAccountInfo
 }
 
+struct ReticleSettings: Codable {
+    var polling: PollingSettings?
+    var thresholds: ThresholdSettings?
+
+    struct PollingSettings: Codable {
+        var gmailIntervalMinutes: Int?
+        var followupCheckIntervalMinutes: Int?
+    }
+    struct ThresholdSettings: Codable {
+        var followupEscalationEmailHours: Int?
+        var followupEscalationSlackDmHours: Int?
+        var followupEscalationSlackMentionHours: Int?
+    }
+}
+
 // MARK: - Client
 
 @MainActor
@@ -216,6 +231,17 @@ class GatewayClient: ObservableObject {
             method: "POST",
             body: ["resolution": "completed"]
         )
+    }
+
+    // MARK: - Settings
+
+    func fetchSettings() async throws -> ReticleSettings {
+        return try await request("/settings")
+    }
+
+    func updateSettings(_ settings: [String: Any]) async throws {
+        struct Response: Decodable { let ok: Bool }
+        let _: Response = try await request("/settings", method: "PATCH", body: settings)
     }
 
     // MARK: - Accounts
