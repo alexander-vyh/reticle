@@ -413,25 +413,26 @@ struct AddPersonForm: View {
     }
 
     private func submit() async {
-        try? await gateway.addPerson(email: email, name: name)
-
-        var extraFields: [String: Any] = [:]
-
         switch selectedTab {
         case .monitored:
-            break
+            try? await gateway.addPerson(email: email, name: name)
         case .directReports:
-            extraFields["role"] = "direct_report"
-            if !slackId.isEmpty { extraFields["slack_id"] = slackId }
+            try? await gateway.addPerson(
+                email: email, name: name, role: "direct_report"
+            )
+            if !slackId.isEmpty {
+                try? await gateway.updatePerson(email: email, fields: ["slack_id": slackId])
+            }
         case .vips:
-            extraFields["role"] = "vip"
-            if !title.isEmpty { extraFields["title"] = title }
+            try? await gateway.addPerson(
+                email: email, name: name, role: "vip",
+                title: title.isEmpty ? nil : title
+            )
         case .team:
-            extraFields["team"] = team.isEmpty ? nil : team
-        }
-
-        if !extraFields.isEmpty {
-            try? await gateway.updatePerson(email: email, fields: extraFields)
+            try? await gateway.addPerson(
+                email: email, name: name,
+                team: team.isEmpty ? nil : team
+            )
         }
 
         await onAdd()

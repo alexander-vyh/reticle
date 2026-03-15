@@ -172,9 +172,13 @@ class GatewayClient: ObservableObject {
         return res.people
     }
 
-    func addPerson(email: String, name: String) async throws {
+    func addPerson(email: String, name: String, role: String? = nil, title: String? = nil, team: String? = nil) async throws {
         struct Response: Decodable { let ok: Bool }
-        let _: Response = try await request("/people", method: "POST", body: ["email": email, "name": name])
+        var body: [String: Any] = ["email": email, "name": name]
+        if let role = role { body["role"] = role }
+        if let title = title { body["title"] = title }
+        if let team = team { body["team"] = team }
+        let _: Response = try await request("/people", method: "POST", body: body)
     }
 
     func removePerson(email: String) async throws {

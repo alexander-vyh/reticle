@@ -164,7 +164,6 @@ private struct NotificationsSection: View {
     var body: some View {
         Section("Gmail Polling") {
             Picker("Check interval", selection: $gmailInterval) {
-                Text("1 min").tag(1)
                 Text("5 min").tag(5)
                 Text("15 min").tag(15)
                 Text("30 min").tag(30)
@@ -195,7 +194,7 @@ private struct NotificationsSection: View {
             }
 
             Stepper("Email escalation: \(emailEscalationHours)h",
-                    value: $emailEscalationHours, in: 1...168)
+                    value: $emailEscalationHours, in: 24...168)
             .onChange(of: emailEscalationHours) { _, newValue in
                 Task {
                     try? await gateway.updateSettings([
@@ -205,7 +204,7 @@ private struct NotificationsSection: View {
             }
 
             Stepper("Slack DM escalation: \(slackDmEscalationHours)h",
-                    value: $slackDmEscalationHours, in: 1...168)
+                    value: $slackDmEscalationHours, in: 8...168)
             .onChange(of: slackDmEscalationHours) { _, newValue in
                 Task {
                     try? await gateway.updateSettings([
@@ -215,7 +214,7 @@ private struct NotificationsSection: View {
             }
 
             Stepper("Slack mention escalation: \(slackMentionEscalationHours)h",
-                    value: $slackMentionEscalationHours, in: 1...336)
+                    value: $slackMentionEscalationHours, in: 24...336)
             .onChange(of: slackMentionEscalationHours) { _, newValue in
                 Task {
                     try? await gateway.updateSettings([

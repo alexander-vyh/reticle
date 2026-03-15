@@ -568,6 +568,98 @@ async function testFilterEndpoints() {
   }
 }
 
+async function testEscalationThresholdFloors() {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'reticle-threshold-test-'));
+  const reticleDbPath = path.join(tmpDir, 'reticle.db');
+  const orgMemDbPath = path.join(tmpDir, 'org-memory.db');
+  const configDir = path.join(tmpDir, 'config');
+  const heartbeatDir = path.join(tmpDir, 'heartbeats');
+  fs.mkdirSync(configDir, { recursive: true });
+  fs.mkdirSync(heartbeatDir, { recursive: true });
+
+  const secrets = {
+    slackBotToken: 'xoxb-test', slackUserId: 'U0TEST', gmailAccount: 'test@example.com',
+    gatewayPort: 3001
+  };
+  fs.writeFileSync(path.join(configDir, 'secrets.json'), JSON.stringify(secrets));
+  fs.writeFileSync(path.join(configDir, 'team.json'), JSON.stringify({ filterPatterns: {} }));
+
+  process.env.RETICLE_DB_PATH = reticleDbPath;
+  process.env.ORG_MEMORY_DB_PATH = orgMemDbPath;
+  process.env.RETICLE_CONFIG_DIR = configDir;
+  process.env.RETICLE_HEARTBEAT_DIR = heartbeatDir;
+
+  delete require.cache[require.resolve('./gateway')];
+  delete require.cache[require.resolve('./reticle-db')];
+  delete require.cache[require.resolve('./lib/config')];
+
+  const app = require('./gateway');
+  const server = app.listen(0);
+  const port = server.address().port;
+
+  try {
+    // Test 1: below email floor (24h) returns 400
+    const emailFloorRes = await httpRequest(port, 'PATCH', '/settings', {
+      thresholds: { followupEscalationEmailHours: 23 }
+    });
+    assert.strictEqual(emailFloorRes.status, 400, `expected 400 for email hours below floor, got ${emailFloorRes.status}`);
+    assert.ok(emailFloorRes.body.error.includes('followupEscalationEmailHours'), 'error should name the field');
+    assert.strictEqual(emailFloorRes.body.floor, 24, 'floor should be 24');
+    console.log('  PASS: PATCH /settings rejects followupEscalationEmailHours below 24');
+
+    // Test 2: below Slack DM floor (8h) returns 400
+    const dmFloorRes = await httpRequest(port, 'PATCH', '/settings', {
+      thresholds: { followupEscalationSlackDmHours: 7 }
+    });
+    assert.strictEqual(dmFloorRes.status, 400, `expected 400 for slack DM hours below floor, got ${dmFloorRes.status}`);
+    assert.strictEqual(dmFloorRes.body.floor, 8, 'floor should be 8');
+    console.log('  PASS: PATCH /settings rejects followupEscalationSlackDmHours below 8');
+
+    // Test 3: below Slack mention floor (24h) returns 400
+    const mentionFloorRes = await httpRequest(port, 'PATCH', '/settings', {
+      thresholds: { followupEscalationSlackMentionHours: 20 }
+    });
+    assert.strictEqual(mentionFloorRes.status, 400, `expected 400 for slack mention hours below floor, got ${mentionFloorRes.status}`);
+    assert.strictEqual(mentionFloorRes.body.floor, 24, 'floor should be 24');
+    console.log('  PASS: PATCH /settings rejects followupEscalationSlackMentionHours below 24');
+
+    // Test 4: at-floor values are accepted
+    const atFloorRes = await httpRequest(port, 'PATCH', '/settings', {
+      thresholds: {
+        followupEscalationEmailHours: 24,
+        followupEscalationSlackDmHours: 8,
+        followupEscalationSlackMentionHours: 24
+      }
+    });
+    assert.strictEqual(atFloorRes.status, 200, `expected 200 for at-floor values, got ${atFloorRes.status}`);
+    assert.strictEqual(atFloorRes.body.ok, true);
+    console.log('  PASS: PATCH /settings accepts threshold values at the floor');
+
+    // Test 5: above-floor values are accepted
+    const aboveFloorRes = await httpRequest(port, 'PATCH', '/settings', {
+      thresholds: {
+        followupEscalationEmailHours: 48,
+        followupEscalationSlackDmHours: 12,
+        followupEscalationSlackMentionHours: 72
+      }
+    });
+    assert.strictEqual(aboveFloorRes.status, 200, `expected 200 for above-floor values, got ${aboveFloorRes.status}`);
+    console.log('  PASS: PATCH /settings accepts threshold values above the floor');
+
+  } finally {
+    server.close();
+    delete process.env.RETICLE_HEARTBEAT_DIR;
+    delete process.env.RETICLE_CONFIG_DIR;
+    try { fs.unlinkSync(reticleDbPath); } catch {}
+    try { fs.unlinkSync(reticleDbPath + '-wal'); } catch {}
+    try { fs.unlinkSync(reticleDbPath + '-shm'); } catch {}
+    try { fs.unlinkSync(orgMemDbPath); } catch {}
+    try { fs.unlinkSync(orgMemDbPath + '-wal'); } catch {}
+    try { fs.unlinkSync(orgMemDbPath + '-shm'); } catch {}
+    try { fs.rmSync(tmpDir, { recursive: true }); } catch {}
+  }
+}
+
 // --- Run tests ---
 console.log('settings endpoint tests:');
 
@@ -580,6 +672,7 @@ testSettingsEndpoints()
     return testSettingsJsonEndpoints();
   })
   .then(() => testFilterEndpoints())
+  .then(() => testEscalationThresholdFloors())
   .then(() => {
     console.log('All settings endpoint tests passed');
     process.exit(0);

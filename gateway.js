@@ -52,11 +52,11 @@ app.get('/people', (req, res) => {
 
 // POST /people — add person by email (triggers Slack resolution)
 app.post('/people', (req, res) => {
-  const { email, name } = req.body;
+  const { email, name, role, title, team } = req.body;
   if (!email) return res.status(400).json({ error: 'email required' });
 
   try {
-    peopleStore.addPerson(db, { email, name });
+    peopleStore.addPerson(db, { email, name: name || null, role: role || 'peer', title: title || null, team: team || null });
   } catch (err) {
     return res.status(500).json({ error: 'failed to add person' });
   }
@@ -412,6 +412,24 @@ app.get('/settings', (req, res) => {
 // PATCH /settings — validate, write atomically, SIGHUP affected services
 app.patch('/settings', (req, res) => {
   try {
+    // Validate escalation threshold floors
+    if (req.body.thresholds) {
+      const t = req.body.thresholds;
+      const floors = {
+        followupEscalationEmailHours: 24,
+        followupEscalationSlackDmHours: 8,
+        followupEscalationSlackMentionHours: 24
+      };
+      for (const [key, floor] of Object.entries(floors)) {
+        if (t[key] !== undefined && t[key] < floor) {
+          return res.status(400).json({
+            error: `${key} minimum is ${floor} hours`,
+            floor
+          });
+        }
+      }
+    }
+
     const settingsPath = path.join(config.configDir, 'settings.json');
     let current = {};
     if (fs.existsSync(settingsPath)) {
