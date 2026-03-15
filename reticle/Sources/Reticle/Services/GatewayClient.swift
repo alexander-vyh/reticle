@@ -87,6 +87,11 @@ struct FeedbackSettingsResponse: Codable {
     let scanWindowHours: String?
 }
 
+struct FilterPatterns: Codable {
+    let companyDomain: String?
+    let dwGroupEmail: String?
+}
+
 struct SlackAccountInfo: Codable {
     let identifier: String?
     let connected: Bool
@@ -216,6 +221,20 @@ class GatewayClient: ObservableObject {
         if let s = scanWindowHours { body["scanWindowHours"] = s }
         struct Response: Decodable { let ok: Bool }
         let _: Response = try await request("/feedback/settings", method: "PATCH", body: body)
+    }
+
+    // MARK: - Filters
+
+    func fetchFilters() async throws -> FilterPatterns {
+        return try await request("/config/filters")
+    }
+
+    func updateFilters(companyDomain: String? = nil, dwGroupEmail: String? = nil) async throws {
+        var body: [String: Any] = [:]
+        if let d = companyDomain { body["companyDomain"] = d }
+        if let g = dwGroupEmail { body["dwGroupEmail"] = g }
+        struct Response: Decodable { let ok: Bool }
+        let _: Response = try await request("/config/filters", method: "PATCH", body: body)
     }
 
     // MARK: - Commitments

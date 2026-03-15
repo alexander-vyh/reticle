@@ -497,6 +497,77 @@ async function testSettingsJsonEndpoints() {
   }
 }
 
+async function testFilterEndpoints() {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'reticle-filters-test-'));
+  const reticleDbPath = path.join(tmpDir, 'reticle.db');
+  const orgMemDbPath = path.join(tmpDir, 'org-memory.db');
+  const configDir = path.join(tmpDir, 'config');
+  fs.mkdirSync(configDir, { recursive: true });
+
+  const secrets = {
+    slackBotToken: 'xoxb-test', slackUserId: 'U0TEST', gmailAccount: 'test@example.com',
+    gatewayPort: 3001
+  };
+  fs.writeFileSync(path.join(configDir, 'secrets.json'), JSON.stringify(secrets));
+  // team.json with existing filterPatterns
+  const team = {
+    filterPatterns: { companyDomain: 'initial.com', dwGroupEmail: 'group@initial.com' },
+    vips: [], directReports: [], dwTeamEmails: []
+  };
+  fs.writeFileSync(path.join(configDir, 'team.json'), JSON.stringify(team, null, 2));
+
+  process.env.RETICLE_DB_PATH = reticleDbPath;
+  process.env.ORG_MEMORY_DB_PATH = orgMemDbPath;
+  process.env.RETICLE_CONFIG_DIR = configDir;
+
+  delete require.cache[require.resolve('./gateway')];
+  delete require.cache[require.resolve('./reticle-db')];
+  delete require.cache[require.resolve('./lib/config')];
+
+  const app = require('./gateway');
+  const server = app.listen(0);
+  const port = server.address().port;
+
+  try {
+    // Test 1: GET /config/filters returns filterPatterns from team.json
+    const getRes = await httpRequest(port, 'GET', '/config/filters');
+    assert.strictEqual(getRes.status, 200, `expected 200, got ${getRes.status}: ${JSON.stringify(getRes.body)}`);
+    assert.strictEqual(getRes.body.companyDomain, 'initial.com', `expected companyDomain='initial.com', got '${getRes.body.companyDomain}'`);
+    assert.strictEqual(getRes.body.dwGroupEmail, 'group@initial.com', `expected dwGroupEmail='group@initial.com', got '${getRes.body.dwGroupEmail}'`);
+    console.log('  PASS: GET /config/filters returns filterPatterns from team.json');
+
+    // Test 2: PATCH /config/filters updates companyDomain in team.json
+    const patchRes = await httpRequest(port, 'PATCH', '/config/filters', { companyDomain: 'updated.com' });
+    assert.strictEqual(patchRes.status, 200, `expected 200, got ${patchRes.status}: ${JSON.stringify(patchRes.body)}`);
+    assert.strictEqual(patchRes.body.ok, true);
+    // Verify team.json was updated atomically
+    const updated = JSON.parse(fs.readFileSync(path.join(configDir, 'team.json'), 'utf-8'));
+    assert.strictEqual(updated.filterPatterns.companyDomain, 'updated.com', 'companyDomain should be updated');
+    assert.strictEqual(updated.filterPatterns.dwGroupEmail, 'group@initial.com', 'dwGroupEmail should be preserved');
+    console.log('  PASS: PATCH /config/filters updates companyDomain atomically');
+
+    // Test 3: PATCH /config/filters updates dwGroupEmail
+    const patchGroupRes = await httpRequest(port, 'PATCH', '/config/filters', { dwGroupEmail: 'newgroup@updated.com' });
+    assert.strictEqual(patchGroupRes.status, 200, `expected 200, got ${patchGroupRes.status}: ${JSON.stringify(patchGroupRes.body)}`);
+    assert.strictEqual(patchGroupRes.body.ok, true);
+    const updated2 = JSON.parse(fs.readFileSync(path.join(configDir, 'team.json'), 'utf-8'));
+    assert.strictEqual(updated2.filterPatterns.dwGroupEmail, 'newgroup@updated.com', 'dwGroupEmail should be updated');
+    assert.strictEqual(updated2.filterPatterns.companyDomain, 'updated.com', 'companyDomain should be preserved');
+    console.log('  PASS: PATCH /config/filters updates dwGroupEmail atomically');
+
+  } finally {
+    server.close();
+    delete process.env.RETICLE_CONFIG_DIR;
+    try { fs.unlinkSync(reticleDbPath); } catch {}
+    try { fs.unlinkSync(reticleDbPath + '-wal'); } catch {}
+    try { fs.unlinkSync(reticleDbPath + '-shm'); } catch {}
+    try { fs.unlinkSync(orgMemDbPath); } catch {}
+    try { fs.unlinkSync(orgMemDbPath + '-wal'); } catch {}
+    try { fs.unlinkSync(orgMemDbPath + '-shm'); } catch {}
+    try { fs.rmSync(tmpDir, { recursive: true }); } catch {}
+  }
+}
+
 // --- Run tests ---
 console.log('settings endpoint tests:');
 
@@ -508,6 +579,7 @@ testSettingsEndpoints()
     testConfigSettingsLoader();
     return testSettingsJsonEndpoints();
   })
+  .then(() => testFilterEndpoints())
   .then(() => {
     console.log('All settings endpoint tests passed');
     process.exit(0);

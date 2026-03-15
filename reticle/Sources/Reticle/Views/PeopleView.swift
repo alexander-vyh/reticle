@@ -18,6 +18,9 @@ struct PeopleView: View {
     @State private var people: [Person] = []
     @State private var selectedTab: PeopleTab = .monitored
     @State private var showingAddForm = false
+    @State private var companyDomain = ""
+    @State private var groupEmail = ""
+    @State private var filtersExpanded = false
 
     private var filteredPeople: [Person] {
         switch selectedTab {
@@ -60,6 +63,21 @@ struct PeopleView: View {
                 }
             }
             .listStyle(.inset)
+
+            DisclosureGroup("Monitoring Filters", isExpanded: $filtersExpanded) {
+                LabeledContent("Company domain") {
+                    TextField("example.com", text: $companyDomain)
+                        .textFieldStyle(.roundedBorder)
+                        .onSubmit { saveFilters() }
+                }
+                LabeledContent("Group email") {
+                    TextField("team@example.com", text: $groupEmail)
+                        .textFieldStyle(.roundedBorder)
+                        .onSubmit { saveFilters() }
+                }
+            }
+            .padding(.horizontal)
+            .padding(.bottom, 8)
         }
         .navigationTitle("People")
         .toolbar {
@@ -79,7 +97,10 @@ struct PeopleView: View {
                 }
             }
         }
-        .task { await loadPeople() }
+        .task {
+            await loadPeople()
+            await loadFilters()
+        }
     }
 
     @ViewBuilder
@@ -100,6 +121,22 @@ struct PeopleView: View {
 
     func loadPeople() async {
         people = (try? await gateway.listPeople()) ?? []
+    }
+
+    private func loadFilters() async {
+        if let filters = try? await gateway.fetchFilters() {
+            companyDomain = filters.companyDomain ?? ""
+            groupEmail = filters.dwGroupEmail ?? ""
+        }
+    }
+
+    private func saveFilters() {
+        Task {
+            try? await gateway.updateFilters(
+                companyDomain: companyDomain.isEmpty ? nil : companyDomain,
+                dwGroupEmail: groupEmail.isEmpty ? nil : groupEmail
+            )
+        }
     }
 }
 

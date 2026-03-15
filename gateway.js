@@ -263,6 +263,38 @@ app.post('/api/commitments/:id/resolve', (req, res) => {
   res.json({ ok: true, id: req.params.id, resolution });
 });
 
+// GET /config/filters — read filterPatterns from team.json
+app.get('/config/filters', (req, res) => {
+  try {
+    res.json(config.filterPatterns || {});
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// PATCH /config/filters — update filterPatterns in team.json
+app.patch('/config/filters', (req, res) => {
+  try {
+    const teamPath = path.join(config.configDir, 'team.json');
+    const current = JSON.parse(fs.readFileSync(teamPath, 'utf-8'));
+    if (req.body.companyDomain !== undefined) {
+      current.filterPatterns = current.filterPatterns || {};
+      current.filterPatterns.companyDomain = req.body.companyDomain;
+    }
+    if (req.body.dwGroupEmail !== undefined) {
+      current.filterPatterns = current.filterPatterns || {};
+      current.filterPatterns.dwGroupEmail = req.body.dwGroupEmail;
+    }
+    // Atomic write
+    const tmpPath = teamPath + '.tmp';
+    fs.writeFileSync(tmpPath, JSON.stringify(current, null, 2));
+    fs.renameSync(tmpPath, teamPath);
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // GET /config/accounts — returns account identifiers + connection status (NO raw tokens)
 app.get('/config/accounts', (req, res) => {
   try {
