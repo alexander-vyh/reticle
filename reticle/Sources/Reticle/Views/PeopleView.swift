@@ -20,7 +20,7 @@ struct PeopleView: View {
     @State private var showingAddForm = false
     @State private var companyDomain = ""
     @State private var groupEmail = ""
-    @State private var filtersExpanded = false
+    @State private var filtersExpanded = true
 
     private var filteredPeople: [Person] {
         switch selectedTab {
@@ -46,6 +46,25 @@ struct PeopleView: View {
             .padding(.horizontal)
             .padding(.vertical, 8)
 
+            DisclosureGroup("Organization Scope", isExpanded: $filtersExpanded) {
+                Text("Reticle monitors people from your organization")
+                    .font(.caption)
+                    .foregroundStyle(.tertiary)
+                    .padding(.bottom, 4)
+                LabeledContent("Company domain") {
+                    TextField("example.com", text: $companyDomain)
+                        .textFieldStyle(.roundedBorder)
+                        .onSubmit { saveFilters() }
+                }
+                LabeledContent("Group email") {
+                    TextField("team@example.com", text: $groupEmail)
+                        .textFieldStyle(.roundedBorder)
+                        .onSubmit { saveFilters() }
+                }
+            }
+            .padding(.horizontal)
+            .padding(.bottom, 4)
+
             Divider()
 
             List {
@@ -63,21 +82,6 @@ struct PeopleView: View {
                 }
             }
             .listStyle(.inset)
-
-            DisclosureGroup("Monitoring Filters", isExpanded: $filtersExpanded) {
-                LabeledContent("Company domain") {
-                    TextField("example.com", text: $companyDomain)
-                        .textFieldStyle(.roundedBorder)
-                        .onSubmit { saveFilters() }
-                }
-                LabeledContent("Group email") {
-                    TextField("team@example.com", text: $groupEmail)
-                        .textFieldStyle(.roundedBorder)
-                        .onSubmit { saveFilters() }
-                }
-            }
-            .padding(.horizontal)
-            .padding(.bottom, 8)
         }
         .navigationTitle("People")
         .toolbar {
