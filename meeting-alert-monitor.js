@@ -36,6 +36,9 @@ let o3Db = null;
 let accountId = null;
 let errorCount = 0;
 
+// Poll timer — stored so SIGHUP can reset it with updated interval
+let pollTimer = null;
+
 const SOUNDS = {
   fiveMin: '/System/Library/Sounds/Blow.aiff',
   oneMin: '/System/Library/Sounds/Sosumi.aiff',
@@ -887,7 +890,7 @@ async function main() {
   }
 
   // Set up polling interval for calendar sync
-  setInterval(async () => {
+  pollTimer = setInterval(async () => {
     try {
       const syncedEvents = await syncCalendar();
       meetingCache.cleanupAlertState(syncedEvents);
@@ -966,6 +969,32 @@ process.on('SIGHUP', () => {
     }
   } catch (e) {
     log.warn({ error: e.message }, 'Failed to reload settings, keeping current values');
+  }
+
+  // Reset the poll timer so the new interval takes effect immediately
+  if (pollTimer) {
+    clearInterval(pollTimer);
+    pollTimer = setInterval(async () => {
+      try {
+        const syncedEvents = await syncCalendar();
+        meetingCache.cleanupAlertState(syncedEvents);
+        await checkO3Notifications(syncedEvents, o3Db, accountId);
+        checkWeeklySummary(o3Db);
+        heartbeat.write('meeting-alerts', {
+          checkInterval: CONFIG.pollInterval,
+          status: 'ok',
+          metrics: { upcomingMeetings: syncedEvents.length }
+        });
+      } catch (error) {
+        log.error({ err: error }, 'Poll cycle error');
+        heartbeat.write('meeting-alerts', {
+          checkInterval: CONFIG.pollInterval,
+          status: 'error',
+          errors: { lastError: error.message, lastErrorAt: Date.now(), countSinceStart: ++errorCount }
+        });
+      }
+    }, CONFIG.pollInterval);
+    log.info({ newInterval: CONFIG.pollInterval }, 'Poll timer reset');
   }
 });
 
