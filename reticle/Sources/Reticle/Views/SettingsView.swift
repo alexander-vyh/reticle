@@ -83,7 +83,7 @@ private struct AccountsSection: View {
                     .textFieldStyle(.roundedBorder)
                     .onSubmit { saveGmail() }
             }
-            statusRow(connected: gmailConnected, showRestartNote: false)
+            statusRow(connected: gmailConnected, showRestartNote: true)
         }
 
         Section("Jira") {
@@ -156,13 +156,12 @@ private struct AccountsSection: View {
 private struct NotificationsSection: View {
     let gateway: GatewayClient
     @Binding var gmailInterval: Int
-    @Binding var followupInterval: Int
     @Binding var emailEscalationHours: Int
     @Binding var slackDmEscalationHours: Int
     @Binding var slackMentionEscalationHours: Int
 
     var body: some View {
-        Section("Gmail Polling") {
+        Section("Email Frequency") {
             Picker("Check interval", selection: $gmailInterval) {
                 Text("5 min").tag(5)
                 Text("15 min").tag(15)
@@ -179,20 +178,6 @@ private struct NotificationsSection: View {
         }
 
         Section("Follow-ups") {
-            Picker("Check interval", selection: $followupInterval) {
-                Text("5 min").tag(5)
-                Text("15 min").tag(15)
-                Text("30 min").tag(30)
-            }
-            .pickerStyle(.segmented)
-            .onChange(of: followupInterval) { _, newValue in
-                Task {
-                    try? await gateway.updateSettings([
-                        "polling": ["followupCheckIntervalMinutes": newValue]
-                    ])
-                }
-            }
-
             Stepper("Email escalation: \(emailEscalationHours)h",
                     value: $emailEscalationHours, in: 24...168)
             .onChange(of: emailEscalationHours) { _, newValue in
@@ -295,13 +280,19 @@ struct SettingsView: View {
 
     // Notification state
     @State private var gmailInterval = 5
-    @State private var followupInterval = 15
     @State private var emailEscalationHours = 48
     @State private var slackDmEscalationHours = 72
     @State private var slackMentionEscalationHours = 168
 
     var body: some View {
         Form {
+            // MARK: - Connections
+            Text("Connections")
+                .font(.title3)
+                .fontWeight(.semibold)
+                .listRowInsets(EdgeInsets())
+                .padding(.top, 8)
+
             AccountsSection(
                 gateway: gateway,
                 slackBotToken: $slackBotToken,
@@ -317,14 +308,27 @@ struct SettingsView: View {
                 jiraConnected: $jiraConnected
             )
 
+            // MARK: - Behavior
+            Text("Behavior")
+                .font(.title3)
+                .fontWeight(.semibold)
+                .listRowInsets(EdgeInsets())
+                .padding(.top, 8)
+
             NotificationsSection(
                 gateway: gateway,
                 gmailInterval: $gmailInterval,
-                followupInterval: $followupInterval,
                 emailEscalationHours: $emailEscalationHours,
                 slackDmEscalationHours: $slackDmEscalationHours,
                 slackMentionEscalationHours: $slackMentionEscalationHours
             )
+
+            // MARK: - System
+            Text("System")
+                .font(.title3)
+                .fontWeight(.semibold)
+                .listRowInsets(EdgeInsets())
+                .padding(.top, 8)
 
             SystemSection(
                 appState: appState,
@@ -362,7 +366,6 @@ struct SettingsView: View {
         if let settings = try? await gateway.fetchSettings() {
             if let polling = settings.polling {
                 gmailInterval = polling.gmailIntervalMinutes ?? 5
-                followupInterval = polling.followupCheckIntervalMinutes ?? 15
             }
             if let thresholds = settings.thresholds {
                 emailEscalationHours = thresholds.followupEscalationEmailHours ?? 48
