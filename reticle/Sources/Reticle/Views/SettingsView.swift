@@ -1,6 +1,6 @@
 import SwiftUI
 
-// MARK: - Reveal-toggle field helpers
+// MARK: - Reveal-toggle field helper
 
 private struct SecureRevealField: View {
     let label: String
@@ -32,264 +32,97 @@ private struct SecureRevealField: View {
     }
 }
 
-// MARK: - SettingsView
+// MARK: - Accounts Section
 
-struct SettingsView: View {
-    @EnvironmentObject var gateway: GatewayClient
-    @EnvironmentObject var appState: AppState
-    @EnvironmentObject var serviceStore: ServiceStore
-
-    // Slack fields
-    @State private var slackBotToken: String = ""
-    @State private var slackAppToken: String = ""
-    @State private var slackUserId: String = ""
-    @State private var slackUsername: String = ""
-    @State private var slackConnected: Bool = false
-
-    // Gmail fields
-    @State private var gmailAccount: String = ""
-    @State private var gmailConnected: Bool = false
-
-    // Jira fields
-    @State private var jiraBaseUrl: String = ""
-    @State private var jiraUserEmail: String = ""
-    @State private var jiraApiToken: String = ""
-    @State private var jiraConnected: Bool = false
-
-    // Notification fields (wired to gateway in Task 17)
-    @State private var gmailInterval = 5
-    @State private var followupInterval = 15
-    @State private var emailEscalationHours = 48
-    @State private var slackDmEscalationHours = 72
-    @State private var slackMentionEscalationHours = 168
-
-    @State private var loadError: String? = nil
+private struct AccountsSection: View {
+    let gateway: GatewayClient
+    @Binding var slackBotToken: String
+    @Binding var slackAppToken: String
+    @Binding var slackUserId: String
+    @Binding var slackUsername: String
+    @Binding var slackConnected: Bool
+    @Binding var gmailAccount: String
+    @Binding var gmailConnected: Bool
+    @Binding var jiraBaseUrl: String
+    @Binding var jiraUserEmail: String
+    @Binding var jiraApiToken: String
+    @Binding var jiraConnected: Bool
 
     var body: some View {
-        Form {
-            // MARK: Accounts
-            Section("Slack") {
-                LabeledContent("User ID") {
-                    TextField("U0123ABCDEF", text: $slackUserId)
-                        .textFieldStyle(.roundedBorder)
-                        .onSubmit { saveSlack() }
-                }
-                LabeledContent("Username") {
-                    TextField("@handle", text: $slackUsername)
-                        .textFieldStyle(.roundedBorder)
-                        .onSubmit { saveSlack() }
-                }
-                LabeledContent("Bot Token") {
-                    SecureRevealField(
-                        label: slackConnected ? "xoxb-••••••••" : "xoxb-…",
-                        text: $slackBotToken,
-                        onSubmit: saveSlack
-                    )
-                }
-                LabeledContent("App Token") {
-                    SecureRevealField(
-                        label: slackConnected ? "xapp-••••••••" : "xapp-…",
-                        text: $slackAppToken,
-                        onSubmit: saveSlack
-                    )
-                }
-                HStack(spacing: 4) {
-                    Image(systemName: slackConnected ? "checkmark.circle.fill" : "exclamationmark.circle")
-                        .foregroundStyle(slackConnected ? .green : .orange)
-                    Text(slackConnected ? "Connected" : "Not connected")
-                        .foregroundStyle(.secondary)
-                    Spacer()
-                    Text("Changes take effect after service restart")
-                        .font(.caption)
-                        .foregroundStyle(.tertiary)
-                }
+        Section("Slack") {
+            LabeledContent("User ID") {
+                TextField("U0123ABCDEF", text: $slackUserId)
+                    .textFieldStyle(.roundedBorder)
+                    .onSubmit { saveSlack() }
             }
-
-            Section("Gmail") {
-                LabeledContent("Account") {
-                    TextField("you@example.com", text: $gmailAccount)
-                        .textFieldStyle(.roundedBorder)
-                        .onSubmit { saveGmail() }
-                }
-                HStack(spacing: 4) {
-                    Image(systemName: gmailConnected ? "checkmark.circle.fill" : "exclamationmark.circle")
-                        .foregroundStyle(gmailConnected ? .green : .orange)
-                    Text(gmailConnected ? "Connected" : "Not connected")
-                        .foregroundStyle(.secondary)
-                }
+            LabeledContent("Username") {
+                TextField("@handle", text: $slackUsername)
+                    .textFieldStyle(.roundedBorder)
+                    .onSubmit { saveSlack() }
             }
-
-            Section("Jira") {
-                LabeledContent("Base URL") {
-                    TextField("https://yourorg.atlassian.net", text: $jiraBaseUrl)
-                        .textFieldStyle(.roundedBorder)
-                        .onSubmit { saveJira() }
-                }
-                LabeledContent("User Email") {
-                    TextField("you@yourorg.com", text: $jiraUserEmail)
-                        .textFieldStyle(.roundedBorder)
-                        .onSubmit { saveJira() }
-                }
-                LabeledContent("API Token") {
-                    SecureRevealField(
-                        label: jiraConnected ? "••••••••" : "Paste token…",
-                        text: $jiraApiToken,
-                        onSubmit: saveJira
-                    )
-                }
-                HStack(spacing: 4) {
-                    Image(systemName: jiraConnected ? "checkmark.circle.fill" : "exclamationmark.circle")
-                        .foregroundStyle(jiraConnected ? .green : .orange)
-                    Text(jiraConnected ? "Connected" : "Not connected")
-                        .foregroundStyle(.secondary)
-                    Spacer()
-                    Text("Changes take effect after service restart")
-                        .font(.caption)
-                        .foregroundStyle(.tertiary)
-                }
+            LabeledContent("Bot Token") {
+                SecureRevealField(
+                    label: slackConnected ? "xoxb-••••••••" : "xoxb-…",
+                    text: $slackBotToken,
+                    onSubmit: saveSlack
+                )
             }
-
-            // MARK: Notifications
-            Section("Gmail") {
-                Picker("Check interval", selection: $gmailInterval) {
-                    Text("1 min").tag(1)
-                    Text("5 min").tag(5)
-                    Text("15 min").tag(15)
-                    Text("30 min").tag(30)
-                }
-                .pickerStyle(.segmented)
+            LabeledContent("App Token") {
+                SecureRevealField(
+                    label: slackConnected ? "xapp-••••••••" : "xapp-…",
+                    text: $slackAppToken,
+                    onSubmit: saveSlack
+                )
             }
-
-            Section("Follow-ups") {
-                Picker("Check interval", selection: $followupInterval) {
-                    Text("5 min").tag(5)
-                    Text("15 min").tag(15)
-                    Text("30 min").tag(30)
-                }
-                .pickerStyle(.segmented)
-
-                Stepper("Email escalation: \(emailEscalationHours)h",
-                        value: $emailEscalationHours, in: 1...168)
-                Stepper("Slack DM escalation: \(slackDmEscalationHours)h",
-                        value: $slackDmEscalationHours, in: 1...168)
-                Stepper("Slack mention escalation: \(slackMentionEscalationHours)h",
-                        value: $slackMentionEscalationHours, in: 1...336)
-            }
-
-            // MARK: System
-            Section("General") {
-                Toggle("Launch at login", isOn: Binding(
-                    get: { appState.isLoginItemEnabled },
-                    set: { _ in appState.toggleLoginItem() }
-                ))
-            }
-
-            Section("Services") {
-                ForEach(serviceStore.services, id: \.definition.launchdLabel) { service in
-                    HStack {
-                        Circle()
-                            .fill(serviceStatusColor(service))
-                            .frame(width: 8, height: 8)
-                        Text(service.definition.label)
-                        Spacer()
-                        Button(service.status == .running ? "Stop" : "Start") {
-                            if service.status == .running {
-                                serviceStore.stop(service.definition.launchdLabel)
-                            } else {
-                                serviceStore.start(service.definition.launchdLabel)
-                            }
-                        }
-                        .buttonStyle(.bordered)
-                        .controlSize(.small)
-                    }
-                }
-            }
+            statusRow(connected: slackConnected, showRestartNote: true)
         }
-        .formStyle(.grouped)
-        .navigationTitle("Settings")
-        .task {
-            await loadAccounts()
-            await loadSettings()
-        }
-        .onChange(of: gmailInterval) { _, newValue in
-            Task {
-                try? await gateway.updateSettings([
-                    "polling": ["gmailIntervalMinutes": newValue]
-                ])
+
+        Section("Gmail") {
+            LabeledContent("Account") {
+                TextField("you@example.com", text: $gmailAccount)
+                    .textFieldStyle(.roundedBorder)
+                    .onSubmit { saveGmail() }
             }
+            statusRow(connected: gmailConnected, showRestartNote: false)
         }
-        .onChange(of: followupInterval) { _, newValue in
-            Task {
-                try? await gateway.updateSettings([
-                    "polling": ["followupCheckIntervalMinutes": newValue]
-                ])
+
+        Section("Jira") {
+            LabeledContent("Base URL") {
+                TextField("https://yourorg.atlassian.net", text: $jiraBaseUrl)
+                    .textFieldStyle(.roundedBorder)
+                    .onSubmit { saveJira() }
             }
-        }
-        .onChange(of: emailEscalationHours) { _, newValue in
-            Task {
-                try? await gateway.updateSettings([
-                    "thresholds": ["followupEscalationEmailHours": newValue]
-                ])
+            LabeledContent("User Email") {
+                TextField("you@yourorg.com", text: $jiraUserEmail)
+                    .textFieldStyle(.roundedBorder)
+                    .onSubmit { saveJira() }
             }
-        }
-        .onChange(of: slackDmEscalationHours) { _, newValue in
-            Task {
-                try? await gateway.updateSettings([
-                    "thresholds": ["followupEscalationSlackDmHours": newValue]
-                ])
+            LabeledContent("API Token") {
+                SecureRevealField(
+                    label: jiraConnected ? "••••••••" : "Paste token…",
+                    text: $jiraApiToken,
+                    onSubmit: saveJira
+                )
             }
-        }
-        .onChange(of: slackMentionEscalationHours) { _, newValue in
-            Task {
-                try? await gateway.updateSettings([
-                    "thresholds": ["followupEscalationSlackMentionHours": newValue]
-                ])
-            }
+            statusRow(connected: jiraConnected, showRestartNote: true)
         }
     }
 
-    // MARK: - Data loading
-
-    private func loadAccounts() async {
-        do {
-            let accounts = try await gateway.fetchAccounts()
-            slackConnected = accounts.slack.connected
-            slackUserId = accounts.slack.userId ?? ""
-            slackUsername = accounts.slack.username ?? ""
-            // Tokens not returned by GET — leave as empty (user pastes new values to update)
-            slackBotToken = ""
-            slackAppToken = ""
-
-            gmailConnected = accounts.gmail.connected
-            gmailAccount = accounts.gmail.account ?? ""
-
-            jiraConnected = accounts.jira.connected
-            jiraBaseUrl = accounts.jira.baseUrl ?? ""
-            jiraUserEmail = accounts.jira.userEmail ?? ""
-            // Token not returned by GET
-            jiraApiToken = ""
-
-            loadError = nil
-        } catch {
-            loadError = error.localizedDescription
-        }
-    }
-
-    private func loadSettings() async {
-        if let settings = try? await gateway.fetchSettings() {
-            if let polling = settings.polling {
-                gmailInterval = polling.gmailIntervalMinutes ?? 5
-                followupInterval = polling.followupCheckIntervalMinutes ?? 15
-            }
-            if let thresholds = settings.thresholds {
-                emailEscalationHours = thresholds.followupEscalationEmailHours ?? 48
-                slackDmEscalationHours = thresholds.followupEscalationSlackDmHours ?? 72
-                slackMentionEscalationHours = thresholds.followupEscalationSlackMentionHours ?? 168
+    @ViewBuilder
+    private func statusRow(connected: Bool, showRestartNote: Bool) -> some View {
+        HStack(spacing: 4) {
+            Image(systemName: connected ? "checkmark.circle.fill" : "exclamationmark.circle")
+                .foregroundStyle(connected ? .green : .orange)
+            Text(connected ? "Connected" : "Not connected")
+                .foregroundStyle(.secondary)
+            Spacer()
+            if showRestartNote {
+                Text("Changes take effect after service restart")
+                    .font(.caption)
+                    .foregroundStyle(.tertiary)
             }
         }
     }
-
-    // MARK: - Save helpers
 
     private func saveSlack() {
         var fields: [String: String] = [:]
@@ -316,8 +149,119 @@ struct SettingsView: View {
         guard !fields.isEmpty else { return }
         Task { try? await gateway.updateAccounts(fields: fields) }
     }
+}
 
-    // MARK: - Service status color
+// MARK: - Notifications Section
+
+private struct NotificationsSection: View {
+    let gateway: GatewayClient
+    @Binding var gmailInterval: Int
+    @Binding var followupInterval: Int
+    @Binding var emailEscalationHours: Int
+    @Binding var slackDmEscalationHours: Int
+    @Binding var slackMentionEscalationHours: Int
+
+    var body: some View {
+        Section("Gmail Polling") {
+            Picker("Check interval", selection: $gmailInterval) {
+                Text("1 min").tag(1)
+                Text("5 min").tag(5)
+                Text("15 min").tag(15)
+                Text("30 min").tag(30)
+            }
+            .pickerStyle(.segmented)
+            .onChange(of: gmailInterval) { _, newValue in
+                Task {
+                    try? await gateway.updateSettings([
+                        "polling": ["gmailIntervalMinutes": newValue]
+                    ])
+                }
+            }
+        }
+
+        Section("Follow-ups") {
+            Picker("Check interval", selection: $followupInterval) {
+                Text("5 min").tag(5)
+                Text("15 min").tag(15)
+                Text("30 min").tag(30)
+            }
+            .pickerStyle(.segmented)
+            .onChange(of: followupInterval) { _, newValue in
+                Task {
+                    try? await gateway.updateSettings([
+                        "polling": ["followupCheckIntervalMinutes": newValue]
+                    ])
+                }
+            }
+
+            Stepper("Email escalation: \(emailEscalationHours)h",
+                    value: $emailEscalationHours, in: 1...168)
+            .onChange(of: emailEscalationHours) { _, newValue in
+                Task {
+                    try? await gateway.updateSettings([
+                        "thresholds": ["followupEscalationEmailHours": newValue]
+                    ])
+                }
+            }
+
+            Stepper("Slack DM escalation: \(slackDmEscalationHours)h",
+                    value: $slackDmEscalationHours, in: 1...168)
+            .onChange(of: slackDmEscalationHours) { _, newValue in
+                Task {
+                    try? await gateway.updateSettings([
+                        "thresholds": ["followupEscalationSlackDmHours": newValue]
+                    ])
+                }
+            }
+
+            Stepper("Slack mention escalation: \(slackMentionEscalationHours)h",
+                    value: $slackMentionEscalationHours, in: 1...336)
+            .onChange(of: slackMentionEscalationHours) { _, newValue in
+                Task {
+                    try? await gateway.updateSettings([
+                        "thresholds": ["followupEscalationSlackMentionHours": newValue]
+                    ])
+                }
+            }
+        }
+    }
+}
+
+// MARK: - System Section
+
+private struct SystemSection: View {
+    let appState: AppState
+    let serviceStore: ServiceStore
+
+    var body: some View {
+        Section("General") {
+            Toggle("Launch at login", isOn: Binding(
+                get: { appState.isLoginItemEnabled },
+                set: { _ in appState.toggleLoginItem() }
+            ))
+        }
+
+        Section("Services") {
+            ForEach(serviceStore.services, id: \.definition.launchdLabel) { service in
+                HStack {
+                    Circle()
+                        .fill(serviceStatusColor(service))
+                        .frame(width: 8, height: 8)
+                    Text(service.definition.label)
+                    Spacer()
+                    Button(service.status == .running ? "Stop" : "Start") {
+                        if service.status == .running {
+                            serviceStore.stop(service.definition.launchdLabel)
+                        } else {
+                            serviceStore.start(service.definition.launchdLabel)
+                        }
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                }
+            }
+        }
+    }
 
     private func serviceStatusColor(_ service: ServiceState) -> Color {
         let effective = serviceStore.effectiveStatus(service)
@@ -326,6 +270,106 @@ struct SettingsView: View {
         case .error, .startupFailed: return .red
         case .unresponsive, .degraded: return .yellow
         default: return .gray
+        }
+    }
+}
+
+// MARK: - SettingsView
+
+struct SettingsView: View {
+    @EnvironmentObject var gateway: GatewayClient
+    @EnvironmentObject var appState: AppState
+    @EnvironmentObject var serviceStore: ServiceStore
+
+    // Accounts state
+    @State private var slackBotToken = ""
+    @State private var slackAppToken = ""
+    @State private var slackUserId = ""
+    @State private var slackUsername = ""
+    @State private var slackConnected = false
+    @State private var gmailAccount = ""
+    @State private var gmailConnected = false
+    @State private var jiraBaseUrl = ""
+    @State private var jiraUserEmail = ""
+    @State private var jiraApiToken = ""
+    @State private var jiraConnected = false
+
+    // Notification state
+    @State private var gmailInterval = 5
+    @State private var followupInterval = 15
+    @State private var emailEscalationHours = 48
+    @State private var slackDmEscalationHours = 72
+    @State private var slackMentionEscalationHours = 168
+
+    var body: some View {
+        Form {
+            AccountsSection(
+                gateway: gateway,
+                slackBotToken: $slackBotToken,
+                slackAppToken: $slackAppToken,
+                slackUserId: $slackUserId,
+                slackUsername: $slackUsername,
+                slackConnected: $slackConnected,
+                gmailAccount: $gmailAccount,
+                gmailConnected: $gmailConnected,
+                jiraBaseUrl: $jiraBaseUrl,
+                jiraUserEmail: $jiraUserEmail,
+                jiraApiToken: $jiraApiToken,
+                jiraConnected: $jiraConnected
+            )
+
+            NotificationsSection(
+                gateway: gateway,
+                gmailInterval: $gmailInterval,
+                followupInterval: $followupInterval,
+                emailEscalationHours: $emailEscalationHours,
+                slackDmEscalationHours: $slackDmEscalationHours,
+                slackMentionEscalationHours: $slackMentionEscalationHours
+            )
+
+            SystemSection(
+                appState: appState,
+                serviceStore: serviceStore
+            )
+        }
+        .formStyle(.grouped)
+        .navigationTitle("Settings")
+        .task {
+            await loadAccounts()
+            await loadSettings()
+        }
+    }
+
+    private func loadAccounts() async {
+        do {
+            let accounts = try await gateway.fetchAccounts()
+            slackConnected = accounts.slack.connected
+            slackUserId = accounts.slack.userId ?? ""
+            slackUsername = accounts.slack.username ?? ""
+            slackBotToken = ""
+            slackAppToken = ""
+            gmailConnected = accounts.gmail.connected
+            gmailAccount = accounts.gmail.account ?? ""
+            jiraConnected = accounts.jira.connected
+            jiraBaseUrl = accounts.jira.baseUrl ?? ""
+            jiraUserEmail = accounts.jira.userEmail ?? ""
+            jiraApiToken = ""
+        } catch {
+            // Non-fatal — gateway may be down
+        }
+    }
+
+    private func loadSettings() async {
+        if let settings = try? await gateway.fetchSettings() {
+            if let polling = settings.polling {
+                gmailInterval = polling.gmailIntervalMinutes ?? 5
+                followupInterval = polling.followupCheckIntervalMinutes ?? 15
+            }
+            if let thresholds = settings.thresholds {
+                emailEscalationHours = thresholds.followupEscalationEmailHours ?? 48
+                slackDmEscalationHours = thresholds.followupEscalationSlackDmHours ?? 72
+                slackMentionEscalationHours = thresholds.followupEscalationSlackMentionHours ?? 168
+            }
         }
     }
 }
