@@ -8,7 +8,7 @@ struct FeedbackView: View {
     @State private var copied = false
     @State private var weeklyTarget: Int = 3
     @State private var scanWindowHours: Int = 24
-    @State private var deliveredThisWeek: Int = 0
+    @State private var saveTask: Task<Void, Never>?
 
     private var selected: FeedbackCandidate? {
         candidates.first { $0.id == selectedId }
@@ -28,14 +28,13 @@ struct FeedbackView: View {
                 }
                 .labelsHidden()
                 .onChange(of: weeklyTarget) { _, newValue in
-                    Task { try? await gateway.updateFeedbackSettings(weeklyTarget: newValue) }
+                    saveTask?.cancel()
+                    saveTask = Task {
+                        try? await Task.sleep(for: .milliseconds(500))
+                        guard !Task.isCancelled else { return }
+                        try? await gateway.updateFeedbackSettings(weeklyTarget: newValue)
+                    }
                 }
-
-                Text("·").foregroundStyle(.tertiary)
-
-                Text("This week: \(deliveredThisWeek)")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
 
                 Divider().frame(height: 14)
 
@@ -52,7 +51,12 @@ struct FeedbackView: View {
                 .labelsHidden()
                 .frame(width: 160)
                 .onChange(of: scanWindowHours) { _, newValue in
-                    Task { try? await gateway.updateFeedbackSettings(scanWindowHours: newValue) }
+                    saveTask?.cancel()
+                    saveTask = Task {
+                        try? await Task.sleep(for: .milliseconds(500))
+                        guard !Task.isCancelled else { return }
+                        try? await gateway.updateFeedbackSettings(scanWindowHours: newValue)
+                    }
                 }
 
                 Spacer()
@@ -119,9 +123,6 @@ struct FeedbackView: View {
             if let settings = try? await gateway.fetchFeedbackSettings() {
                 weeklyTarget = Int(settings.weeklyTarget ?? "3") ?? 3
                 scanWindowHours = Int(settings.scanWindowHours ?? "24") ?? 24
-            }
-            if let stats = try? await gateway.fetchStats() {
-                deliveredThisWeek = stats.weekly.values.reduce(0) { $0 + $1.delivered }
             }
         }
     }
