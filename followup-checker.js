@@ -466,6 +466,28 @@ function shutdown(signal) {
 process.on('SIGTERM', () => shutdown('SIGTERM'));
 process.on('SIGINT', () => shutdown('SIGINT'));
 
+process.on('SIGHUP', () => {
+  log.info('Received SIGHUP, reloading settings');
+  try {
+    const fs = require('fs');
+    const path = require('path');
+    const settingsPath = path.join(config.configDir, 'settings.json');
+    if (fs.existsSync(settingsPath)) {
+      const settings = JSON.parse(fs.readFileSync(settingsPath, 'utf-8'));
+      CONFIG.checkInterval = (settings.polling?.followupCheckIntervalMinutes ?? 15) * 60 * 1000;
+      // Update escalation thresholds if provided
+      if (settings.thresholds) {
+        if (settings.thresholds.escalation) {
+          Object.assign(CONFIG.thresholds.escalation, settings.thresholds.escalation);
+        }
+      }
+      log.info({ checkIntervalMs: CONFIG.checkInterval }, 'Settings reloaded');
+    }
+  } catch (e) {
+    log.warn({ error: e.message }, 'Failed to reload settings, keeping current values');
+  }
+});
+
 main().catch(error => {
   log.fatal({ err: error }, 'Fatal error');
   process.exit(1);

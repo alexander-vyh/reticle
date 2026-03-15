@@ -2,8 +2,10 @@
 'use strict';
 
 const fs = require('fs');
+const os = require('os');
 const path = require('path');
 const express = require('express');
+const log = require('./lib/logger')('gateway');
 const reticleDb = require('./reticle-db');
 const peopleStore = require('./lib/people-store');
 const slackReader = require('./lib/slack-reader');
@@ -310,6 +312,100 @@ app.patch('/config/accounts', (req, res) => {
     fs.writeFileSync(tmpPath, JSON.stringify(current, null, 2));
     fs.renameSync(tmpPath, secretsPath);
     res.json({ ok: true, note: 'Restart services to apply credential changes' });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// --- Settings (settings.json) ---
+
+const SETTINGS_SERVICE_MAP = {
+  polling: {
+    gmailIntervalMinutes: 'gmail-monitor',
+    slackResponseTimeoutMinutes: 'slack-events',
+    followupCheckIntervalMinutes: 'followup-checker',
+    meetingAlertPollIntervalSeconds: 'meeting-alerts',
+  },
+  notifications: 'meeting-alerts',
+  thresholds: 'followup-checker',
+  o3: 'meeting-alerts',
+  // digest: no SIGHUP (launchd-scheduled, reads on next run)
+};
+
+function signalAffectedServices(changedKeys) {
+  const heartbeatDir = process.env.RETICLE_HEARTBEAT_DIR ||
+    path.join(os.homedir(), '.reticle', 'heartbeats');
+  const signaled = [];
+
+  const serviceNames = new Set();
+  for (const key of changedKeys) {
+    const mapping = SETTINGS_SERVICE_MAP[key];
+    if (typeof mapping === 'string') serviceNames.add(mapping);
+    else if (typeof mapping === 'object' && mapping !== null) {
+      Object.values(mapping).forEach(s => serviceNames.add(s));
+    }
+  }
+
+  for (const name of serviceNames) {
+    try {
+      const hbPath = path.join(heartbeatDir, `${name}.json`);
+      if (!fs.existsSync(hbPath)) continue;
+      const hb = JSON.parse(fs.readFileSync(hbPath, 'utf-8'));
+      if (!hb.pid) continue;
+      // Verify PID is alive before signaling
+      try { process.kill(hb.pid, 0); } catch { continue; }
+      process.kill(hb.pid, 'SIGHUP');
+      signaled.push(name);
+    } catch (e) {
+      log.warn({ service: name, error: e.message }, 'Failed to signal service');
+    }
+  }
+  return signaled;
+}
+
+// GET /settings — read settings.json with defaults
+app.get('/settings', (req, res) => {
+  try {
+    const settingsPath = path.join(config.configDir, 'settings.json');
+    let settings = {};
+    if (fs.existsSync(settingsPath)) {
+      settings = JSON.parse(fs.readFileSync(settingsPath, 'utf-8'));
+    }
+    res.json(settings);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// PATCH /settings — validate, write atomically, SIGHUP affected services
+app.patch('/settings', (req, res) => {
+  try {
+    const settingsPath = path.join(config.configDir, 'settings.json');
+    let current = {};
+    if (fs.existsSync(settingsPath)) {
+      current = JSON.parse(fs.readFileSync(settingsPath, 'utf-8'));
+    }
+
+    // Deep merge changed keys
+    const changedKeys = [];
+    for (const [section, values] of Object.entries(req.body)) {
+      if (typeof values === 'object' && values !== null) {
+        current[section] = { ...(current[section] || {}), ...values };
+      } else {
+        current[section] = values;
+      }
+      changedKeys.push(section);
+    }
+
+    // Atomic write
+    const tmpPath = settingsPath + '.tmp';
+    fs.writeFileSync(tmpPath, JSON.stringify(current, null, 2));
+    fs.renameSync(tmpPath, settingsPath);
+
+    // SIGHUP affected services
+    const signaled = signalAffectedServices(changedKeys);
+
+    res.json({ ok: true, signaled });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }

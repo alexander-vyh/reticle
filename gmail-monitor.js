@@ -1351,6 +1351,20 @@ function shutdown(signal) {
 process.on('SIGTERM', () => shutdown('SIGTERM'));
 process.on('SIGINT', () => shutdown('SIGINT'));
 
+process.on('SIGHUP', () => {
+  log.info('Received SIGHUP, reloading settings');
+  try {
+    const settingsPath = path.join(config.configDir, 'settings.json');
+    if (fs.existsSync(settingsPath)) {
+      const settings = JSON.parse(fs.readFileSync(settingsPath, 'utf-8'));
+      CONFIG.checkInterval = (settings.polling?.gmailIntervalMinutes ?? 5) * 60 * 1000;
+      log.info({ checkIntervalMs: CONFIG.checkInterval }, 'Settings reloaded');
+    }
+  } catch (e) {
+    log.warn({ error: e.message }, 'Failed to reload settings, keeping current values');
+  }
+});
+
 // Export for testing; run service only when executed directly
 if (require.main === module) {
   main().catch(error => {

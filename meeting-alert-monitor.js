@@ -951,6 +951,24 @@ function shutdown(signal) {
 process.on('SIGTERM', () => shutdown('SIGTERM'));
 process.on('SIGINT', () => shutdown('SIGINT'));
 
+process.on('SIGHUP', () => {
+  log.info('Received SIGHUP, reloading settings');
+  try {
+    const settingsPath = path.join(config.configDir, 'settings.json');
+    if (fs.existsSync(settingsPath)) {
+      const settings = JSON.parse(fs.readFileSync(settingsPath, 'utf-8'));
+      CONFIG.pollInterval = (settings.polling?.meetingAlertPollIntervalSeconds ?? 120) * 1000;
+      // Update alert thresholds if provided
+      if (settings.notifications?.alertThresholds) {
+        Object.assign(CONFIG.alertThresholds, settings.notifications.alertThresholds);
+      }
+      log.info({ pollIntervalMs: CONFIG.pollInterval }, 'Settings reloaded');
+    }
+  } catch (e) {
+    log.warn({ error: e.message }, 'Failed to reload settings, keeping current values');
+  }
+});
+
 // Run
 main().catch(err => {
   log.fatal({ err }, 'Fatal error');

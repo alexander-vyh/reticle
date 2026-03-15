@@ -340,6 +340,163 @@ async function testAccountsEndpoints() {
   }
 }
 
+// --- settings.json config loader tests (Part 1) ---
+
+function testConfigSettingsLoader() {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'reticle-config-settings-test-'));
+  const configDir = path.join(tmpDir, 'config');
+  fs.mkdirSync(configDir, { recursive: true });
+
+  // Write required config files
+  const secrets = {
+    slackBotToken: 'xoxb-test', slackUserId: 'U0TEST', gmailAccount: 'test@example.com',
+    gatewayPort: 3001
+  };
+  fs.writeFileSync(path.join(configDir, 'secrets.json'), JSON.stringify(secrets));
+  fs.writeFileSync(path.join(configDir, 'team.json'), JSON.stringify({ filterPatterns: {} }));
+
+  // Test 1: no settings.json — defaults apply
+  process.env.RETICLE_CONFIG_DIR = configDir;
+  delete require.cache[require.resolve('./lib/config')];
+  const configNoFile = require('./lib/config');
+  assert.deepStrictEqual(configNoFile.settings, {}, 'settings should be empty object when no settings.json');
+  assert.strictEqual(configNoFile.polling.gmailIntervalMinutes, 5, 'gmail default should be 5');
+  assert.strictEqual(configNoFile.polling.slackResponseTimeoutMinutes, 10, 'slack timeout default should be 10');
+  assert.strictEqual(configNoFile.polling.followupCheckIntervalMinutes, 15, 'followup default should be 15');
+  assert.strictEqual(configNoFile.polling.meetingAlertPollIntervalSeconds, 120, 'meeting alert default should be 120');
+  console.log('  PASS: config.polling uses hardcoded defaults when no settings.json');
+
+  // Test 2: with settings.json — values override defaults
+  const settingsData = {
+    polling: {
+      gmailIntervalMinutes: 3,
+      followupCheckIntervalMinutes: 30
+    }
+  };
+  fs.writeFileSync(path.join(configDir, 'settings.json'), JSON.stringify(settingsData));
+  delete require.cache[require.resolve('./lib/config')];
+  const configWithFile = require('./lib/config');
+  assert.strictEqual(configWithFile.polling.gmailIntervalMinutes, 3, 'gmail should read from settings.json');
+  assert.strictEqual(configWithFile.polling.followupCheckIntervalMinutes, 30, 'followup should read from settings.json');
+  assert.strictEqual(configWithFile.polling.slackResponseTimeoutMinutes, 10, 'slack should still use default');
+  assert.strictEqual(configWithFile.polling.meetingAlertPollIntervalSeconds, 120, 'meeting alert should still use default');
+  console.log('  PASS: config.polling reads values from settings.json with defaults for missing keys');
+
+  // Test 3: corrupt settings.json — uses defaults, does not crash
+  fs.writeFileSync(path.join(configDir, 'settings.json'), '{bad json');
+  delete require.cache[require.resolve('./lib/config')];
+  const configCorrupt = require('./lib/config');
+  assert.deepStrictEqual(configCorrupt.settings, {}, 'settings should be empty on corrupt file');
+  assert.strictEqual(configCorrupt.polling.gmailIntervalMinutes, 5, 'should fall back to default');
+  console.log('  PASS: corrupt settings.json uses defaults without crashing');
+
+  // Clean up
+  delete process.env.RETICLE_CONFIG_DIR;
+  delete require.cache[require.resolve('./lib/config')];
+  try { fs.rmSync(tmpDir, { recursive: true }); } catch {}
+}
+
+// --- GET/PATCH /settings endpoint tests (Parts 2-3) ---
+
+async function testSettingsJsonEndpoints() {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'reticle-settings-json-test-'));
+  const reticleDbPath = path.join(tmpDir, 'reticle.db');
+  const orgMemDbPath = path.join(tmpDir, 'org-memory.db');
+  const configDir = path.join(tmpDir, 'config');
+  const heartbeatDir = path.join(tmpDir, 'heartbeats');
+  fs.mkdirSync(configDir, { recursive: true });
+  fs.mkdirSync(heartbeatDir, { recursive: true });
+
+  const secrets = {
+    slackBotToken: 'xoxb-test', slackUserId: 'U0TEST', gmailAccount: 'test@example.com',
+    gatewayPort: 3001
+  };
+  fs.writeFileSync(path.join(configDir, 'secrets.json'), JSON.stringify(secrets));
+  fs.writeFileSync(path.join(configDir, 'team.json'), JSON.stringify({ filterPatterns: {} }));
+
+  process.env.RETICLE_DB_PATH = reticleDbPath;
+  process.env.ORG_MEMORY_DB_PATH = orgMemDbPath;
+  process.env.RETICLE_CONFIG_DIR = configDir;
+  process.env.RETICLE_HEARTBEAT_DIR = heartbeatDir;
+
+  delete require.cache[require.resolve('./gateway')];
+  delete require.cache[require.resolve('./reticle-db')];
+  delete require.cache[require.resolve('./lib/config')];
+
+  const app = require('./gateway');
+  const server = app.listen(0);
+  const port = server.address().port;
+
+  try {
+    // Test 1: GET /settings returns empty object when no settings.json exists
+    const getEmptyRes = await httpRequest(port, 'GET', '/settings');
+    assert.strictEqual(getEmptyRes.status, 200, `expected 200, got ${getEmptyRes.status}`);
+    assert.deepStrictEqual(getEmptyRes.body, {}, 'should return empty object when no settings.json');
+    console.log('  PASS: GET /settings returns empty object when no settings.json exists');
+
+    // Test 2: PATCH /settings creates settings.json and returns ok
+    const patchRes = await httpRequest(port, 'PATCH', '/settings', {
+      polling: { gmailIntervalMinutes: 10 }
+    });
+    assert.strictEqual(patchRes.status, 200, `expected 200, got ${patchRes.status}`);
+    assert.strictEqual(patchRes.body.ok, true, 'should return ok: true');
+    assert.ok(Array.isArray(patchRes.body.signaled), 'should return signaled array');
+    // Verify the file was written
+    assert.ok(fs.existsSync(path.join(configDir, 'settings.json')), 'settings.json should exist');
+    console.log('  PASS: PATCH /settings creates settings.json and returns ok');
+
+    // Test 3: GET /settings returns saved values after PATCH
+    const getAfterRes = await httpRequest(port, 'GET', '/settings');
+    assert.strictEqual(getAfterRes.status, 200);
+    assert.strictEqual(getAfterRes.body.polling.gmailIntervalMinutes, 10, 'should return saved value');
+    console.log('  PASS: GET /settings returns saved values after PATCH');
+
+    // Test 4: PATCH /settings merges (doesn't overwrite) existing sections
+    const patchMergeRes = await httpRequest(port, 'PATCH', '/settings', {
+      polling: { followupCheckIntervalMinutes: 20 }
+    });
+    assert.strictEqual(patchMergeRes.status, 200);
+    const getMergedRes = await httpRequest(port, 'GET', '/settings');
+    assert.strictEqual(getMergedRes.body.polling.gmailIntervalMinutes, 10,
+      'existing value should be preserved');
+    assert.strictEqual(getMergedRes.body.polling.followupCheckIntervalMinutes, 20,
+      'new value should be merged in');
+    console.log('  PASS: PATCH /settings merges (does not overwrite) existing sections');
+
+    // Test 5: PATCH /settings returns signaled services based on changed keys
+    // Write a fake heartbeat for gmail-monitor with current PID (won't actually SIGHUP since we handle it)
+    const fakeHb = { pid: process.pid, lastCheck: Date.now() };
+    fs.writeFileSync(path.join(heartbeatDir, 'gmail-monitor.json'), JSON.stringify(fakeHb));
+    // Install a temporary SIGHUP handler to prevent test from dying
+    let gotSighup = false;
+    const sighupHandler = () => { gotSighup = true; };
+    process.on('SIGHUP', sighupHandler);
+    const patchSignalRes = await httpRequest(port, 'PATCH', '/settings', {
+      polling: { gmailIntervalMinutes: 7 }
+    });
+    assert.strictEqual(patchSignalRes.status, 200);
+    assert.ok(patchSignalRes.body.signaled.includes('gmail-monitor'),
+      'gmail-monitor should be in signaled list');
+    // Give the event loop a tick for the signal to be delivered
+    await new Promise(r => setTimeout(r, 50));
+    assert.ok(gotSighup, 'SIGHUP should have been sent to our process');
+    process.removeListener('SIGHUP', sighupHandler);
+    console.log('  PASS: PATCH /settings signals affected services via SIGHUP');
+
+  } finally {
+    server.close();
+    delete process.env.RETICLE_HEARTBEAT_DIR;
+    delete process.env.RETICLE_CONFIG_DIR;
+    try { fs.unlinkSync(reticleDbPath); } catch {}
+    try { fs.unlinkSync(reticleDbPath + '-wal'); } catch {}
+    try { fs.unlinkSync(reticleDbPath + '-shm'); } catch {}
+    try { fs.unlinkSync(orgMemDbPath); } catch {}
+    try { fs.unlinkSync(orgMemDbPath + '-wal'); } catch {}
+    try { fs.unlinkSync(orgMemDbPath + '-shm'); } catch {}
+    try { fs.rmSync(tmpDir, { recursive: true }); } catch {}
+  }
+}
+
 // --- Run tests ---
 console.log('settings endpoint tests:');
 
@@ -347,6 +504,10 @@ testSettingsEndpoints()
   .then(() => testSeedingIdempotency())
   .then(() => testFeedbackSettingsEndpoints())
   .then(() => testAccountsEndpoints())
+  .then(() => {
+    testConfigSettingsLoader();
+    return testSettingsJsonEndpoints();
+  })
   .then(() => {
     console.log('All settings endpoint tests passed');
     process.exit(0);

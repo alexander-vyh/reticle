@@ -1430,6 +1430,20 @@ function shutdown(signal) {
 process.on('SIGTERM', () => shutdown('SIGTERM'));
 process.on('SIGINT', () => shutdown('SIGINT'));
 
+process.on('SIGHUP', () => {
+  log.info('Received SIGHUP, reloading settings');
+  try {
+    const settingsPath = path.join(config.configDir, 'settings.json');
+    if (fs.existsSync(settingsPath)) {
+      const settings = JSON.parse(fs.readFileSync(settingsPath, 'utf-8'));
+      CONFIG.responseTimeout = (settings.polling?.slackResponseTimeoutMinutes ?? 10) * 60 * 1000;
+      log.info({ responseTimeoutMs: CONFIG.responseTimeout }, 'Settings reloaded');
+    }
+  } catch (e) {
+    log.warn({ error: e.message }, 'Failed to reload settings, keeping current values');
+  }
+});
+
 main().catch(error => {
   log.fatal({ err: error }, 'Fatal error');
   process.exit(1);
