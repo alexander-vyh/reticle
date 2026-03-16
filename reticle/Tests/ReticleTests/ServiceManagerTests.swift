@@ -18,6 +18,17 @@ struct HeartbeatErrors {
     let countSinceStart: Int
 }
 
+struct HeartbeatMetrics {
+    let recording: Bool?
+    let meetingId: String?
+    let duration: Double?
+    let captureMode: String?
+    let permissionStatus: String?
+    let itemCount: Int?
+    let patternCount: Int?
+    let degradedReason: String?
+}
+
 struct HeartbeatData {
     let service: String?
     let pid: Int?
@@ -26,6 +37,7 @@ struct HeartbeatData {
     let checkInterval: Double?
     let status: String?
     let errors: HeartbeatErrors?
+    let metrics: HeartbeatMetrics?
 }
 
 struct HeartbeatHealth: Equatable {
@@ -76,21 +88,26 @@ func evaluateHeartbeat(_ hb: HeartbeatData?, now: Double? = nil) -> HeartbeatHea
         return HeartbeatHealth(health: "shutting-down", detail: nil, errorCount: 0)
     }
 
-    guard let lastCheck = hb.lastCheck, let interval = hb.checkInterval else {
-        return .unknown
+    // If checkInterval is present, check staleness
+    if let lastCheck = hb.lastCheck, let interval = hb.checkInterval {
+        let currentTime = now ?? (Date().timeIntervalSince1970 * 1000)
+        let ageMs = currentTime - lastCheck
+        if ageMs > interval * 3 {
+            let ageMin = Int(ageMs / 60000)
+            return HeartbeatHealth(health: "unresponsive", detail: "No heartbeat for \(ageMin)m", errorCount: 0)
+        }
     }
 
-    let currentTime = now ?? (Date().timeIntervalSince1970 * 1000)
-    let ageMs = currentTime - lastCheck
-    if ageMs > interval * 3 {
-        let ageMin = Int(ageMs / 60000)
-        return HeartbeatHealth(health: "unresponsive", detail: "No heartbeat for \(ageMin)m", errorCount: 0)
+    // Scheduled services may not write checkInterval — if lastCheck exists, treat as healthy
+    if hb.lastCheck != nil {
+        return HeartbeatHealth(
+            health: "healthy",
+            detail: nil,
+            errorCount: hb.errors?.countSinceStart ?? 0
+        )
     }
-    return HeartbeatHealth(
-        health: "healthy",
-        detail: nil,
-        errorCount: hb.errors?.countSinceStart ?? 0
-    )
+
+    return .unknown
 }
 
 struct ServiceDefinitionMirror {
@@ -187,7 +204,8 @@ final class ServiceManagerTests: XCTestCase {
             service: "test", pid: nil, startedAt: nil,
             lastCheck: nil, checkInterval: nil,
             status: "startup-failed",
-            errors: HeartbeatErrors(lastError: "Missing token", lastErrorAt: nil, countSinceStart: 0)
+            errors: HeartbeatErrors(lastError: "Missing token", lastErrorAt: nil, countSinceStart: 0),
+            metrics: nil
         )
         let result = evaluateHeartbeat(hb)
         XCTAssertEqual(result.health, "startup-failed")
@@ -200,7 +218,8 @@ final class ServiceManagerTests: XCTestCase {
             service: "test", pid: nil, startedAt: nil,
             lastCheck: nil, checkInterval: nil,
             status: "startup-failed",
-            errors: nil
+            errors: nil,
+            metrics: nil
         )
         let result = evaluateHeartbeat(hb)
         XCTAssertEqual(result.detail, "Unknown error")
@@ -212,7 +231,8 @@ final class ServiceManagerTests: XCTestCase {
             service: "test", pid: 1234, startedAt: now - 60000,
             lastCheck: now - 5000, checkInterval: 30000,
             status: "ok",
-            errors: HeartbeatErrors(lastError: nil, lastErrorAt: nil, countSinceStart: 0)
+            errors: HeartbeatErrors(lastError: nil, lastErrorAt: nil, countSinceStart: 0),
+            metrics: nil
         )
         let result = evaluateHeartbeat(hb, now: now)
         XCTAssertEqual(result.health, "healthy")
@@ -227,7 +247,8 @@ final class ServiceManagerTests: XCTestCase {
             service: "test", pid: 1234, startedAt: now - 700000,
             lastCheck: now - 600000, checkInterval: 30000,
             status: "ok",
-            errors: nil
+            errors: nil,
+            metrics: nil
         )
         let result = evaluateHeartbeat(hb, now: now)
         XCTAssertEqual(result.health, "unresponsive")
@@ -240,7 +261,8 @@ final class ServiceManagerTests: XCTestCase {
             service: "test", pid: 1234, startedAt: nil,
             lastCheck: nil, checkInterval: nil,
             status: "degraded",
-            errors: HeartbeatErrors(lastError: "Slack API slow", lastErrorAt: nil, countSinceStart: 3)
+            errors: HeartbeatErrors(lastError: "Slack API slow", lastErrorAt: nil, countSinceStart: 3),
+            metrics: nil
         )
         let result = evaluateHeartbeat(hb)
         XCTAssertEqual(result.health, "degraded")
@@ -253,7 +275,8 @@ final class ServiceManagerTests: XCTestCase {
             service: "test", pid: 1234, startedAt: nil,
             lastCheck: nil, checkInterval: nil,
             status: "error",
-            errors: HeartbeatErrors(lastError: "DB locked", lastErrorAt: nil, countSinceStart: 5)
+            errors: HeartbeatErrors(lastError: "DB locked", lastErrorAt: nil, countSinceStart: 5),
+            metrics: nil
         )
         let result = evaluateHeartbeat(hb)
         XCTAssertEqual(result.health, "error")
@@ -266,12 +289,45 @@ final class ServiceManagerTests: XCTestCase {
             service: "test", pid: 1234, startedAt: nil,
             lastCheck: nil, checkInterval: nil,
             status: "shutting-down",
-            errors: nil
+            errors: nil,
+            metrics: nil
         )
         let result = evaluateHeartbeat(hb)
         XCTAssertEqual(result.health, "shutting-down")
         XCTAssertNil(result.detail)
         XCTAssertEqual(result.errorCount, 0)
+    }
+
+    // MARK: - evaluateHeartbeat — scheduled services (no checkInterval)
+
+    func testEvaluateHeartbeatNoCheckInterval_WithLastCheck_Healthy() {
+        // Scheduled services (digests) write lastCheck but not checkInterval.
+        // They should be treated as healthy, not unknown/unresponsive.
+        let now = Date().timeIntervalSince1970 * 1000
+        let hb = HeartbeatData(
+            service: "digest-daily", pid: nil, startedAt: now - 60000,
+            lastCheck: now - 5000, checkInterval: nil,
+            status: "ok",
+            errors: nil,
+            metrics: nil
+        )
+        let result = evaluateHeartbeat(hb, now: now)
+        XCTAssertEqual(result.health, "healthy",
+            "Scheduled service with lastCheck but no checkInterval should be healthy")
+    }
+
+    func testEvaluateHeartbeatNoCheckIntervalNoLastCheck_Unknown() {
+        // No lastCheck and no checkInterval — genuinely unknown
+        let hb = HeartbeatData(
+            service: "digest-daily", pid: nil, startedAt: nil,
+            lastCheck: nil, checkInterval: nil,
+            status: "ok",
+            errors: nil,
+            metrics: nil
+        )
+        let result = evaluateHeartbeat(hb)
+        XCTAssertEqual(result.health, "unknown",
+            "No lastCheck and no checkInterval means we have no data — unknown")
     }
 
     // MARK: - ServiceDefinition labels

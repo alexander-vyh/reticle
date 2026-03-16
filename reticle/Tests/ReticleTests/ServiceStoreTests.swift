@@ -24,6 +24,7 @@ struct ServiceState {
     let status: ServiceStatus
     let pid: Int?
     let exitCode: Int?
+    let heartbeat: HeartbeatData?
     let heartbeatHealth: HeartbeatHealth
 }
 
@@ -85,6 +86,42 @@ func statusColor(for aggregate: AggregateStatus) -> String? {
     }
 }
 
+// MARK: - Pure function: relative time formatting (mirrors TrayMenu.relativeTime)
+
+func relativeTime(from epochMs: Double, now: Double) -> String {
+    let ageSec = Int((now - epochMs) / 1000)
+    if ageSec < 60 { return "\(ageSec)s ago" }
+    let ageMin = ageSec / 60
+    if ageMin < 60 { return "\(ageMin)m ago" }
+    let ageHr = ageMin / 60
+    if ageHr < 24 { return "\(ageHr)h ago" }
+    let ageDays = ageHr / 24
+    return "\(ageDays)d ago"
+}
+
+// MARK: - Pure function: scheduled service detail (mirrors TrayMenu.scheduledServiceDetail)
+
+func scheduledServiceDetail(_ heartbeat: HeartbeatData?, health: HeartbeatHealth, now: Double) -> String {
+    guard let hb = heartbeat, let lastCheck = hb.lastCheck else {
+        return "never run"
+    }
+
+    var parts: [String] = []
+
+    parts.append("ran \(relativeTime(from: lastCheck, now: now))")
+
+    if let metrics = hb.metrics {
+        if let items = metrics.itemCount {
+            parts.append("\(items) items")
+        }
+        if let patterns = metrics.patternCount {
+            parts.append("\(patterns) patterns")
+        }
+    }
+
+    return parts.joined(separator: ", ")
+}
+
 // MARK: - Test helpers
 
 func makeService(
@@ -92,13 +129,15 @@ func makeService(
     launchdLabel: String = "ai.claudia.test",
     scheduled: Bool = false,
     status: ServiceStatus = .running,
-    heartbeatHealth: String = "healthy"
+    heartbeatHealth: String = "healthy",
+    heartbeat: HeartbeatData? = nil
 ) -> ServiceState {
     ServiceState(
         definition: ServiceDefinition(label: label, launchdLabel: launchdLabel, heartbeatName: "test", scheduled: scheduled),
         status: status,
         pid: status == .running ? 1234 : nil,
         exitCode: status == .error ? 1 : 0,
+        heartbeat: heartbeat,
         heartbeatHealth: HeartbeatHealth(health: heartbeatHealth, detail: nil, errorCount: 0)
     )
 }
@@ -267,5 +306,91 @@ final class ServiceStoreTests: XCTestCase {
 
         XCTAssertEqual(expectedLabels, productionLabels,
             "ServiceDefinition launchd labels must match deploy script plist labels")
+    }
+
+    // ==========================================================
+    // Outcome: "Do scheduled services render correct detail text?"
+    // ==========================================================
+
+    func testRelativeTime_Seconds() {
+        let now = 1710000000000.0 // arbitrary epoch ms
+        XCTAssertEqual(relativeTime(from: now - 30_000, now: now), "30s ago")
+    }
+
+    func testRelativeTime_Minutes() {
+        let now = 1710000000000.0
+        XCTAssertEqual(relativeTime(from: now - 300_000, now: now), "5m ago")
+    }
+
+    func testRelativeTime_Hours() {
+        let now = 1710000000000.0
+        XCTAssertEqual(relativeTime(from: now - 7_200_000, now: now), "2h ago")
+    }
+
+    func testRelativeTime_Days() {
+        let now = 1710000000000.0
+        XCTAssertEqual(relativeTime(from: now - 172_800_000, now: now), "2d ago")
+    }
+
+    func testScheduledDetail_NeverRun() {
+        let detail = scheduledServiceDetail(nil, health: .unknown, now: 1710000000000.0)
+        XCTAssertEqual(detail, "never run")
+    }
+
+    func testScheduledDetail_RanRecently() {
+        let now = 1710000000000.0
+        let hb = HeartbeatData(
+            service: "digest-daily", pid: nil, startedAt: now - 60000,
+            lastCheck: now - 5000, checkInterval: nil,
+            status: "ok", errors: nil, metrics: nil
+        )
+        let health = HeartbeatHealth(health: "healthy", detail: nil, errorCount: 0)
+        let detail = scheduledServiceDetail(hb, health: health, now: now)
+        XCTAssertEqual(detail, "ran 5s ago")
+    }
+
+    func testScheduledDetail_WithMetrics() {
+        let now = 1710000000000.0
+        let hb = HeartbeatData(
+            service: "digest-weekly", pid: nil, startedAt: now - 7200000,
+            lastCheck: now - 7200000, checkInterval: nil,
+            status: "ok", errors: nil,
+            metrics: HeartbeatMetrics(
+                recording: nil, meetingId: nil, duration: nil,
+                captureMode: nil, permissionStatus: nil,
+                itemCount: 809, patternCount: 228, degradedReason: nil
+            )
+        )
+        let health = HeartbeatHealth(health: "healthy", detail: nil, errorCount: 0)
+        let detail = scheduledServiceDetail(hb, health: health, now: now)
+        XCTAssertEqual(detail, "ran 2h ago, 809 items, 228 patterns")
+    }
+
+    func testScheduledDetail_WithItemCountOnly() {
+        let now = 1710000000000.0
+        let hb = HeartbeatData(
+            service: "digest-daily", pid: nil, startedAt: now - 300000,
+            lastCheck: now - 300000, checkInterval: nil,
+            status: "ok", errors: nil,
+            metrics: HeartbeatMetrics(
+                recording: nil, meetingId: nil, duration: nil,
+                captureMode: nil, permissionStatus: nil,
+                itemCount: 42, patternCount: nil, degradedReason: nil
+            )
+        )
+        let health = HeartbeatHealth(health: "healthy", detail: nil, errorCount: 0)
+        let detail = scheduledServiceDetail(hb, health: health, now: now)
+        XCTAssertEqual(detail, "ran 5m ago, 42 items")
+    }
+
+    func testScheduledDetail_NoLastCheck() {
+        let hb = HeartbeatData(
+            service: "digest-daily", pid: nil, startedAt: nil,
+            lastCheck: nil, checkInterval: nil,
+            status: "ok", errors: nil, metrics: nil
+        )
+        let health = HeartbeatHealth(health: "unknown", detail: nil, errorCount: 0)
+        let detail = scheduledServiceDetail(hb, health: health, now: 1710000000000.0)
+        XCTAssertEqual(detail, "never run")
     }
 }

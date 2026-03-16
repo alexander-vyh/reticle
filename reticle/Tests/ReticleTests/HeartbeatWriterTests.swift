@@ -3,14 +3,14 @@ import Foundation
 
 // MARK: - Test-local copy of HeartbeatWriter (mirrors recorder implementation)
 
-struct HeartbeatMetrics: Equatable {
+struct RecorderHeartbeatMetrics: Equatable {
     let recording: Bool
     let meetingId: String?
     let duration: Double?
     let captureMode: String?
 }
 
-extension HeartbeatMetrics: Codable {
+extension RecorderHeartbeatMetrics: Codable {
     enum CodingKeys: String, CodingKey {
         case recording, meetingId, duration, captureMode
     }
@@ -52,7 +52,7 @@ struct HeartbeatPayload: Codable {
     let checkInterval: Double
     let status: String
     let errors: HeartbeatErrors2
-    let metrics: HeartbeatMetrics
+    let metrics: RecorderHeartbeatMetrics
 }
 
 /// Writes heartbeat JSON atomically to a directory.
@@ -79,7 +79,7 @@ struct HeartbeatWriter {
     func write(
         status: String = "ok",
         errors: HeartbeatErrors2 = HeartbeatErrors2(lastError: nil, lastErrorAt: nil, countSinceStart: 0),
-        metrics: HeartbeatMetrics = HeartbeatMetrics(recording: false, meetingId: nil, duration: nil, captureMode: nil)
+        metrics: RecorderHeartbeatMetrics = RecorderHeartbeatMetrics(recording: false, meetingId: nil, duration: nil, captureMode: nil)
     ) throws {
         let now = Double(Int(Date().timeIntervalSince1970 * 1000))
         let uptime = (now - startedAt) / 1000.0
@@ -175,7 +175,7 @@ final class HeartbeatWriterTests: XCTestCase {
 
     func testHeartbeatIncludesMetricsWhileRecording() throws {
         let writer = HeartbeatWriter(directory: tmpDir, serviceName: "meeting-recorder", startedAt: 1741305600000)
-        let metrics = HeartbeatMetrics(recording: true, meetingId: "mtg-123", duration: 45.5, captureMode: "device")
+        let metrics = RecorderHeartbeatMetrics(recording: true, meetingId: "mtg-123", duration: 45.5, captureMode: "device")
         try writer.write(metrics: metrics)
 
         let data = try Data(contentsOf: URL(fileURLWithPath: writer.filePath))

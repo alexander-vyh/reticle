@@ -23,6 +23,9 @@ struct HeartbeatMetrics: Codable {
     let duration: Double?
     let captureMode: String?
     let permissionStatus: String?
+    let itemCount: Int?
+    let patternCount: Int?
+    let degradedReason: String?
 }
 
 struct HeartbeatData: Codable {
@@ -121,21 +124,26 @@ class ServiceManager {
             return HeartbeatHealth(health: "shutting-down", detail: nil, errorCount: 0)
         }
 
-        guard let lastCheck = hb.lastCheck, let interval = hb.checkInterval else {
-            return .unknown
+        // If checkInterval is present, check staleness
+        if let lastCheck = hb.lastCheck, let interval = hb.checkInterval {
+            let currentTime = now ?? (Date().timeIntervalSince1970 * 1000)
+            let ageMs = currentTime - lastCheck
+            if ageMs > interval * 3 {
+                let ageMin = Int(ageMs / 60000)
+                return HeartbeatHealth(health: "unresponsive", detail: "No heartbeat for \(ageMin)m", errorCount: 0)
+            }
         }
 
-        let currentTime = now ?? (Date().timeIntervalSince1970 * 1000)
-        let ageMs = currentTime - lastCheck
-        if ageMs > interval * 3 {
-            let ageMin = Int(ageMs / 60000)
-            return HeartbeatHealth(health: "unresponsive", detail: "No heartbeat for \(ageMin)m", errorCount: 0)
+        // Scheduled services may not write checkInterval — if lastCheck exists, treat as healthy
+        if hb.lastCheck != nil {
+            return HeartbeatHealth(
+                health: "healthy",
+                detail: nil,
+                errorCount: hb.errors?.countSinceStart ?? 0
+            )
         }
-        return HeartbeatHealth(
-            health: "healthy",
-            detail: nil,
-            errorCount: hb.errors?.countSinceStart ?? 0
-        )
+
+        return .unknown
     }
 
     // MARK: - I/O operations
