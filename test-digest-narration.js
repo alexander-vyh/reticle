@@ -2,7 +2,10 @@
 
 const assert = require('assert');
 
-const { buildDailyPrompt, buildWeeklyPrompt, formatFallback } = require('./lib/digest-narration');
+const {
+  buildDailyPrompt, buildWeeklyPrompt, formatFallback,
+  buildWeeklySummaryPrompt, formatWeeklySummaryFallback, narrateWeeklySummary
+} = require('./lib/digest-narration');
 
 // --- Test: buildDailyPrompt ---
 const items = [
@@ -53,5 +56,237 @@ const emptyDaily = buildDailyPrompt([]);
 assert.ok(emptyDaily.user.includes('no items') || emptyDaily.user.includes('[]'),
   'Empty items should be handled');
 console.log('PASS: empty items handled');
+
+// === Weekly Summary Narration Tests ===
+
+const sampleCuratedData = {
+  teams: {
+    cse: {
+      accomplishments: [
+        'Implemented Terraform management for the termed-user attribute with prevent-destroy safeguards.',
+        'Configured SSO for new vendor portal via Okta integration.'
+      ],
+      inProgress: [
+        'Continued expansion of JamfPro IaC imports into production.'
+      ],
+      hiring: 'One open Senior Systems Engineer. Two candidates in final round interviews.'
+    },
+    desktop: {
+      accomplishments: [],
+      inProgress: [],
+      hiring: null
+    },
+    security: {
+      accomplishments: [
+        'Validated endpoint detection rule set against MITRE ATT&CK T1059 sub-techniques.',
+        'Implemented automated certificate rotation for internal PKI.'
+      ],
+      inProgress: [
+        'Expanded Sentinel SIEM coverage to include Azure AD sign-in logs.'
+      ],
+      hiring: 'One open Security Engineer. Sourcing pipeline has been reset after two declined offers.'
+    }
+  },
+  executiveSummary: {
+    stability: 'All systems remained stable with no employee-impacting disruptions.',
+    highlights: 'Terraform adoption expanded with new prevent-destroy safeguards.',
+    riskPosture: 'Risk posture remains unchanged.'
+  },
+  gaps: [],
+  continuity: ['JamfPro IaC imports — week 3 of ongoing work']
+};
+
+const samplePreviousNotes = `## Digital Workplace
+
+### Executive Summary
+All systems remained stable with no employee-impacting disruptions this week. Risk posture remains unchanged.
+
+### Team Notes
+
+#### Corporate Systems Engineering
+The team focused on infrastructure-as-code expansion this week.
+- Began importing initial JamfPro resources into Terraform for centralized management.
+- Configured Okta SSO for the new contractor onboarding portal.
+
+One open Senior Systems Engineer. Three candidates in pipeline; phone screens scheduled.
+
+#### Desktop Support
+Normal operational activity; no notable trends or employee-impacting issues requiring attention this week.
+
+#### Security (Platform & Endpoint)
+Continued focus on detection coverage and operational maturity.
+- Expanded Sentinel SIEM integration to cover Exchange Online audit logs.
+- Validated email gateway DLP rules against current data classification policy.
+
+One open Security Engineer. Two candidates in final round interviews.`;
+
+// --- Test: buildWeeklySummaryPrompt ---
+{
+  const prompt = buildWeeklySummaryPrompt(sampleCuratedData, samplePreviousNotes);
+
+  // Has both system and user fields
+  assert.ok(prompt.system, 'Weekly summary prompt should have system');
+  assert.ok(prompt.user, 'Weekly summary prompt should have user message');
+
+  // System prompt encodes key content rules
+  assert.ok(prompt.system.includes('Ticket counts'), 'System prompt should forbid ticket counts');
+  assert.ok(prompt.system.includes('Individual employee names'), 'System prompt should forbid individual names');
+  assert.ok(prompt.system.includes('remained stable'), 'System prompt should include vocabulary');
+  assert.ok(prompt.system.includes('Digital Workplace'), 'System prompt should reference the section name');
+  assert.ok(prompt.system.includes('Corporate Systems Engineering'), 'System prompt should name sub-teams');
+  assert.ok(prompt.system.includes('Executive Summary'), 'System prompt should describe output structure');
+
+  // User message includes curated data
+  assert.ok(prompt.user.includes('prevent-destroy'), 'User message should include curated data');
+  assert.ok(prompt.user.includes('JamfPro'), 'User message should include in-progress items');
+
+  // User message includes previous notes for continuity
+  assert.ok(prompt.user.includes('Began importing initial JamfPro'), 'User message should include previous notes');
+
+  console.log('PASS: buildWeeklySummaryPrompt');
+}
+
+// --- Test: buildWeeklySummaryPrompt without previous notes ---
+{
+  const prompt = buildWeeklySummaryPrompt(sampleCuratedData, null);
+  assert.ok(prompt.user, 'Should handle null previous notes');
+  assert.ok(!prompt.user.includes('undefined'), 'Should not contain "undefined" literal');
+  console.log('PASS: buildWeeklySummaryPrompt without previous notes');
+}
+
+// --- Test: formatWeeklySummaryFallback ---
+{
+  const fallback = formatWeeklySummaryFallback(sampleCuratedData);
+
+  // Should contain the basic structure
+  assert.ok(fallback.includes('Digital Workplace'), 'Fallback should have DW header');
+  assert.ok(fallback.includes('Executive Summary'), 'Fallback should have exec summary');
+  assert.ok(fallback.includes('Corporate Systems Engineering'), 'Fallback should have CSE section');
+  assert.ok(fallback.includes('Desktop Support'), 'Fallback should have Desktop section');
+  assert.ok(fallback.includes('Security'), 'Fallback should have Security section');
+
+  // Should include actual data
+  assert.ok(fallback.includes('prevent-destroy'), 'Fallback should include accomplishments');
+  assert.ok(fallback.includes('JamfPro'), 'Fallback should include in-progress items');
+  assert.ok(fallback.includes('Senior Systems Engineer'), 'Fallback should include hiring');
+  assert.ok(fallback.includes('Risk posture remains unchanged'), 'Fallback should include risk posture');
+
+  console.log('PASS: formatWeeklySummaryFallback');
+}
+
+// --- Test: formatWeeklySummaryFallback with empty desktop ---
+{
+  const fallback = formatWeeklySummaryFallback(sampleCuratedData);
+  // Desktop should get default text when no accomplishments
+  assert.ok(
+    fallback.includes('Normal operational activity') || fallback.includes('no notable trends'),
+    'Fallback should use default text for empty Desktop section'
+  );
+  console.log('PASS: formatWeeklySummaryFallback empty desktop default');
+}
+
+// --- Test: narrateWeeklySummary calls AI and returns text ---
+{
+  // Mock the AI module
+  const origModule = require.cache[require.resolve('./lib/ai')];
+  const origExports = origModule.exports;
+
+  const mockResponse = '## Digital Workplace\n\n### Executive Summary\nAll systems remained stable.';
+  origModule.exports = {
+    ...origExports,
+    getClient: () => ({
+      messages: {
+        create: async (params) => {
+          // Verify it uses the right model
+          assert.strictEqual(params.model, 'claude-sonnet-4-6', 'Should use claude-sonnet-4-6');
+          assert.strictEqual(params.max_tokens, 2000, 'Should use 2000 max tokens');
+          return {
+            content: [{ text: mockResponse }],
+            usage: { input_tokens: 500, output_tokens: 200 }
+          };
+        }
+      }
+    })
+  };
+
+  // Clear the digest-narration cache to pick up the mock
+  delete require.cache[require.resolve('./lib/digest-narration')];
+  const { narrateWeeklySummary: mockedNarrate } = require('./lib/digest-narration');
+
+  mockedNarrate(sampleCuratedData, samplePreviousNotes).then(result => {
+    assert.strictEqual(result, mockResponse, 'Should return AI response text');
+    console.log('PASS: narrateWeeklySummary with AI mock');
+
+    // Restore
+    origModule.exports = origExports;
+    delete require.cache[require.resolve('./lib/digest-narration')];
+  }).catch(err => {
+    origModule.exports = origExports;
+    delete require.cache[require.resolve('./lib/digest-narration')];
+    throw err;
+  });
+}
+
+// --- Test: narrateWeeklySummary falls back when AI unavailable ---
+{
+  const origModule = require.cache[require.resolve('./lib/ai')];
+  const origExports = origModule.exports;
+
+  origModule.exports = {
+    ...origExports,
+    getClient: () => null
+  };
+
+  delete require.cache[require.resolve('./lib/digest-narration')];
+  const { narrateWeeklySummary: fallbackNarrate } = require('./lib/digest-narration');
+
+  fallbackNarrate(sampleCuratedData, samplePreviousNotes).then(result => {
+    // When AI is unavailable, should return the fallback
+    assert.ok(result, 'Should return a fallback string');
+    assert.ok(result.includes('Digital Workplace'), 'Fallback should have DW header');
+    assert.ok(result.includes('Executive Summary'), 'Fallback should have exec summary');
+    console.log('PASS: narrateWeeklySummary fallback when AI unavailable');
+
+    // Restore
+    origModule.exports = origExports;
+    delete require.cache[require.resolve('./lib/digest-narration')];
+  }).catch(err => {
+    origModule.exports = origExports;
+    delete require.cache[require.resolve('./lib/digest-narration')];
+    throw err;
+  });
+}
+
+// --- Test: narrateWeeklySummary falls back when AI throws ---
+{
+  const origModule = require.cache[require.resolve('./lib/ai')];
+  const origExports = origModule.exports;
+
+  origModule.exports = {
+    ...origExports,
+    getClient: () => ({
+      messages: {
+        create: async () => { throw new Error('API error'); }
+      }
+    })
+  };
+
+  delete require.cache[require.resolve('./lib/digest-narration')];
+  const { narrateWeeklySummary: errorNarrate } = require('./lib/digest-narration');
+
+  errorNarrate(sampleCuratedData, samplePreviousNotes).then(result => {
+    assert.ok(result, 'Should return fallback on error');
+    assert.ok(result.includes('Digital Workplace'), 'Fallback should have DW header');
+    console.log('PASS: narrateWeeklySummary fallback on AI error');
+
+    // Restore
+    origModule.exports = origExports;
+    delete require.cache[require.resolve('./lib/digest-narration')];
+  }).catch(err => {
+    origModule.exports = origExports;
+    delete require.cache[require.resolve('./lib/digest-narration')];
+    throw err;
+  });
+}
 
 console.log('\n=== NARRATION TESTS PASSED ===');
