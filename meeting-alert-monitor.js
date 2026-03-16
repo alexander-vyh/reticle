@@ -36,6 +36,9 @@ let o3Db = null;
 let accountId = null;
 let errorCount = 0;
 
+// Poll timer — stored so SIGHUP can reset it with updated interval
+let pollTimer = null;
+
 const SOUNDS = {
   fiveMin: '/System/Library/Sounds/Blow.aiff',
   oneMin: '/System/Library/Sounds/Sosumi.aiff',
@@ -43,10 +46,11 @@ const SOUNDS = {
 };
 
 const config = require('./lib/config');
+const peopleStore = require('./lib/people-store');
 
 const O3_CONFIG = {
   myEmail: config.gmailAccount,
-  directReports: config.directReports,
+  directReports: [],  // refreshed from DB each poll cycle via peopleStore.getDirectReports()
   afternoonPrepWindow: { startHour: 14, endHour: 15 },  // 2-3pm
   minGapMinutes: 10,
   maxPostDeferHours: 4,
@@ -286,6 +290,10 @@ async function sendPostMeetingNudge(db, event, report) {
  */
 async function checkO3Notifications(events, db, accountId) {
   if (!db) return;
+
+  // Refresh direct reports from DB each cycle so changes take effect without a restart
+  O3_CONFIG.directReports = peopleStore.getDirectReports(db);
+
   const now = Date.now();
 
   for (const event of events) {
@@ -926,7 +934,7 @@ async function main() {
   }
 
   // Set up polling interval for calendar sync
-  setInterval(async () => {
+  pollTimer = setInterval(async () => {
     try {
       const syncedEvents = await syncCalendar();
       meetingCache.cleanupAlertState(syncedEvents);
@@ -989,6 +997,50 @@ function shutdown(signal) {
 
 process.on('SIGTERM', () => shutdown('SIGTERM'));
 process.on('SIGINT', () => shutdown('SIGINT'));
+
+process.on('SIGHUP', () => {
+  log.info('Received SIGHUP, reloading settings');
+  try {
+    const settingsPath = path.join(config.configDir, 'settings.json');
+    if (fs.existsSync(settingsPath)) {
+      const settings = JSON.parse(fs.readFileSync(settingsPath, 'utf-8'));
+      CONFIG.pollInterval = (settings.polling?.meetingAlertPollIntervalSeconds ?? 120) * 1000;
+      // Update alert thresholds if provided
+      if (settings.notifications?.alertThresholds) {
+        Object.assign(CONFIG.alertThresholds, settings.notifications.alertThresholds);
+      }
+      log.info({ pollIntervalMs: CONFIG.pollInterval }, 'Settings reloaded');
+    }
+  } catch (e) {
+    log.warn({ error: e.message }, 'Failed to reload settings, keeping current values');
+  }
+
+  // Reset the poll timer so the new interval takes effect immediately
+  if (pollTimer) {
+    clearInterval(pollTimer);
+    pollTimer = setInterval(async () => {
+      try {
+        const syncedEvents = await syncCalendar();
+        meetingCache.cleanupAlertState(syncedEvents);
+        await checkO3Notifications(syncedEvents, o3Db, accountId);
+        checkWeeklySummary(o3Db);
+        heartbeat.write('meeting-alerts', {
+          checkInterval: CONFIG.pollInterval,
+          status: 'ok',
+          metrics: { upcomingMeetings: syncedEvents.length }
+        });
+      } catch (error) {
+        log.error({ err: error }, 'Poll cycle error');
+        heartbeat.write('meeting-alerts', {
+          checkInterval: CONFIG.pollInterval,
+          status: 'error',
+          errors: { lastError: error.message, lastErrorAt: Date.now(), countSinceStart: ++errorCount }
+        });
+      }
+    }, CONFIG.pollInterval);
+    log.info({ newInterval: CONFIG.pollInterval }, 'Poll timer reset');
+  }
+});
 
 // Run
 main().catch(err => {

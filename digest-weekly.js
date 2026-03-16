@@ -93,14 +93,9 @@ async function main() {
   allItems = deduplicateItems(allItems);
   log.info({ total: allItems.length, failed: failedCollectors }, 'Collection complete');
 
-  // Save snapshot (use local date to match launchd schedule timezone)
+  // Save snapshot date (use local date to match launchd schedule timezone)
   const today = new Date();
   const dateStr = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`;
-  reticleDb.saveSnapshot(db, accountId, {
-    snapshotDate: dateStr,
-    cadence: 'weekly',
-    items: allItems
-  });
 
   // Layer 2: Pattern detection
   let patterns = [];
@@ -113,8 +108,10 @@ async function main() {
 
   // Layer 3: AI narration (with resilient retry)
   let message;
+  let narrationSucceeded = false;
   try {
     message = await narrateWeekly(allItems, patterns);
+    if (message) narrationSucceeded = true;
   } catch (err) {
     log.warn({ err }, 'First narration attempt failed');
   }
@@ -124,6 +121,7 @@ async function main() {
     await new Promise(r => setTimeout(r, 30000));
     try {
       message = await narrateWeekly(allItems, patterns);
+      if (message) narrationSucceeded = true;
     } catch (err) {
       log.warn({ err }, 'Second narration attempt failed');
     }
@@ -141,6 +139,14 @@ async function main() {
   if (failedCollectors.length > 0) {
     message += `\n\n_Note: ${failedCollectors.join(', ')} data unavailable for this digest._`;
   }
+
+  // Save snapshot with narration text
+  reticleDb.saveSnapshot(db, accountId, {
+    snapshotDate: dateStr,
+    cadence: 'weekly',
+    items: allItems,
+    narration: message
+  });
 
   // Deliver
   try {
@@ -160,7 +166,10 @@ async function main() {
     log.warn({ err }, 'Snapshot pruning failed — non-critical, continuing');
   }
 
-  heartbeat.write(SERVICE_NAME, { status: 'ok', itemCount: allItems.length, patternCount: patterns.length });
+  const heartbeatStatus = narrationSucceeded ? 'ok' : 'degraded';
+  const heartbeatData = { status: heartbeatStatus, itemCount: allItems.length, patternCount: patterns.length };
+  if (!narrationSucceeded) heartbeatData.degradedReason = 'narration-unavailable';
+  heartbeat.write(SERVICE_NAME, heartbeatData);
   process.exit(0);
 }
 

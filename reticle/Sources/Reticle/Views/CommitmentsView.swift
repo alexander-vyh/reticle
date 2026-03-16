@@ -6,6 +6,7 @@ struct CommitmentsView: View {
     @State private var summary: CommitmentSummary?
     @State private var isLoading = false
     @State private var error: String?
+    @State private var staleDays = 7
 
     private var grouped: [(String, [Commitment])] {
         let order = ["committed_to", "asked_to", "risk_flagged", "decision_made"]
@@ -18,6 +19,33 @@ struct CommitmentsView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
+            // Settings strip — always visible
+            VStack(spacing: 0) {
+                if let summary = summary {
+                    SummaryBar(summary: summary)
+                }
+                HStack {
+                    Spacer()
+                    Text("Stale after:")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Picker("", selection: $staleDays) {
+                        Text("3d").tag(3)
+                        Text("5d").tag(5)
+                        Text("7d").tag(7)
+                        Text("14d").tag(14)
+                        Text("30d").tag(30)
+                    }
+                    .pickerStyle(.menu)
+                    .labelsHidden()
+                }
+                .padding(.horizontal)
+                .padding(.bottom, 4)
+                .background(.bar)
+            }
+
+            Divider()
+
             if isLoading && commitments.isEmpty {
                 ProgressView("Loading commitments...")
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -34,9 +62,6 @@ struct CommitmentsView: View {
                     description: Text("All commitments are resolved.")
                 )
             } else {
-                if let summary = summary {
-                    SummaryBar(summary: summary)
-                }
                 List {
                     ForEach(grouped, id: \.0) { attribute, items in
                         Section(header: Text(sectionTitle(for: attribute))) {
@@ -59,6 +84,7 @@ struct CommitmentsView: View {
             }
         }
         .task { await loadCommitments() }
+        .onChange(of: staleDays) { Task { await loadCommitments() } }
     }
 
     private func sectionTitle(for attribute: String) -> String {
@@ -75,7 +101,7 @@ struct CommitmentsView: View {
         isLoading = true
         error = nil
         do {
-            let response = try await gateway.listCommitments()
+            let response = try await gateway.listCommitments(staleDays: staleDays)
             commitments = response.commitments
             summary = response.summary
         } catch {

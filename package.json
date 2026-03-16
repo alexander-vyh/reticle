@@ -16,7 +16,7 @@
     "husky": "^9.1.7"
   },
   "scripts": {
-    "test": "node test-heartbeat.js && node test-startup-validation.js && node test-reticle-db.js && node test-people-store.js && node test-digest-item.js && node test-digest-collectors.js && node test-digest-patterns.js && node test-digest-narration.js && node test-slack-reader.js && node test-feedback-collector.js && node test-feedback-tracker.js && node test-feedback-blocks.js && node test-gateway.js && node test-gmail-api.js && node test-email-filters.js && node test-slack-capture-isolation.js && node test-jira-reader.js && node test-track-conversation.js && node test-jira-capture.js && node test-seed-data.js && node test-jira-activity-collector.js && node test-dw-weekly-report.js && node test-knowledge-extractor.js && node test-crack-finder.js",
+    "test": "node test-heartbeat.js && node test-startup-validation.js && node test-reticle-db.js && node test-people-store.js && node test-digest-item.js && node test-digest-collectors.js && node test-digest-patterns.js && node test-digest-narration.js && node test-slack-reader.js && node test-feedback-collector.js && node test-feedback-tracker.js && node test-feedback-blocks.js && node test-gateway.js && node test-gmail-api.js && node test-email-filters.js && node test-slack-capture-isolation.js && node test-jira-reader.js && node test-track-conversation.js && node test-jira-capture.js && node test-seed-data.js && node test-jira-activity-collector.js && node test-dw-weekly-report.js && node test-knowledge-extractor.js && node test-crack-finder.js && node test-digest-api.js",
     "prepare": "husky"
   }
 }

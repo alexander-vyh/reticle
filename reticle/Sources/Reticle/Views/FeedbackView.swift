@@ -6,51 +6,108 @@ struct FeedbackView: View {
     @State private var selectedId: String?
     @State private var editedDraft = ""
     @State private var copied = false
+    @State private var weeklyTarget: Int = 3
+    @State private var scanWindowHours: Int = 24
+    @State private var saveTask: Task<Void, Never>?
 
     private var selected: FeedbackCandidate? {
         candidates.first { $0.id == selectedId }
     }
 
     var body: some View {
-        HSplitView {
-            // Left: candidate list
-            List(candidates, selection: $selectedId) { candidate in
-                CandidateRow(candidate: candidate)
-                    .tag(candidate.id)
-            }
-            .frame(minWidth: 220, maxWidth: 280)
-            .onChange(of: selectedId) { _, _ in
-                editedDraft = selected?.draft ?? ""
-                copied = false
-            }
-
-            // Right: detail panel
-            if let candidate = selected {
-                FeedbackDetailView(
-                    candidate: candidate,
-                    editedDraft: $editedDraft,
-                    copied: $copied,
-                    onDelivered: {
-                        Task {
-                            try? await gateway.markDelivered(id: candidate.id)
-                            await loadCandidates()
-                            selectedId = nil
-                        }
-                    },
-                    onSkipped: {
-                        Task {
-                            try? await gateway.markSkipped(id: candidate.id)
-                            await loadCandidates()
-                            selectedId = nil
-                        }
+        VStack(spacing: 0) {
+            // Settings strip
+            HStack(spacing: 12) {
+                Text("Your standard:")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Stepper(value: $weeklyTarget, in: 1...20) {
+                    Text("\(weeklyTarget)/wk")
+                        .font(.caption)
+                        .monospacedDigit()
+                }
+                .labelsHidden()
+                .onChange(of: weeklyTarget) { _, newValue in
+                    saveTask?.cancel()
+                    saveTask = Task {
+                        try? await Task.sleep(for: .milliseconds(500))
+                        guard !Task.isCancelled else { return }
+                        try? await gateway.updateFeedbackSettings(weeklyTarget: newValue)
                     }
-                )
-            } else {
-                ContentUnavailableView(
-                    "No Candidate Selected",
-                    systemImage: "bubble.left.and.bubble.right",
-                    description: Text("Select a feedback candidate to review.")
-                )
+                }
+
+                Divider().frame(height: 14)
+
+                Text("Scan:")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Picker("", selection: $scanWindowHours) {
+                    Text("24h").tag(24)
+                    Text("48h").tag(48)
+                    Text("72h").tag(72)
+                    Text("14d").tag(336)
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .frame(width: 160)
+                .onChange(of: scanWindowHours) { _, newValue in
+                    saveTask?.cancel()
+                    saveTask = Task {
+                        try? await Task.sleep(for: .milliseconds(500))
+                        guard !Task.isCancelled else { return }
+                        try? await gateway.updateFeedbackSettings(scanWindowHours: newValue)
+                    }
+                }
+
+                Spacer()
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 6)
+            .background(.bar)
+
+            Divider()
+
+            // Candidate list + detail panel
+            HSplitView {
+                // Left: candidate list
+                List(candidates, selection: $selectedId) { candidate in
+                    CandidateRow(candidate: candidate)
+                        .tag(candidate.id)
+                }
+                .frame(minWidth: 220, maxWidth: 280)
+                .onChange(of: selectedId) { _, _ in
+                    editedDraft = selected?.draft ?? ""
+                    copied = false
+                }
+
+                // Right: detail panel
+                if let candidate = selected {
+                    FeedbackDetailView(
+                        candidate: candidate,
+                        editedDraft: $editedDraft,
+                        copied: $copied,
+                        onDelivered: {
+                            Task {
+                                try? await gateway.markDelivered(id: candidate.id)
+                                await loadCandidates()
+                                selectedId = nil
+                            }
+                        },
+                        onSkipped: {
+                            Task {
+                                try? await gateway.markSkipped(id: candidate.id)
+                                await loadCandidates()
+                                selectedId = nil
+                            }
+                        }
+                    )
+                } else {
+                    ContentUnavailableView(
+                        "No Candidate Selected",
+                        systemImage: "bubble.left.and.bubble.right",
+                        description: Text("Select a feedback candidate to review.")
+                    )
+                }
             }
         }
         .navigationTitle("Feedback")
@@ -61,7 +118,13 @@ struct FeedbackView: View {
                 }
             }
         }
-        .task { await loadCandidates() }
+        .task {
+            await loadCandidates()
+            if let settings = try? await gateway.fetchFeedbackSettings() {
+                weeklyTarget = Int(settings.weeklyTarget ?? "3") ?? 3
+                scanWindowHours = Int(settings.scanWindowHours ?? "24") ?? 24
+            }
+        }
     }
 
     func loadCandidates() async {

@@ -1,7 +1,11 @@
 #!/usr/bin/env node
 'use strict';
 
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
 const express = require('express');
+const log = require('./lib/logger')('gateway');
 const reticleDb = require('./reticle-db');
 const peopleStore = require('./lib/people-store');
 const slackReader = require('./lib/slack-reader');
@@ -17,6 +21,15 @@ app.use(express.json());
 
 const db = reticleDb.initDatabase();
 
+// Seed team directory from dwTeamEmails
+const existingTeam = peopleStore.listTeamMembers(db);
+if (existingTeam.length === 0 && config.dwTeamEmails && config.dwTeamEmails.length > 0) {
+  for (const t of config.dwTeamEmails) {
+    peopleStore.addPerson(db, { email: t.email, name: t.name, team: t.team });
+  }
+  console.log(`Seeded ${config.dwTeamEmails.length} team members from team.json`);
+}
+
 // GET /people — list all monitored people
 app.get('/people', (req, res) => {
   const people = peopleStore.listPeople(db);
@@ -25,11 +38,11 @@ app.get('/people', (req, res) => {
 
 // POST /people — add person by email (triggers Slack resolution)
 app.post('/people', (req, res) => {
-  const { email, name } = req.body;
+  const { email, name, role, title, team } = req.body;
   if (!email) return res.status(400).json({ error: 'email required' });
 
   try {
-    peopleStore.addPerson(db, { email, name });
+    peopleStore.addPerson(db, { email, name: name || null, role: role || 'peer', title: title || null, team: team || null });
   } catch (err) {
     return res.status(500).json({ error: 'failed to add person' });
   }
@@ -46,6 +59,38 @@ app.post('/people', (req, res) => {
 app.delete('/people/:email', (req, res) => {
   peopleStore.removePerson(db, decodeURIComponent(req.params.email));
   res.json({ ok: true });
+});
+
+// PATCH /people/:email — update person fields (role, escalation_tier, title, team, name, slack_id)
+app.patch('/people/:email', (req, res) => {
+  try {
+    const email = decodeURIComponent(req.params.email);
+    const person = db.prepare('SELECT * FROM monitored_people WHERE email = ?').get(email);
+    if (!person) {
+      return res.status(404).json({ error: 'Person not found' });
+    }
+    const { role, escalation_tier, title, team, name, slack_id } = req.body;
+    if (escalation_tier !== undefined && escalation_tier !== null) {
+      const validTiers = ['immediate', '4h', 'daily', 'weekly'];
+      if (!validTiers.includes(escalation_tier)) {
+        return res.status(400).json({
+          error: `Invalid escalation_tier. Must be one of: ${validTiers.join(', ')}`
+        });
+      }
+    }
+    const fields = {};
+    if (role !== undefined) fields.role = role;
+    if (escalation_tier !== undefined) fields.escalation_tier = escalation_tier;
+    if (title !== undefined) fields.title = title;
+    if (team !== undefined) fields.team = team;
+    if (name !== undefined) fields.name = name;
+    if (slack_id !== undefined) fields.slack_id = slack_id;
+
+    peopleStore.updatePerson(db, email, fields);
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 // GET /feedback/candidates — pending candidates
@@ -96,6 +141,34 @@ app.get('/feedback/stats', (req, res) => {
   const monthly = feedbackTracker.getMonthlyCountsByReport(db, primaryAccount.id, now - 30 * 86400);
   const ratios = feedbackTracker.getRatioByReport(db, primaryAccount.id, now - 30 * 86400);
   res.json({ weekly, monthly, ratios });
+});
+
+// GET /feedback/settings
+app.get('/feedback/settings', (req, res) => {
+  try {
+    const rows = db.prepare('SELECT key, value FROM feedback_settings').all();
+    const settings = Object.fromEntries(rows.map(r => [r.key, r.value]));
+    res.json(settings);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// PATCH /feedback/settings
+app.patch('/feedback/settings', (req, res) => {
+  try {
+    const { weeklyTarget, scanWindowHours } = req.body;
+    const now = Math.floor(Date.now() / 1000);
+    if (weeklyTarget !== undefined) {
+      db.prepare("INSERT OR REPLACE INTO feedback_settings (key, value, updated_at) VALUES ('weeklyTarget', ?, ?)").run(String(weeklyTarget), now);
+    }
+    if (scanWindowHours !== undefined) {
+      db.prepare("INSERT OR REPLACE INTO feedback_settings (key, value, updated_at) VALUES ('scanWindowHours', ?, ?)").run(String(scanWindowHours), now);
+    }
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 // --- Commitments (org-memory knowledge graph) ---
@@ -246,6 +319,204 @@ app.post('/api/commitments/:id/resolve', (req, res) => {
   });
 
   res.json({ ok: true, id: req.params.id, resolution });
+});
+
+// GET /config/filters — read filterPatterns from team.json
+app.get('/config/filters', (req, res) => {
+  try {
+    res.json(config.filterPatterns || {});
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// PATCH /config/filters — update filterPatterns in team.json
+app.patch('/config/filters', (req, res) => {
+  try {
+    const teamPath = path.join(config.configDir, 'team.json');
+    const current = JSON.parse(fs.readFileSync(teamPath, 'utf-8'));
+    if (req.body.companyDomain !== undefined) {
+      current.filterPatterns = current.filterPatterns || {};
+      current.filterPatterns.companyDomain = req.body.companyDomain;
+    }
+    if (req.body.dwGroupEmail !== undefined) {
+      current.filterPatterns = current.filterPatterns || {};
+      current.filterPatterns.dwGroupEmail = req.body.dwGroupEmail;
+    }
+    // Atomic write
+    const tmpPath = teamPath + '.tmp';
+    fs.writeFileSync(tmpPath, JSON.stringify(current, null, 2));
+    fs.renameSync(tmpPath, teamPath);
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// GET /config/accounts — returns account identifiers + connection status (NO raw tokens)
+app.get('/config/accounts', (req, res) => {
+  try {
+    const accounts = {
+      slack: {
+        identifier: config.slackUsername || config.slackUserId || null,
+        connected: !!config.slackBotToken,
+        hasToken: !!config.slackBotToken,
+        hasAppToken: !!config.slackAppToken,
+        userId: config.slackUserId || '',
+        username: config.slackUsername || ''
+      },
+      gmail: {
+        identifier: config.gmailAccount || null,
+        connected: !!config.gmailAccount,
+        account: config.gmailAccount || ''
+      },
+      jira: {
+        identifier: config.jiraBaseUrl || null,
+        connected: !!(config.jiraApiToken && config.jiraBaseUrl),
+        baseUrl: config.jiraBaseUrl || '',
+        userEmail: config.jiraUserEmail || '',
+        hasToken: !!config.jiraApiToken
+      }
+    };
+    res.json(accounts);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// PATCH /config/accounts — update secrets.json fields
+app.patch('/config/accounts', (req, res) => {
+  try {
+    const secretsPath = path.join(config.configDir, 'secrets.json');
+    const current = JSON.parse(fs.readFileSync(secretsPath, 'utf-8'));
+    const allowed = [
+      'slackBotToken', 'slackAppToken', 'slackSigningSecret',
+      'slackUserId', 'slackUsername', 'slackUserToken',
+      'gmailAccount', 'jiraApiToken', 'jiraBaseUrl', 'jiraUserEmail'
+    ];
+    for (const [key, value] of Object.entries(req.body)) {
+      if (allowed.includes(key)) current[key] = value;
+    }
+    // Atomic write
+    const tmpPath = secretsPath + '.tmp';
+    fs.writeFileSync(tmpPath, JSON.stringify(current, null, 2));
+    fs.renameSync(tmpPath, secretsPath);
+    res.json({ ok: true, note: 'Restart services to apply credential changes' });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// --- Settings (settings.json) ---
+
+const SETTINGS_SERVICE_MAP = {
+  polling: {
+    gmailIntervalMinutes: 'gmail-monitor',
+    slackResponseTimeoutMinutes: 'slack-events',
+    followupCheckIntervalMinutes: 'followup-checker',
+    meetingAlertPollIntervalSeconds: 'meeting-alerts',
+  },
+  notifications: 'meeting-alerts',
+  thresholds: 'followup-checker',
+  o3: 'meeting-alerts',
+  // digest: no SIGHUP (launchd-scheduled, reads on next run)
+};
+
+function signalAffectedServices(changedKeys) {
+  const heartbeatDir = process.env.RETICLE_HEARTBEAT_DIR ||
+    path.join(os.homedir(), '.reticle', 'heartbeats');
+  const signaled = [];
+
+  const serviceNames = new Set();
+  for (const key of changedKeys) {
+    const mapping = SETTINGS_SERVICE_MAP[key];
+    if (typeof mapping === 'string') serviceNames.add(mapping);
+    else if (typeof mapping === 'object' && mapping !== null) {
+      Object.values(mapping).forEach(s => serviceNames.add(s));
+    }
+  }
+
+  for (const name of serviceNames) {
+    try {
+      const hbPath = path.join(heartbeatDir, `${name}.json`);
+      if (!fs.existsSync(hbPath)) continue;
+      const hb = JSON.parse(fs.readFileSync(hbPath, 'utf-8'));
+      if (!hb.pid) continue;
+      // Verify PID is alive before signaling
+      try { process.kill(hb.pid, 0); } catch { continue; }
+      process.kill(hb.pid, 'SIGHUP');
+      signaled.push(name);
+    } catch (e) {
+      log.warn({ service: name, error: e.message }, 'Failed to signal service');
+    }
+  }
+  return signaled;
+}
+
+// GET /settings — read settings.json with defaults
+app.get('/settings', (req, res) => {
+  try {
+    const settingsPath = path.join(config.configDir, 'settings.json');
+    let settings = {};
+    if (fs.existsSync(settingsPath)) {
+      settings = JSON.parse(fs.readFileSync(settingsPath, 'utf-8'));
+    }
+    res.json(settings);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// PATCH /settings — validate, write atomically, SIGHUP affected services
+app.patch('/settings', (req, res) => {
+  try {
+    // Validate escalation threshold floors
+    if (req.body.thresholds) {
+      const t = req.body.thresholds;
+      const floors = {
+        followupEscalationEmailHours: 24,
+        followupEscalationSlackDmHours: 8,
+        followupEscalationSlackMentionHours: 24
+      };
+      for (const [key, floor] of Object.entries(floors)) {
+        if (t[key] !== undefined && t[key] < floor) {
+          return res.status(400).json({
+            error: `${key} minimum is ${floor} hours`,
+            floor
+          });
+        }
+      }
+    }
+
+    const settingsPath = path.join(config.configDir, 'settings.json');
+    let current = {};
+    if (fs.existsSync(settingsPath)) {
+      current = JSON.parse(fs.readFileSync(settingsPath, 'utf-8'));
+    }
+
+    // Deep merge changed keys
+    const changedKeys = [];
+    for (const [section, values] of Object.entries(req.body)) {
+      if (typeof values === 'object' && values !== null) {
+        current[section] = { ...(current[section] || {}), ...values };
+      } else {
+        current[section] = values;
+      }
+      changedKeys.push(section);
+    }
+
+    // Atomic write
+    const tmpPath = settingsPath + '.tmp';
+    fs.writeFileSync(tmpPath, JSON.stringify(current, null, 2));
+    fs.renameSync(tmpPath, settingsPath);
+
+    // SIGHUP affected services
+    const signaled = signalAffectedServices(changedKeys);
+
+    res.json({ ok: true, signaled });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 // --- Entities (org-memory knowledge graph) ---
@@ -524,6 +795,48 @@ app.get('/api/cracks', (req, res) => {
 
   const cracks = findCracks(omDb, { staleDays, monitoredOnly, topN });
   res.json({ cracks });
+});
+
+// --- Digest snapshots ---
+
+// GET /api/digest/latest?cadence=weekly — most recent snapshot for cadence
+app.get('/api/digest/latest', (req, res) => {
+  const { cadence } = req.query;
+  if (!cadence) return res.status(400).json({ error: 'cadence query parameter required' });
+
+  const row = reticleDb.getLatestSnapshot(db, cadence);
+  if (!row) return res.json({ snapshot: null });
+
+  res.json({
+    snapshot: {
+      id: row.id,
+      snapshotDate: row.snapshot_date,
+      cadence: row.cadence,
+      items: row.items,
+      narration: row.narration || null,
+      createdAt: row.created_at,
+    }
+  });
+});
+
+// GET /api/digest/history?cadence=weekly&limit=4 — last N snapshots
+app.get('/api/digest/history', (req, res) => {
+  const { cadence } = req.query;
+  if (!cadence) return res.status(400).json({ error: 'cadence query parameter required' });
+
+  const limit = parseInt(req.query.limit) || 4;
+  const rows = reticleDb.getSnapshotHistory(db, cadence, limit);
+
+  res.json({
+    snapshots: rows.map(row => ({
+      id: row.id,
+      snapshotDate: row.snapshot_date,
+      cadence: row.cadence,
+      items: row.items,
+      narration: row.narration || null,
+      createdAt: row.created_at,
+    }))
+  });
 });
 
 // Health check

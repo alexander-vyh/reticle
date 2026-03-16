@@ -17,6 +17,7 @@ const heartbeat = require('./lib/heartbeat');
 const { validatePrerequisites } = require('./lib/startup-validation');
 const gmailApi = require('./lib/gmail-api');
 const ai = require('./lib/ai');
+const peopleStore = require('./lib/people-store');
 
 // Configuration
 const CONFIG = {
@@ -29,6 +30,9 @@ const CONFIG = {
   historyFile: path.join(__dirname, 'gmail-last-check.txt'),
   batchQueueFile: path.join(__dirname, 'gmail-batch-queue.json')
 };
+
+// Poll timer — stored so SIGHUP can reset it with updated interval
+let pollTimer = null;
 
 // Batch queue for non-urgent emails
 let batchQueue = [];
@@ -63,8 +67,8 @@ let accountId = null;
 // Sent-mail detection: use wider window on first run to cover restart gaps
 let sentMailFirstRun = true;
 
-// VIP senders (loaded from ~/.reticle/config/team.json)
-const VIPS = config.vipEmails;
+// VIP senders — refreshed from DB each poll cycle via peopleStore.getVipEmails()
+let VIPS = [];
 
 // VIP title patterns (case-insensitive)
 const VIP_TITLES = ['ceo', 'cto', 'cfo', 'coo', 'cmo', 'ciso', 'cpo', 'vp', 'vice president', 'president'];
@@ -1012,6 +1016,11 @@ async function checkSentEmails() {
 async function checkEmails() {
   log.info('Checking for new emails');
 
+  // Refresh VIPs from DB each cycle so changes take effect without a restart
+  if (followupsDbConn) {
+    VIPS = peopleStore.getVipEmails(followupsDbConn);
+  }
+
   const emails = await getRecentEmails();
   const lastCheck = getLastCheckTime();
 
@@ -1322,7 +1331,7 @@ async function main() {
   await checkEmails();
 
   // Loop
-  setInterval(async () => {
+  pollTimer = setInterval(async () => {
     try {
       await checkEmails();
     } catch (error) {
@@ -1344,6 +1353,38 @@ function shutdown(signal) {
 }
 process.on('SIGTERM', () => shutdown('SIGTERM'));
 process.on('SIGINT', () => shutdown('SIGINT'));
+
+process.on('SIGHUP', () => {
+  log.info('Received SIGHUP, reloading settings');
+  try {
+    const settingsPath = path.join(config.configDir, 'settings.json');
+    if (fs.existsSync(settingsPath)) {
+      const settings = JSON.parse(fs.readFileSync(settingsPath, 'utf-8'));
+      CONFIG.checkInterval = (settings.polling?.gmailIntervalMinutes ?? 5) * 60 * 1000;
+      log.info({ checkIntervalMs: CONFIG.checkInterval }, 'Settings reloaded');
+    }
+  } catch (e) {
+    log.warn({ error: e.message }, 'Failed to reload settings, keeping current values');
+  }
+
+  // Reset the timer so the new interval takes effect immediately
+  if (pollTimer) {
+    clearInterval(pollTimer);
+    pollTimer = setInterval(async () => {
+      try {
+        await checkEmails();
+      } catch (error) {
+        log.error({ err: error }, 'Check error');
+        heartbeat.write('gmail-monitor', {
+          checkInterval: CONFIG.checkInterval,
+          status: 'error',
+          errors: { lastError: error.message, lastErrorAt: Date.now(), countSinceStart: ++errorCount }
+        });
+      }
+    }, CONFIG.checkInterval);
+    log.info({ newInterval: CONFIG.checkInterval }, 'Poll timer reset');
+  }
+});
 
 // Export for testing; run service only when executed directly
 if (require.main === module) {

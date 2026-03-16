@@ -1,18 +1,9 @@
 {
-  "vips": [
-    { "email": "ceo@example.com", "title": "CEO" },
-    { "email": "cto@example.com", "title": "CTO" }
-  ],
-  "directReports": [
-    { "name": "Jane Doe", "email": "jane@example.com", "slackId": "U00000001" },
-    { "name": "John Smith", "email": "john@example.com", "slackId": "U00000002" }
-  ],
   "filterPatterns": {
     "companyDomain": "example.com",
     "dwGroupEmail": "it-group@example.com"
   },
   "dwTeamEmails": [
-    { "name": "Jane Doe", "team": "CSE", "email": "jane@example.com" },
-    { "name": "John Smith", "team": "Desktop Support", "email": "john@example.com" }
+    {"name": "Jane Doe", "team": "CSE", "email": "jane@example.com"}
   ]
 }

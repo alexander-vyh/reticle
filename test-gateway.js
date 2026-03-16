@@ -7,13 +7,17 @@ function setupTestDb() {
   const db = new Database(':memory:');
   db.exec(`
     CREATE TABLE IF NOT EXISTS monitored_people (
-      id          TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(8)))),
-      email       TEXT UNIQUE NOT NULL,
-      name        TEXT,
-      slack_id    TEXT,
-      jira_id     TEXT,
-      resolved_at INTEGER,
-      created_at  INTEGER NOT NULL DEFAULT (strftime('%s','now'))
+      id               TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(8)))),
+      email            TEXT UNIQUE NOT NULL,
+      name             TEXT,
+      slack_id         TEXT,
+      jira_id          TEXT,
+      resolved_at      INTEGER,
+      created_at       INTEGER NOT NULL DEFAULT (strftime('%s','now')),
+      role             TEXT DEFAULT 'peer',
+      escalation_tier  TEXT,
+      title            TEXT,
+      team             TEXT
     );
   `);
   return db;
@@ -233,6 +237,95 @@ async function testCommitmentsEndpoints() {
   }
 }
 
+// --- POST /people with role/title/team (HTTP-level) ---
+
+async function testPostPeopleWithRoleFields() {
+  const os = require('os');
+  const path = require('path');
+  const fs = require('fs');
+
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'reticle-post-people-test-'));
+  const reticleDbPath = path.join(tmpDir, 'reticle.db');
+  const orgMemDbPath = path.join(tmpDir, 'org-memory.db');
+
+  process.env.RETICLE_DB_PATH = reticleDbPath;
+  process.env.ORG_MEMORY_DB_PATH = orgMemDbPath;
+
+  delete require.cache[require.resolve('./gateway')];
+  delete require.cache[require.resolve('./reticle-db')];
+
+  const app = require('./gateway');
+  const server = app.listen(0);
+  const port = server.address().port;
+
+  try {
+    // Test 1: POST /people with role=vip and title persists both in one call
+    const vipRes = await httpRequest(port, 'POST', '/people', {
+      email: 'ceo@example.com', name: 'Jane CEO', role: 'vip', title: 'Chief Executive Officer'
+    });
+    assert.strictEqual(vipRes.status, 200, `expected 200, got ${vipRes.status}: ${JSON.stringify(vipRes.body)}`);
+    assert.strictEqual(vipRes.body.ok, true);
+    const listRes = await httpRequest(port, 'GET', '/people');
+    const vip = listRes.body.people.find(p => p.email === 'ceo@example.com');
+    assert.ok(vip, 'ceo@example.com should appear in GET /people');
+    assert.strictEqual(vip.role, 'vip', `expected role=vip, got ${vip.role}`);
+    assert.strictEqual(vip.title, 'Chief Executive Officer', `expected title, got ${vip.title}`);
+    console.log('  PASS: POST /people with role=vip and title persists both in one call');
+
+    // Test 2: POST /people with role=direct_report persists role
+    const drRes = await httpRequest(port, 'POST', '/people', {
+      email: 'report@example.com', name: 'Direct Bob', role: 'direct_report'
+    });
+    assert.strictEqual(drRes.status, 200, `expected 200, got ${drRes.status}: ${JSON.stringify(drRes.body)}`);
+    const listRes2 = await httpRequest(port, 'GET', '/people');
+    const dr = listRes2.body.people.find(p => p.email === 'report@example.com');
+    assert.ok(dr, 'report@example.com should appear in GET /people');
+    assert.strictEqual(dr.role, 'direct_report', `expected role=direct_report, got ${dr.role}`);
+    console.log('  PASS: POST /people with role=direct_report persists role');
+
+    // Test 3: POST /people with team persists team field
+    const teamRes = await httpRequest(port, 'POST', '/people', {
+      email: 'member@example.com', name: 'Team Sue', team: 'engineering'
+    });
+    assert.strictEqual(teamRes.status, 200);
+    const listRes3 = await httpRequest(port, 'GET', '/people');
+    const member = listRes3.body.people.find(p => p.email === 'member@example.com');
+    assert.ok(member, 'member@example.com should appear in GET /people');
+    assert.strictEqual(member.team, 'engineering', `expected team=engineering, got ${member.team}`);
+    console.log('  PASS: POST /people with team persists team field');
+
+    // Test 4: POST /people without role defaults to peer
+    const peerRes = await httpRequest(port, 'POST', '/people', {
+      email: 'peer@example.com', name: 'Just Peer'
+    });
+    assert.strictEqual(peerRes.status, 200);
+    const listRes4 = await httpRequest(port, 'GET', '/people');
+    const peer = listRes4.body.people.find(p => p.email === 'peer@example.com');
+    assert.ok(peer, 'peer@example.com should appear in GET /people');
+    assert.strictEqual(peer.role, 'peer', `expected role=peer, got ${peer.role}`);
+    console.log('  PASS: POST /people without role defaults to peer');
+  } finally {
+    server.close();
+    try { fs.unlinkSync(reticleDbPath); } catch {}
+    try { fs.unlinkSync(reticleDbPath + '-wal'); } catch {}
+    try { fs.unlinkSync(reticleDbPath + '-shm'); } catch {}
+    try { fs.unlinkSync(orgMemDbPath); } catch {}
+    try { fs.unlinkSync(orgMemDbPath + '-wal'); } catch {}
+    try { fs.unlinkSync(orgMemDbPath + '-shm'); } catch {}
+    try { fs.rmdirSync(tmpDir); } catch {}
+  }
+}
+
+// Clear gateway's module-level cached DB between test runs
+function jest_clearGatewayCache() {
+  // gateway.js and its deps cache DBs at module level; clear all so each test
+  // suite gets a fresh instance pointing to the correct temp DB paths
+  for (const mod of ['./gateway', './lib/org-memory-db', './reticle-db']) {
+    const resolved = require.resolve(mod);
+    delete require.cache[resolved];
+  }
+}
+
 async function testEntitiesEndpoints() {
   const os = require('os');
   const path = require('path');
@@ -313,16 +406,6 @@ async function testEntitiesEndpoints() {
     try { fs.unlinkSync(orgMemDbPath + '-wal'); } catch {}
     try { fs.unlinkSync(orgMemDbPath + '-shm'); } catch {}
     try { fs.rmdirSync(tmpDir); } catch {}
-  }
-}
-
-// Clear gateway's module-level cached DB between test runs
-function jest_clearGatewayCache() {
-  // gateway.js and its deps cache DBs at module level; clear all so each test
-  // suite gets a fresh instance pointing to the correct temp DB paths
-  for (const mod of ['./gateway', './lib/org-memory-db', './reticle-db']) {
-    const resolved = require.resolve(mod);
-    delete require.cache[resolved];
   }
 }
 
@@ -502,6 +585,7 @@ testFeedbackCandidateFlow();
 
 // Async tests
 testCommitmentsEndpoints()
+  .then(() => testPostPeopleWithRoleFields())
   .then(() => testEntitiesEndpoints())
   .then(() => testEntityDetailAndMerge())
   .then(() => testEntityFactsAndUnattributed())

@@ -26,9 +26,9 @@ const tables = db.prepare(
 ).all().map(r => r.name);
 assert.deepStrictEqual(tables, [
   'accounts', 'action_log', 'conversations', 'digest_snapshots', 'email_rules',
-  'emails', 'entity_links', 'feedback_candidates', 'monitored_people', 'notification_log', 'o3_sessions', 'unsubscribes'
+  'emails', 'entity_links', 'feedback_candidates', 'feedback_settings', 'monitored_people', 'notification_log', 'o3_sessions', 'unsubscribes'
 ]);
-console.log('PASS: all 12 tables created');
+console.log('PASS: all 13 tables created');
 
 // --- Test: upsertAccount + getAccount ---
 const acct = reticleDb.upsertAccount(db, {

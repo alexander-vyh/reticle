@@ -134,21 +134,18 @@ async function main() {
   allItems = deduplicateItems(allItems);
   log.info({ total: allItems.length, failed: failedCollectors }, 'Collection complete');
 
-  // Save snapshot
+  // Snapshot date (use local date to match launchd schedule timezone)
   const dateStr = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`;
-  reticleDb.saveSnapshot(db, accountId, {
-    snapshotDate: dateStr,
-    cadence: 'daily',
-    items: allItems
-  });
 
   // Separate feedback items from regular digest items for narration
   const regularItems = allItems.filter(i => i.collector !== 'feedback');
 
   // Layer 3: AI narration
   let message;
+  let narrationSucceeded = false;
   try {
     message = await narrateDaily(regularItems);
+    if (message) narrationSucceeded = true;
   } catch (err) {
     log.warn({ err }, 'First narration attempt failed');
   }
@@ -158,6 +155,7 @@ async function main() {
     await new Promise(r => setTimeout(r, 30000));
     try {
       message = await narrateDaily(regularItems);
+      if (message) narrationSucceeded = true;
     } catch (err) {
       log.warn({ err }, 'Second narration attempt failed');
     }
@@ -177,6 +175,14 @@ async function main() {
     message += `\n\n:pencil: *${feedbackItems.length} feedback candidate${feedbackItems.length > 1 ? 's' : ''} waiting* — open Reticle to review`;
   }
 
+  // Save snapshot with narration text
+  reticleDb.saveSnapshot(db, accountId, {
+    snapshotDate: dateStr,
+    cadence: 'daily',
+    items: allItems,
+    narration: message
+  });
+
   const feedbackBlocks = buildFeedbackBlocks(feedbackItems);
 
   // Deliver
@@ -189,7 +195,10 @@ async function main() {
     process.exit(1);
   }
 
-  heartbeat.write(SERVICE_NAME, { status: 'ok', itemCount: allItems.length });
+  const heartbeatStatus = narrationSucceeded ? 'ok' : 'degraded';
+  const heartbeatData = { status: heartbeatStatus, itemCount: allItems.length };
+  if (!narrationSucceeded) heartbeatData.degradedReason = 'narration-unavailable';
+  heartbeat.write(SERVICE_NAME, heartbeatData);
   process.exit(0);
 }
 

@@ -238,19 +238,24 @@ function initDatabase() {
       snapshot_date  TEXT NOT NULL,
       cadence        TEXT NOT NULL,
       items          TEXT NOT NULL,
+      narration      TEXT,
       created_at     INTEGER NOT NULL DEFAULT (strftime('%s','now'))
     );
     CREATE INDEX IF NOT EXISTS idx_digest_date ON digest_snapshots(account_id, snapshot_date);
     CREATE UNIQUE INDEX IF NOT EXISTS idx_digest_unique ON digest_snapshots(account_id, snapshot_date, cadence);
 
     CREATE TABLE IF NOT EXISTS monitored_people (
-      id          TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(8)))),
-      email       TEXT UNIQUE NOT NULL,
-      name        TEXT,
-      slack_id    TEXT,
-      jira_id     TEXT,
-      resolved_at INTEGER,
-      created_at  INTEGER NOT NULL DEFAULT (strftime('%s','now'))
+      id               TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(8)))),
+      email            TEXT UNIQUE NOT NULL,
+      name             TEXT,
+      slack_id         TEXT,
+      jira_id          TEXT,
+      resolved_at      INTEGER,
+      created_at       INTEGER NOT NULL DEFAULT (strftime('%s','now')),
+      role             TEXT DEFAULT 'peer',
+      escalation_tier  TEXT,
+      title            TEXT,
+      team             TEXT
     );
 
     CREATE TABLE IF NOT EXISTS feedback_candidates (
@@ -266,7 +271,41 @@ function initDatabase() {
       status      TEXT NOT NULL DEFAULT 'pending'
     );
     CREATE INDEX IF NOT EXISTS idx_feedback_status ON feedback_candidates(status);
+
+    CREATE TABLE IF NOT EXISTS feedback_settings (
+      key        TEXT PRIMARY KEY,
+      value      TEXT NOT NULL,
+      updated_at INTEGER DEFAULT (strftime('%s','now'))
+    );
   `);
+
+  // Seed feedback_settings defaults (idempotent)
+  const fsCount = db.prepare('SELECT COUNT(*) as count FROM feedback_settings').get();
+  if (fsCount.count === 0) {
+    db.prepare("INSERT INTO feedback_settings (key, value) VALUES (?, ?)").run('weeklyTarget', '3');
+    db.prepare("INSERT INTO feedback_settings (key, value) VALUES (?, ?)").run('scanWindowHours', '24');
+  }
+
+  // Idempotent migrations for existing databases
+  const mpCols = db.pragma('table_info(monitored_people)').map(c => c.name);
+  if (!mpCols.includes('role')) {
+    db.exec("ALTER TABLE monitored_people ADD COLUMN role TEXT DEFAULT 'peer'");
+  }
+  if (!mpCols.includes('escalation_tier')) {
+    db.exec('ALTER TABLE monitored_people ADD COLUMN escalation_tier TEXT');
+  }
+  if (!mpCols.includes('title')) {
+    db.exec('ALTER TABLE monitored_people ADD COLUMN title TEXT');
+  }
+  if (!mpCols.includes('team')) {
+    db.exec('ALTER TABLE monitored_people ADD COLUMN team TEXT');
+  }
+
+  // Add narration column to digest_snapshots if missing (added 2026-03-16)
+  const digestCols = db.prepare("PRAGMA table_info(digest_snapshots)").all();
+  if (!digestCols.some(c => c.name === 'narration')) {
+    db.exec('ALTER TABLE digest_snapshots ADD COLUMN narration TEXT');
+  }
 
   return db;
 }
@@ -718,11 +757,11 @@ function markNotified(db, conversationId) {
 
 // --- Digest Snapshots ---
 
-function saveSnapshot(db, accountId, { snapshotDate, cadence, items }) {
+function saveSnapshot(db, accountId, { snapshotDate, cadence, items, narration = null }) {
   db.prepare(`
-    INSERT OR REPLACE INTO digest_snapshots (account_id, snapshot_date, cadence, items)
-    VALUES (?, ?, ?, ?)
-  `).run(accountId, snapshotDate, cadence, JSON.stringify(items));
+    INSERT OR REPLACE INTO digest_snapshots (account_id, snapshot_date, cadence, items, narration)
+    VALUES (?, ?, ?, ?, ?)
+  `).run(accountId, snapshotDate, cadence, JSON.stringify(items), narration);
 }
 
 function getSnapshotsForRange(db, accountId, startDate, endDate, cadence = null) {
@@ -740,6 +779,30 @@ function getSnapshotsForRange(db, accountId, startDate, endDate, cadence = null)
   sql += ` ORDER BY snapshot_date ASC`;
 
   return db.prepare(sql).all(...params).map(row => ({
+    ...row,
+    items: JSON.parse(row.items)
+  }));
+}
+
+function getLatestSnapshot(db, cadence) {
+  const row = db.prepare(`
+    SELECT * FROM digest_snapshots
+    WHERE cadence = ?
+    ORDER BY snapshot_date DESC
+    LIMIT 1
+  `).get(cadence);
+  if (!row) return undefined;
+  return { ...row, items: JSON.parse(row.items) };
+}
+
+function getSnapshotHistory(db, cadence, limit = 4) {
+  const effectiveLimit = Math.min(Math.max(limit, 1), 12);
+  return db.prepare(`
+    SELECT * FROM digest_snapshots
+    WHERE cadence = ?
+    ORDER BY snapshot_date DESC
+    LIMIT ?
+  `).all(cadence, effectiveLimit).map(row => ({
     ...row,
     items: JSON.parse(row.items)
   }));
@@ -802,6 +865,8 @@ module.exports = {
   logNotification,
   markNotified,
   saveSnapshot,
+  getLatestSnapshot,
+  getSnapshotHistory,
   getSnapshotsForRange,
   pruneOldSnapshots,
 };
