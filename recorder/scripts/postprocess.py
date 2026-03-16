@@ -148,7 +148,7 @@ def run_diarization(wav_path: str) -> list[dict]:
     device = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
     try:
         pipeline = Pipeline.from_pretrained(
-            "pyannote/speaker-diarization-3.1",
+            "pyannote/speaker-diarization-community-1",
             token=True,
         )
         pipeline.to(device)
@@ -183,8 +183,13 @@ def align_transcript_with_speakers(
 ) -> list[dict]:
     """Align word-level Whisper timestamps with pyannote speaker segments.
 
-    For each Whisper segment, find the speaker who was speaking at that time
-    (based on majority overlap of word timestamps).
+    Uses overlap-weighted assignment: each word's speaker is determined by
+    which speaker segment has the most temporal overlap with the word's
+    time span. Words at speaker boundaries get correctly attributed by
+    overlap duration rather than a single midpoint lookup.
+
+    Segment-level speaker is then determined by duration-weighted vote
+    across words (longer words count more).
     """
     if not speaker_segments:
         # No diarization — return segments without speaker attribution
@@ -199,16 +204,28 @@ def align_transcript_with_speakers(
             if seg.get("text", "").strip()
         ]
 
-    def find_speaker_at(time_point: float) -> str:
-        """Find the speaker active at a given timestamp."""
+    def compute_speaker_overlap(word_start: float, word_end: float) -> str:
+        """Assign a word to the speaker with the greatest temporal overlap."""
+        best_speaker = "Unknown"
+        best_overlap = 0.0
+
         for ss in speaker_segments:
-            if ss["start"] <= time_point <= ss["end"]:
-                return ss["speaker"]
-        # Find nearest speaker segment
+            overlap_start = max(word_start, ss["start"])
+            overlap_end = min(word_end, ss["end"])
+            overlap = max(0.0, overlap_end - overlap_start)
+            if overlap > best_overlap:
+                best_overlap = overlap
+                best_speaker = ss["speaker"]
+
+        if best_overlap > 0:
+            return best_speaker
+
+        # No overlap — find nearest speaker segment within 2s
         min_dist = float("inf")
         nearest = "Unknown"
+        word_mid = (word_start + word_end) / 2
         for ss in speaker_segments:
-            dist = min(abs(ss["start"] - time_point), abs(ss["end"] - time_point))
+            dist = min(abs(ss["start"] - word_mid), abs(ss["end"] - word_mid))
             if dist < min_dist:
                 min_dist = dist
                 nearest = ss["speaker"]
@@ -220,19 +237,19 @@ def align_transcript_with_speakers(
         if not text:
             continue
 
-        # Use word timestamps if available for more precise speaker attribution
         words = seg.get("words", [])
         if words:
-            # Majority vote: which speaker owns most words in this segment
-            speaker_votes: dict[str, int] = {}
+            # Duration-weighted vote: longer words count more
+            speaker_weight: dict[str, float] = {}
             for word in words:
-                mid = (word.get("start", seg["start"]) + word.get("end", seg["end"])) / 2
-                spk = find_speaker_at(mid)
-                speaker_votes[spk] = speaker_votes.get(spk, 0) + 1
-            speaker = max(speaker_votes, key=speaker_votes.get)  # type: ignore[arg-type]
+                ws = word.get("start", seg["start"])
+                we = word.get("end", seg["end"])
+                duration = max(we - ws, 0.01)  # avoid zero-weight
+                spk = compute_speaker_overlap(ws, we)
+                speaker_weight[spk] = speaker_weight.get(spk, 0.0) + duration
+            speaker = max(speaker_weight, key=speaker_weight.get)  # type: ignore[arg-type]
         else:
-            mid = (seg["start"] + seg["end"]) / 2
-            speaker = find_speaker_at(mid)
+            speaker = compute_speaker_overlap(seg["start"], seg["end"])
 
         aligned.append(
             {
@@ -259,41 +276,142 @@ def align_transcript_with_speakers(
 
 
 def identify_speakers(
-    segments: list[dict], wav_path: str, attendees: list[str]
+    segments: list[dict], wav_path: str, attendees: list[str],
+    gateway_url: str = "http://127.0.0.1:3001",
 ) -> tuple[list[dict], list[dict]]:
-    """Replace generic speaker labels (SPEAKER_00) with real names using voice embeddings.
+    """Replace generic speaker labels (SPEAKER_00) with real names using ECAPA-TDNN embeddings.
+
+    Pipeline:
+    1. Extract audio clips for each unique speaker cluster
+    2. Compute ECAPA-TDNN embedding for each cluster
+    3. Compare against known embeddings from Gateway API
+    4. Assign names where cosine similarity exceeds threshold
 
     Returns (updated_segments, speaker_info).
     """
+    unique_speakers = sorted(set(s["speaker"] for s in segments if s["speaker"] != "Unknown"))
+    if not unique_speakers:
+        return segments, []
+
+    # Try to load known embeddings from Gateway
+    known_embeddings = _fetch_known_embeddings(gateway_url)
+    if not known_embeddings:
+        log.info("No known speaker embeddings available, skipping identification")
+        return segments, [{"label": s, "name": s, "confidence": 0.0} for s in unique_speakers]
+
+    # Try to compute embeddings for each speaker cluster
     try:
-        from video_transcription.speaker_db import SpeakerDatabase
+        import torch
+        import numpy as np
+        from scipy.io import wavfile
     except ImportError:
-        log.debug("SpeakerDatabase not available, skipping speaker identification")
-        return segments, []
+        log.warning("torch/scipy not available for speaker embedding extraction")
+        return segments, [{"label": s, "name": s, "confidence": 0.0} for s in unique_speakers]
 
-    if not SPEAKER_DB_PATH.exists():
-        log.info("No speaker database at %s, skipping identification", SPEAKER_DB_PATH)
-        return segments, []
+    try:
+        from speechbrain.inference.speaker import EncoderClassifier
+        classifier = EncoderClassifier.from_hparams(
+            source="speechbrain/spkrec-ecapa-voxceleb",
+            run_opts={"device": "cpu"},
+        )
+    except Exception as e:
+        log.warning("ECAPA-TDNN model unavailable (%s), skipping identification", e)
+        return segments, [{"label": s, "name": s, "confidence": 0.0} for s in unique_speakers]
 
-    db = SpeakerDatabase(db_path=SPEAKER_DB_PATH)
-    unique_speakers = set(s["speaker"] for s in segments if s["speaker"] != "Unknown")
+    sample_rate, full_audio = wavfile.read(wav_path)
+    if full_audio.dtype == np.int16:
+        full_audio = full_audio.astype(np.float32) / 32768.0
+    # Mono
+    if full_audio.ndim == 2:
+        full_audio = full_audio.mean(axis=1)
 
     speaker_map: dict[str, str] = {}
     speaker_info: list[dict] = []
+    SIMILARITY_THRESHOLD = 0.65
 
-    for speaker_label in sorted(unique_speakers):
-        # TODO: Extract audio for this speaker's segments and run identification
-        # For now, use attendee list heuristics if available
-        log.info("Speaker %s detected (identification requires enrolled voices)", speaker_label)
-        speaker_info.append({"label": speaker_label, "name": speaker_label, "confidence": 0.0})
+    for speaker_label in unique_speakers:
+        # Extract up to 30s of audio for this speaker cluster
+        clips = []
+        total_samples = 0
+        max_samples = sample_rate * 30
+        for seg in segments:
+            if seg["speaker"] == speaker_label and total_samples < max_samples:
+                start_sample = int(seg["start"] * sample_rate)
+                end_sample = int(seg["end"] * sample_rate)
+                clip = full_audio[start_sample:end_sample]
+                clips.append(clip)
+                total_samples += len(clip)
 
-    # Apply any mappings
+        if not clips or total_samples < sample_rate:  # need at least 1s
+            speaker_info.append({"label": speaker_label, "name": speaker_label, "confidence": 0.0})
+            continue
+
+        combined = np.concatenate(clips)
+        waveform = torch.from_numpy(combined).unsqueeze(0)
+        embedding = classifier.encode_batch(waveform).squeeze().detach().numpy()
+
+        # Compare against known embeddings
+        best_name = speaker_label
+        best_sim = 0.0
+        for known in known_embeddings:
+            sim = _cosine_similarity(embedding, known["embedding"])
+            if sim > best_sim:
+                best_sim = sim
+                best_name = known["name"]
+
+        if best_sim >= SIMILARITY_THRESHOLD:
+            speaker_map[speaker_label] = best_name
+            log.info("Speaker %s → %s (similarity: %.3f)", speaker_label, best_name, best_sim)
+        else:
+            log.info("Speaker %s unmatched (best: %s at %.3f)", speaker_label, best_name, best_sim)
+
+        speaker_info.append({
+            "label": speaker_label,
+            "name": speaker_map.get(speaker_label, speaker_label),
+            "confidence": round(best_sim, 3),
+        })
+
+    # Apply mappings to segments
     if speaker_map:
         for seg in segments:
             if seg["speaker"] in speaker_map:
                 seg["speaker"] = speaker_map[seg["speaker"]]
 
     return segments, speaker_info
+
+
+def _fetch_known_embeddings(gateway_url: str) -> list[dict]:
+    """Fetch known speaker embeddings from the Gateway API."""
+    import urllib.request
+    import struct
+
+    try:
+        req = urllib.request.Request(f"{gateway_url}/api/speakers/embeddings", method="GET")
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            data = json.loads(resp.read())
+    except Exception as e:
+        log.debug("Could not fetch speaker embeddings from Gateway: %s", e)
+        return []
+
+    result = []
+    for entry in data.get("embeddings", []):
+        # Embeddings are stored as base64-encoded float32 arrays
+        import base64
+        raw = base64.b64decode(entry["embedding"])
+        embedding = list(struct.unpack(f"{len(raw) // 4}f", raw))
+        result.append({"name": entry["name"], "embedding": embedding})
+
+    return result
+
+
+def _cosine_similarity(a, b) -> float:
+    """Compute cosine similarity between two vectors."""
+    import numpy as np
+    a = np.array(a, dtype=np.float32)
+    b = np.array(b, dtype=np.float32)
+    dot = np.dot(a, b)
+    norm = np.linalg.norm(a) * np.linalg.norm(b)
+    return float(dot / norm) if norm > 0 else 0.0
 
 
 def apply_corrections(segments: list[dict]) -> list[dict]:
