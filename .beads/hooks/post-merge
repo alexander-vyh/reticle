@@ -7,3 +7,13 @@ if command -v bd >/dev/null 2>&1; then
   _bd_exit=$?; if [ $_bd_exit -ne 0 ]; then exit $_bd_exit; fi
 fi
 # --- END BEADS INTEGRATION v0.59.0 ---
+
+# Auto-deploy after merge (only on main branch)
+CURRENT_BRANCH=$(git rev-parse --abbrev-ref HEAD 2>/dev/null)
+if [ "$CURRENT_BRANCH" = "main" ]; then
+  REPO_DIR=$(git rev-parse --show-toplevel 2>/dev/null)
+  if [ -x "$REPO_DIR/bin/deploy" ]; then
+    echo "post-merge: deploying..."
+    "$REPO_DIR/bin/deploy" --skip-pull
+  fi
+fi

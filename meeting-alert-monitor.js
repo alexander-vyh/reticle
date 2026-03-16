@@ -529,11 +529,12 @@ function triggerAlert(event, level) {
 
   log.info({ alertLevel: level, eventId: event.id, summary: event.summary, startTime: event.start.dateTime }, 'Alert triggered');
 
-  // Start recording when meeting begins (only if there are other attendees)
+  // Start recording when meeting begins (only if there are other attendees).
+  // armAndStartRecording polls for a meeting app to actually be running before committing.
   if (level === 'start') {
     const others = (event.attendees || []).filter(a => !a.self);
     if (others.length > 0) {
-      startRecording(event, linkInfo);
+      armAndStartRecording(event, linkInfo);
     } else {
       log.info({ eventId: event.id, summary: event.summary }, 'Skipping recording: no other attendees');
     }
@@ -747,6 +748,49 @@ function platformToDeviceHint(platform) {
     case 'teams': return 'Microsoft Teams Audio';
     default: return null;
   }
+}
+
+// Meeting app process names to check for join detection.
+// Matches what RecorderConfig.meetingApps covers, translated to process names.
+const MEETING_APP_PROCESS_NAMES = ['zoom.us', 'Slack', 'Microsoft Teams'];
+
+/**
+ * Check if any known meeting app is currently running.
+ * Uses pgrep for a quick, zero-dependency process check.
+ * Resolves true if at least one app is found, false otherwise.
+ */
+function isMeetingAppRunning() {
+  return new Promise((resolve) => {
+    execFile('pgrep', ['-x', MEETING_APP_PROCESS_NAMES.join('|')], (err) => {
+      // pgrep exits 0 if found, 1 if not — err is non-null on exit code 1
+      resolve(!err);
+    });
+  });
+}
+
+/**
+ * Arm recording for a meeting: poll for a meeting app to appear, then start.
+ * Polls every 60 seconds until a meeting app is found or the meeting's end time passes.
+ */
+async function armAndStartRecording(event, linkInfo) {
+  const endTime = new Date(event.end.dateTime).getTime();
+  const maxRetries = Math.ceil((endTime - Date.now()) / 60_000);
+
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    const running = await isMeetingAppRunning();
+    if (running) {
+      log.info({ eventId: event.id, summary: event.summary, attempt }, 'Meeting app detected, starting recording');
+      await startRecording(event, linkInfo);
+      return;
+    }
+    if (attempt === 0) {
+      log.info({ eventId: event.id, summary: event.summary }, 'No meeting app running at start time, will retry every 60s until meeting ends');
+    }
+    if (Date.now() + 60_000 >= endTime) break;
+    await new Promise(r => setTimeout(r, 60_000));
+  }
+
+  log.info({ eventId: event.id, summary: event.summary }, 'Meeting window passed with no app detected, skipping recording');
 }
 
 /**

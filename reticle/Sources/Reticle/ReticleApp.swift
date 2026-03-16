@@ -1,5 +1,9 @@
 import SwiftUI
 
+extension NSNotification.Name {
+    static let openManagementWindow = NSNotification.Name("ai.reticle.openManagementWindow")
+}
+
 @main
 struct ReticleApp: App {
     @StateObject private var gateway = GatewayClient()
@@ -22,7 +26,7 @@ struct ReticleApp: App {
             Image(nsImage: ReticleIcon.menuBarImage(statusColor: serviceStore.statusColor))
         }
 
-        WindowGroup("Reticle") {
+        WindowGroup("Reticle", id: "reticle-main") {
             ContentView()
                 .environmentObject(gateway)
                 .environmentObject(serviceStore)
@@ -50,12 +54,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
         if !flag {
-            NSApp.setActivationPolicy(.regular)
-            NSApp.activate(ignoringOtherApps: true)
-            for window in NSApp.windows where window.identifier?.rawValue == "management" {
-                window.makeKeyAndOrderFront(nil)
-                return true
-            }
+            NotificationCenter.default.post(name: .openManagementWindow, object: nil)
         }
         return true
     }

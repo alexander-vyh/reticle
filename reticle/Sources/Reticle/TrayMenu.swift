@@ -4,10 +4,13 @@ struct TrayMenu: View {
     @EnvironmentObject var serviceStore: ServiceStore
     @EnvironmentObject var appState: AppState
     @EnvironmentObject var captureManager: CaptureManager
+    @Environment(\.openWindow) private var openWindow
 
     var body: some View {
         Button("Open Reticle") {
-            appState.showManagementWindow()
+            NSApp.setActivationPolicy(.regular)
+            NSApp.activate(ignoringOtherApps: true)
+            openWindow(id: "reticle-main")
         }
         .keyboardShortcut("r", modifiers: .command)
 
@@ -41,6 +44,11 @@ struct TrayMenu: View {
 
         Button("Quit Reticle") {
             NSApplication.shared.terminate(nil)
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .openManagementWindow)) { _ in
+            NSApp.setActivationPolicy(.regular)
+            NSApp.activate(ignoringOtherApps: true)
+            openWindow(id: "reticle-main")
         }
     }
 

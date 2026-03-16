@@ -1,6 +1,6 @@
 import SwiftUI
 
-// MARK: - Tab Enum
+// MARK: - Tab Enum (for adding people)
 
 enum PeopleTab: String, CaseIterable, Identifiable {
     case monitored = "Monitored"
@@ -11,140 +11,148 @@ enum PeopleTab: String, CaseIterable, Identifiable {
     var id: String { rawValue }
 }
 
+// MARK: - Filter Enum
+
+enum PeopleFilter: String, CaseIterable {
+    case all = "All"
+    case monitored = "Monitored"
+}
+
 // MARK: - Main View
 
 struct PeopleView: View {
     @EnvironmentObject var gateway: GatewayClient
-    @State private var people: [Person] = []
-    @State private var selectedTab: PeopleTab = .monitored
-    @State private var showingAddForm = false
-    @State private var companyDomain = ""
-    @State private var groupEmail = ""
-    @State private var filtersExpanded = true
+    @State private var entities: [Entity] = []
+    @State private var filter: PeopleFilter = .all
+    @State private var isLoading = false
+    @State private var error: String?
 
-    private var filteredPeople: [Person] {
-        switch selectedTab {
-        case .monitored:
-            return people.filter { $0.role == "peer" && $0.team == nil }
-        case .directReports:
-            return people.filter { $0.role == "direct_report" }
-        case .vips:
-            return people.filter { $0.role == "vip" }
-        case .team:
-            return people.filter { $0.team != nil && $0.role == "peer" }
+    private var displayed: [Entity] {
+        switch filter {
+        case .all: return entities
+        case .monitored: return entities.filter { $0.monitored }
         }
     }
 
     var body: some View {
-        VStack(spacing: 0) {
-            Picker("Tab", selection: $selectedTab) {
-                ForEach(PeopleTab.allCases) { tab in
-                    Text(tab.rawValue).tag(tab)
+        NavigationStack {
+        VStack(alignment: .leading, spacing: 0) {
+            Picker("Filter", selection: $filter) {
+                ForEach(PeopleFilter.allCases, id: \.self) { f in
+                    Text(f.rawValue).tag(f)
                 }
             }
             .pickerStyle(.segmented)
             .padding(.horizontal)
             .padding(.vertical, 8)
 
-            DisclosureGroup("Organization Scope", isExpanded: $filtersExpanded) {
-                Text("Reticle monitors people from your organization")
-                    .font(.caption)
-                    .foregroundStyle(.tertiary)
-                    .padding(.bottom, 4)
-                LabeledContent("Company domain") {
-                    TextField("example.com", text: $companyDomain)
-                        .textFieldStyle(.roundedBorder)
-                        .onSubmit { saveFilters() }
-                }
-                LabeledContent("Group email") {
-                    TextField("team@example.com", text: $groupEmail)
-                        .textFieldStyle(.roundedBorder)
-                        .onSubmit { saveFilters() }
-                }
-            }
-            .padding(.horizontal)
-            .padding(.bottom, 4)
-
-            Divider()
-
-            List {
-                ForEach(filteredPeople) { person in
-                    rowView(for: person)
-                }
-                .onDelete { offsets in
-                    for index in offsets {
-                        let email = filteredPeople[index].email
-                        Task {
-                            try? await gateway.removePerson(email: email)
-                            await loadPeople()
+            if isLoading && entities.isEmpty {
+                ProgressView("Loading people...")
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else if let error = error, entities.isEmpty {
+                ContentUnavailableView(
+                    "Unable to Load",
+                    systemImage: "exclamationmark.triangle",
+                    description: Text(error)
+                )
+            } else if displayed.isEmpty {
+                ContentUnavailableView(
+                    filter == .monitored ? "No Monitored People" : "No People",
+                    systemImage: "person.slash",
+                    description: Text(filter == .monitored ? "Toggle monitor on people in the All tab." : "No entities found.")
+                )
+            } else {
+                List(displayed) { entity in
+                    NavigationLink(value: entity) {
+                        EntityRow(entity: entity) {
+                            Task { await toggle(entity) }
                         }
                     }
+                    .buttonStyle(.plain)
+                }
+                .navigationDestination(for: Entity.self) { entity in
+                    PersonDetailView(entity: entity)
                 }
             }
-            .listStyle(.inset)
         }
         .navigationTitle("People")
         .toolbar {
             ToolbarItem {
-                Button {
-                    showingAddForm = true
-                } label: {
-                    Image(systemName: "plus")
-                }
-                .popover(isPresented: $showingAddForm, arrowEdge: .bottom) {
-                    AddPersonForm(
-                        selectedTab: selectedTab,
-                        isPresented: $showingAddForm,
-                        onAdd: { await loadPeople() }
-                    )
-                    .environmentObject(gateway)
+                Button(action: { Task { await loadEntities() } }) {
+                    Label("Refresh", systemImage: "arrow.clockwise")
                 }
             }
         }
-        .task {
-            await loadPeople()
-            await loadFilters()
+        .task { await loadEntities() }
+        } // NavigationStack
+    }
+
+    func loadEntities() async {
+        isLoading = true
+        error = nil
+        do {
+            entities = try await gateway.listEntities()
+        } catch {
+            self.error = error.localizedDescription
         }
+        isLoading = false
     }
 
-    @ViewBuilder
-    private func rowView(for person: Person) -> some View {
-        switch selectedTab {
-        case .monitored:
-            MonitoredPersonRow(person: person)
-        case .directReports:
-            DirectReportRow(person: person, onUpdate: { await loadPeople() })
-                .environmentObject(gateway)
-        case .vips:
-            VIPRow(person: person, onUpdate: { await loadPeople() })
-                .environmentObject(gateway)
-        case .team:
-            TeamMemberRow(person: person)
-        }
-    }
-
-    func loadPeople() async {
-        people = (try? await gateway.listPeople()) ?? []
-    }
-
-    private func loadFilters() async {
-        if let filters = try? await gateway.fetchFilters() {
-            companyDomain = filters.companyDomain ?? ""
-            groupEmail = filters.dwGroupEmail ?? ""
-        }
-    }
-
-    private func saveFilters() {
-        Task {
-            try? await gateway.updateFilters(
-                companyDomain: companyDomain.isEmpty ? nil : companyDomain,
-                dwGroupEmail: groupEmail.isEmpty ? nil : groupEmail
-            )
+    func toggle(_ entity: Entity) async {
+        do {
+            if entity.monitored {
+                try await gateway.unmonitorEntity(id: entity.id)
+            } else {
+                try await gateway.monitorEntity(id: entity.id)
+            }
+            await loadEntities()
+        } catch {
+            self.error = error.localizedDescription
         }
     }
 }
 
-// MARK: - Monitored Row
+// MARK: - Entity Row
+
+struct EntityRow: View {
+    let entity: Entity
+    let onToggle: () -> Void
+
+    var body: some View {
+        HStack(spacing: 8) {
+            VStack(alignment: .leading, spacing: 3) {
+                Text(entity.canonicalName)
+                    .font(.headline)
+                HStack(spacing: 10) {
+                    if let slackId = entity.slackId {
+                        IdentityBadge(label: "Slack", value: slackId)
+                    }
+                    if let jiraId = entity.jiraId {
+                        IdentityBadge(label: "Jira", value: jiraId)
+                    }
+                    if entity.commitmentCount > 0 {
+                        Label("\(entity.commitmentCount) open", systemImage: "checkmark.circle")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            }
+
+            Spacer()
+
+            Button(entity.monitored ? "Unmonitor" : "Monitor") {
+                onToggle()
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.small)
+            .tint(entity.monitored ? .secondary : .accentColor)
+        }
+        .padding(.vertical, 2)
+        .opacity(entity.isActive ? 1 : 0.5)
+    }
+}
+
+// MARK: - Monitored Person Row
 
 struct MonitoredPersonRow: View {
     let person: Person
@@ -161,7 +169,6 @@ struct MonitoredPersonRow: View {
                 IdentityBadge(label: "Jira", value: person.jiraId)
             }
         }
-        .padding(.vertical, 4)
     }
 }
 

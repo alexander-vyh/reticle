@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 import CoreAudio
 import os
@@ -21,6 +22,7 @@ final class RecorderDaemon {
     private var heartbeatTimer: DispatchSourceTimer?
     private var zombieWatchdogTimer: DispatchSourceTimer?
     private(set) var wasAutoStopped = false
+    private var appTerminationObserver: NSObjectProtocol?
 
     // File-based health heartbeat (separate from SSE heartbeat above)
     private var fileHeartbeatTimer: DispatchSourceTimer?
@@ -248,6 +250,9 @@ final class RecorderDaemon {
         // Start zombie watchdog timer
         startZombieWatchdog(maxDuration: TimeInterval(config.maxRecordingDurationSeconds))
 
+        // Watch for meeting app termination (e.g., Zoom quit = meeting over)
+        startAppTerminationObserver()
+
         // Start reading live transcript from Python stdout
         if let process = pythonProcess {
             readLiveTranscript(from: process)
@@ -257,6 +262,7 @@ final class RecorderDaemon {
     @discardableResult
     func stopRecording() -> String? {
         cancelZombieWatchdog()
+        stopAppTerminationObserver()
 
         guard let session = activeSession else {
             logger.warning("stopRecording called but no active session")
@@ -325,6 +331,10 @@ final class RecorderDaemon {
     ///   (for Google Meet, WebEx in browser).
     /// - Returns: The resolved audio source.
     private func resolveAudioSource(browserMeeting: Bool = false) -> AudioSource {
+        // TODO: Process Tap delivers silent buffers (f149196 regression) — force AUHAL until fixed
+        logger.notice("Process Tap disabled (silent buffer regression), using AUHAL device capture")
+        return resolveDeviceSource()
+
         // Check if Process Tap is available on this macOS version
         guard ProcessTapCapture.isAvailable else {
             logger.notice("Process Taps unavailable (requires macOS 14.2+), using AUHAL fallback")
@@ -495,9 +505,33 @@ final class RecorderDaemon {
         timer.schedule(deadline: .now() + 15, repeating: 15)
         timer.setEventHandler { [weak self] in
             self?.liveStore?.sendHeartbeat()
+            self?.checkSilenceWatchdog()
         }
         timer.resume()
         heartbeatTimer = timer
+    }
+
+    /// Checks audio silence state and auto-stops if the recording looks phantom or abandoned.
+    ///
+    /// Two conditions:
+    /// - Onset timeout (90s): no audio ever detected → phantom recording (user never joined)
+    /// - Extended silence (300s): audio was present but has been silent → meeting ended early
+    private func checkSilenceWatchdog() {
+        guard activeSession != nil else { return }
+
+        let now = Date()
+        let elapsed = now.timeIntervalSince(activeSession!.startTime)
+        let lastNonSilent = recorder.lastNonSilentTime
+
+        if lastNonSilent == nil, elapsed > config.silenceOnsetTimeoutSeconds {
+            logger.warning("Silence watchdog: no audio detected in \(Int(elapsed))s — stopping phantom recording")
+            wasAutoStopped = true
+            stopRecording()
+        } else if let last = lastNonSilent, now.timeIntervalSince(last) > config.silenceExtendedTimeoutSeconds {
+            let silenceDuration = Int(now.timeIntervalSince(last))
+            logger.warning("Silence watchdog: \(silenceDuration)s of extended silence — meeting likely ended early")
+            stopRecording()
+        }
     }
 
     private func stopHeartbeat() {
@@ -579,6 +613,41 @@ final class RecorderDaemon {
     private func cancelZombieWatchdog() {
         zombieWatchdogTimer?.cancel()
         zombieWatchdogTimer = nil
+    }
+
+    // MARK: - Meeting App Termination Observer
+
+    /// Watch for meeting app process exits. If Zoom/Teams/Slack quits during recording, stop.
+    private func startAppTerminationObserver() {
+        let meetingBundleIDs = Set(config.meetingApps + config.browserApps)
+        appTerminationObserver = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didTerminateApplicationNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] notification in
+            guard let app = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication,
+                  let bundleID = app.bundleIdentifier,
+                  meetingBundleIDs.contains(bundleID) else { return }
+
+            // Check if ANY meeting app is still running — don't stop if user switched apps
+            let stillRunning = NSWorkspace.shared.runningApplications.contains {
+                guard let bid = $0.bundleIdentifier else { return false }
+                return meetingBundleIDs.contains(bid)
+            }
+            if !stillRunning {
+                self?.logger.notice("Meeting app \(bundleID) terminated and no other meeting apps running — stopping recording")
+                self?.stopRecording()
+            } else {
+                self?.logger.info("Meeting app \(bundleID) terminated but other meeting apps still running — continuing")
+            }
+        }
+    }
+
+    private func stopAppTerminationObserver() {
+        if let observer = appTerminationObserver {
+            NSWorkspace.shared.notificationCenter.removeObserver(observer)
+            appTerminationObserver = nil
+        }
     }
 
     // MARK: - Voice Capture (Hotkey)
@@ -797,6 +866,35 @@ final class RecorderDaemon {
             guard !data.isEmpty, let line = String(data: data, encoding: .utf8) else { return }
             self?.logger.info("PostProcess: \(line.trimmingCharacters(in: .whitespacesAndNewlines))")
         }
+
+        // Build environment: inherit parent env, augment PATH, inject HF_TOKEN for speaker diarization
+        var env = ProcessInfo.processInfo.environment
+
+        // Ensure Homebrew binaries (ffmpeg, etc.) are on PATH regardless of launchd environment
+        let homebrewBin = "/opt/homebrew/bin:/opt/homebrew/sbin"
+        let currentPath = env["PATH"] ?? "/usr/bin:/bin:/usr/sbin:/sbin"
+        env["PATH"] = "\(homebrewBin):\(currentPath)"
+
+        if env["HF_TOKEN"] == nil {
+            // Fallback: read from ~/.reticle/.env
+            let envFilePath = NSHomeDirectory() + "/.reticle/.env"
+            if let envContents = try? String(contentsOfFile: envFilePath, encoding: .utf8) {
+                for line in envContents.components(separatedBy: .newlines) {
+                    let trimmed = line.trimmingCharacters(in: .whitespaces)
+                    guard !trimmed.isEmpty, !trimmed.hasPrefix("#"),
+                          let eqRange = trimmed.range(of: "=") else { continue }
+                    let key = String(trimmed[trimmed.startIndex..<eqRange.lowerBound])
+                    let value = String(trimmed[eqRange.upperBound...])
+                    env[key] = value
+                }
+            }
+        }
+        if env["HF_TOKEN"] != nil {
+            logger.info("HF_TOKEN available — speaker diarization enabled")
+        } else {
+            logger.warning("HF_TOKEN not set — speaker diarization will be skipped")
+        }
+        process.environment = env
 
         process.terminationHandler = { [weak self] proc in
             if proc.terminationStatus == 0 {
