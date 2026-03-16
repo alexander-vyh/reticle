@@ -32,6 +32,10 @@ final class CoreAudioRecorder {
     private let meterLock = NSLock()
     private var _averagePower: Float = -160.0
     private var _peakPower: Float = -160.0
+    private var _lastNonSilentTime: Date?
+
+    /// RMS silence threshold: -50 dBFS separates digital silence / noise floor from speech.
+    static let silenceThresholdDb: Float = -50.0
 
     var averagePower: Float {
         meterLock.lock()
@@ -43,6 +47,13 @@ final class CoreAudioRecorder {
         meterLock.lock()
         defer { meterLock.unlock() }
         return _peakPower
+    }
+
+    /// Last time audio above the silence threshold was observed. Nil until first non-silent frame.
+    var lastNonSilentTime: Date? {
+        meterLock.lock()
+        defer { meterLock.unlock() }
+        return _lastNonSilentTime
     }
 
     // Pre-allocated render buffer (to avoid malloc in real-time callback)
@@ -148,6 +159,7 @@ final class CoreAudioRecorder {
         meterLock.lock()
         _averagePower = -160.0
         _peakPower = -160.0
+        _lastNonSilentTime = nil
         meterLock.unlock()
     }
 
@@ -626,6 +638,9 @@ final class CoreAudioRecorder {
         meterLock.lock()
         _averagePower = avgDb
         _peakPower = peakDb
+        if avgDb > CoreAudioRecorder.silenceThresholdDb {
+            _lastNonSilentTime = Date()
+        }
         meterLock.unlock()
     }
 

@@ -69,6 +69,9 @@ struct Commitment: Codable, Identifiable {
     let priority: String
     let ageDays: Int
     let isStale: Bool
+    let source: String?
+    let channelName: String?
+    let sourceUrl: String?
 }
 
 struct CommitmentSummary: Codable {
@@ -134,6 +137,20 @@ struct ReticleSettings: Codable {
         var followupEscalationSlackDmHours: Int?
         var followupEscalationSlackMentionHours: Int?
     }
+}
+
+struct Entity: Codable, Identifiable, Hashable {
+    let id: String
+    let canonicalName: String
+    let monitored: Bool
+    let isActive: Bool
+    let commitmentCount: Int
+    let slackId: String?
+    let jiraId: String?
+}
+
+struct EntitiesResponse: Codable {
+    let entities: [Entity]
 }
 
 // MARK: - Client
@@ -277,5 +294,39 @@ class GatewayClient: ObservableObject {
         struct Response: Decodable { let ok: Bool }
         let body: [String: Any] = fields
         let _: Response = try await request("/config/accounts", method: "PATCH", body: body)
+    }
+
+    // MARK: - Entities
+
+    func listEntities() async throws -> [Entity] {
+        let res: EntitiesResponse = try await request("/api/entities")
+        return res.entities
+    }
+
+    func getEntity(id: String) async throws -> Entity {
+        struct Response: Decodable { let entity: Entity }
+        let res: Response = try await request("/api/entities/\(id)")
+        return res.entity
+    }
+
+    func listEntityCommitments(id: String) async throws -> [Commitment] {
+        struct Response: Decodable { let commitments: [Commitment] }
+        let res: Response = try await request("/api/entities/\(id)/commitments")
+        return res.commitments
+    }
+
+    func mergeEntity(sourceId: String, targetId: String) async throws {
+        struct Response: Decodable { let ok: Bool }
+        let _: Response = try await request("/api/entities/\(sourceId)/merge", method: "POST", body: ["targetId": targetId])
+    }
+
+    func monitorEntity(id: String) async throws {
+        struct Response: Decodable { let ok: Bool }
+        let _: Response = try await request("/api/entities/\(id)/monitor", method: "POST")
+    }
+
+    func unmonitorEntity(id: String) async throws {
+        struct Response: Decodable { let ok: Bool }
+        let _: Response = try await request("/api/entities/\(id)/unmonitor", method: "POST")
     }
 }
