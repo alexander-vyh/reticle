@@ -21,11 +21,22 @@ struct TrayMenu: View {
 
         Divider()
 
-        let runningCount = serviceStore.services.filter { $0.status == .running }.count
-        Text("Services — \(runningCount)/\(serviceStore.services.count) running")
+        let persistent = serviceStore.services.filter { !$0.definition.scheduled }
+        let scheduled = serviceStore.services.filter { $0.definition.scheduled }
+        let runningCount = persistent.filter { $0.status == .running }.count
+        Text("Services — \(runningCount)/\(persistent.count) running")
 
-        ForEach(serviceStore.services, id: \.definition.launchdLabel) { svc in
+        ForEach(persistent, id: \.definition.launchdLabel) { svc in
             serviceMenuItem(svc)
+        }
+
+        if !scheduled.isEmpty {
+            Divider()
+            Text("Scheduled")
+
+            ForEach(scheduled, id: \.definition.launchdLabel) { svc in
+                scheduledMenuItem(svc)
+            }
         }
 
         Divider()
@@ -52,6 +63,8 @@ struct TrayMenu: View {
         }
     }
 
+    // MARK: - Persistent service menu item (existing behavior)
+
     @ViewBuilder
     private func serviceMenuItem(_ svc: ServiceState) -> some View {
         let effective = serviceStore.effectiveStatus(svc)
@@ -69,6 +82,58 @@ struct TrayMenu: View {
             }
         }
     }
+
+    // MARK: - Scheduled service menu item
+
+    @ViewBuilder
+    private func scheduledMenuItem(_ svc: ServiceState) -> some View {
+        let emoji = scheduledEmoji(svc)
+        let detail = scheduledServiceDetail(svc)
+        let label = "\(emoji)  \(svc.definition.label) — \(detail)"
+
+        Menu(label) {
+            Button("Run Now") { serviceStore.start(svc.definition.launchdLabel) }
+        }
+    }
+
+    // MARK: - Scheduled service helpers
+
+    private func scheduledEmoji(_ svc: ServiceState) -> String {
+        let effective = serviceStore.effectiveStatus(svc)
+        switch effective {
+        case .degraded: return "◐"
+        case .error, .startupFailed: return "✖"
+        default:
+            // Has a heartbeat with lastCheck? Ran successfully at some point.
+            if svc.heartbeat?.lastCheck != nil {
+                return "●"
+            }
+            return "○"
+        }
+    }
+
+    private func scheduledServiceDetail(_ svc: ServiceState) -> String {
+        guard let hb = svc.heartbeat, let lastCheck = hb.lastCheck else {
+            return "never run"
+        }
+
+        var parts: [String] = []
+
+        parts.append("ran \(relativeTime(from: lastCheck))")
+
+        if let metrics = hb.metrics {
+            if let items = metrics.itemCount {
+                parts.append("\(items) items")
+            }
+            if let patterns = metrics.patternCount {
+                parts.append("\(patterns) patterns")
+            }
+        }
+
+        return parts.joined(separator: ", ")
+    }
+
+    // MARK: - Shared helpers
 
     /// Returns a warning suffix if the meeting recorder has a denied TCC permission.
     private func permissionWarning(_ svc: ServiceState) -> String {
@@ -109,5 +174,17 @@ struct TrayMenu: View {
             return "exit \(exit)"
         }
         return ""
+    }
+
+    private func relativeTime(from epochMs: Double) -> String {
+        let now = Date().timeIntervalSince1970 * 1000
+        let ageSec = Int((now - epochMs) / 1000)
+        if ageSec < 60 { return "\(ageSec)s ago" }
+        let ageMin = ageSec / 60
+        if ageMin < 60 { return "\(ageMin)m ago" }
+        let ageHr = ageMin / 60
+        if ageHr < 24 { return "\(ageHr)h ago" }
+        let ageDays = ageHr / 24
+        return "\(ageDays)d ago"
     }
 }

@@ -196,7 +196,7 @@ async function main() {
   }
 
   const heartbeatStatus = narrationSucceeded ? 'ok' : 'degraded';
-  const heartbeatData = { status: heartbeatStatus, itemCount: allItems.length };
+  const heartbeatData = { status: heartbeatStatus, metrics: { itemCount: allItems.length } };
   if (!narrationSucceeded) heartbeatData.degradedReason = 'narration-unavailable';
   heartbeat.write(SERVICE_NAME, heartbeatData);
   process.exit(0);
