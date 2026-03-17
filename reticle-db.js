@@ -239,6 +239,7 @@ function initDatabase() {
       cadence        TEXT NOT NULL,
       items          TEXT NOT NULL,
       narration      TEXT,
+      curated_items  TEXT,
       created_at     INTEGER NOT NULL DEFAULT (strftime('%s','now'))
     );
     CREATE INDEX IF NOT EXISTS idx_digest_date ON digest_snapshots(account_id, snapshot_date);
@@ -305,6 +306,9 @@ function initDatabase() {
   const digestCols = db.prepare("PRAGMA table_info(digest_snapshots)").all();
   if (!digestCols.some(c => c.name === 'narration')) {
     db.exec('ALTER TABLE digest_snapshots ADD COLUMN narration TEXT');
+  }
+  if (!digestCols.some(c => c.name === 'curated_items')) {
+    db.exec('ALTER TABLE digest_snapshots ADD COLUMN curated_items TEXT');
   }
 
   return db;
@@ -757,11 +761,11 @@ function markNotified(db, conversationId) {
 
 // --- Digest Snapshots ---
 
-function saveSnapshot(db, accountId, { snapshotDate, cadence, items, narration = null }) {
+function saveSnapshot(db, accountId, { snapshotDate, cadence, items, narration = null, curatedItems = null }) {
   db.prepare(`
-    INSERT OR REPLACE INTO digest_snapshots (account_id, snapshot_date, cadence, items, narration)
-    VALUES (?, ?, ?, ?, ?)
-  `).run(accountId, snapshotDate, cadence, JSON.stringify(items), narration);
+    INSERT OR REPLACE INTO digest_snapshots (account_id, snapshot_date, cadence, items, narration, curated_items)
+    VALUES (?, ?, ?, ?, ?, ?)
+  `).run(accountId, snapshotDate, cadence, JSON.stringify(items), narration, curatedItems);
 }
 
 function getSnapshotsForRange(db, accountId, startDate, endDate, cadence = null) {
