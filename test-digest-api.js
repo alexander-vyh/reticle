@@ -217,6 +217,122 @@ function testGetSnapshotHistoryMaxLimit() {
   }
 }
 
+// --- Test: curated_items column exists in digest_snapshots ---
+function testCuratedItemsColumnExists() {
+  const { db, tmpPath } = setupTestDb();
+  try {
+    const cols = db.prepare("PRAGMA table_info(digest_snapshots)").all();
+    const curatedCol = cols.find(c => c.name === 'curated_items');
+    assert.ok(curatedCol, 'digest_snapshots should have a curated_items column');
+    assert.strictEqual(curatedCol.notnull, 0, 'curated_items column should be nullable');
+    console.log('  PASS: curated_items column exists in digest_snapshots');
+  } finally {
+    db.close();
+    cleanupDb(tmpPath);
+  }
+}
+
+// --- Test: saveSnapshot stores curated_items JSON ---
+function testSaveSnapshotWithCuratedItems() {
+  const { db, reticleDb, acct, tmpPath } = setupTestDb();
+  try {
+    const curatedData = [
+      { team: 'cse', items: [{ observation: 'test item' }] },
+      { team: 'desktop', items: [] }
+    ];
+    reticleDb.saveSnapshot(db, acct.id, {
+      snapshotDate: '2026-03-16',
+      cadence: 'weekly',
+      items: [{ id: 'item-1' }],
+      narration: 'Weekly narration',
+      curatedItems: JSON.stringify(curatedData)
+    });
+
+    const row = db.prepare(
+      "SELECT curated_items FROM digest_snapshots WHERE account_id = ? AND snapshot_date = ? AND cadence = ?"
+    ).get(acct.id, '2026-03-16', 'weekly');
+    assert.ok(row.curated_items, 'curated_items should be stored');
+    const parsed = JSON.parse(row.curated_items);
+    assert.strictEqual(parsed.length, 2);
+    assert.strictEqual(parsed[0].team, 'cse');
+    console.log('  PASS: saveSnapshot stores curated_items JSON');
+  } finally {
+    db.close();
+    cleanupDb(tmpPath);
+  }
+}
+
+// --- Test: saveSnapshot without curated_items (backward compat) ---
+function testSaveSnapshotWithoutCuratedItems() {
+  const { db, reticleDb, acct, tmpPath } = setupTestDb();
+  try {
+    reticleDb.saveSnapshot(db, acct.id, {
+      snapshotDate: '2026-03-16',
+      cadence: 'daily',
+      items: [{ id: 'item-1' }]
+    });
+
+    const row = db.prepare(
+      "SELECT curated_items FROM digest_snapshots WHERE account_id = ? AND snapshot_date = ? AND cadence = ?"
+    ).get(acct.id, '2026-03-16', 'daily');
+    assert.strictEqual(row.curated_items, null, 'curated_items should be null when not provided');
+    console.log('  PASS: saveSnapshot without curated_items (backward compat)');
+  } finally {
+    db.close();
+    cleanupDb(tmpPath);
+  }
+}
+
+// --- Test: getLatestSnapshot returns curated_items ---
+function testGetLatestSnapshotReturnsCuratedItems() {
+  const { db, reticleDb, acct, tmpPath } = setupTestDb();
+  try {
+    const curatedData = [{ team: 'cse', items: ['item1'] }];
+    reticleDb.saveSnapshot(db, acct.id, {
+      snapshotDate: '2026-03-16',
+      cadence: 'weekly',
+      items: [{ id: 'w1' }],
+      narration: 'test narration',
+      curatedItems: JSON.stringify(curatedData)
+    });
+
+    const latest = reticleDb.getLatestSnapshot(db, 'weekly');
+    assert.ok(latest, 'Should return a snapshot');
+    assert.strictEqual(latest.curated_items, JSON.stringify(curatedData));
+    console.log('  PASS: getLatestSnapshot returns curated_items');
+  } finally {
+    db.close();
+    cleanupDb(tmpPath);
+  }
+}
+
+// --- Test: getSnapshotHistory returns curated_items ---
+function testGetSnapshotHistoryReturnsCuratedItems() {
+  const { db, reticleDb, acct, tmpPath } = setupTestDb();
+  try {
+    reticleDb.saveSnapshot(db, acct.id, {
+      snapshotDate: '2026-03-15',
+      cadence: 'weekly',
+      items: [{ id: 'w1' }],
+      curatedItems: JSON.stringify([{ team: 'cse' }])
+    });
+    reticleDb.saveSnapshot(db, acct.id, {
+      snapshotDate: '2026-03-16',
+      cadence: 'weekly',
+      items: [{ id: 'w2' }]
+    });
+
+    const history = reticleDb.getSnapshotHistory(db, 'weekly', 4);
+    assert.strictEqual(history.length, 2);
+    assert.strictEqual(history[0].curated_items, null, 'Second snapshot has no curated_items');
+    assert.ok(history[1].curated_items, 'First snapshot has curated_items');
+    console.log('  PASS: getSnapshotHistory returns curated_items');
+  } finally {
+    db.close();
+    cleanupDb(tmpPath);
+  }
+}
+
 // ============================================================================
 // INTEGRATION TESTS — Gateway digest endpoints (HTTP-level)
 // ============================================================================
@@ -379,6 +495,11 @@ testGetLatestSnapshotEmpty();
 testGetSnapshotHistory();
 testGetSnapshotHistoryDefaultLimit();
 testGetSnapshotHistoryMaxLimit();
+testCuratedItemsColumnExists();
+testSaveSnapshotWithCuratedItems();
+testSaveSnapshotWithoutCuratedItems();
+testGetLatestSnapshotReturnsCuratedItems();
+testGetSnapshotHistoryReturnsCuratedItems();
 
 // Integration tests (async)
 testDigestEndpoints()
