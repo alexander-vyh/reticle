@@ -53,8 +53,6 @@ PLAN.md
 
 # Local-only files with PII (not for public repo)
 spike-weekly-summary.js
-lib/seed-data.js
-test-seed-data.js
 
 # Private docs (contain PII — team rosters, company-specific data)
 docs/private/
