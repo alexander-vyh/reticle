@@ -7,13 +7,13 @@ useDefault = true
 id = "simpli-fi-email"
 description = "Company email domain (catches any remaining pre-scrub references)"
 regex = '''@simpli\.fi'''
-keywords = ["example.com"]
+keywords = ["simpli.fi"]
 
 [[rules]]
 id = "simplifi-atlassian"
 description = "Atlassian domain (catches any remaining pre-scrub references)"
 regex = '''simplifi\.atlassian\.net'''
-keywords = ["company.atlassian.net"]
+keywords = ["simplifi.atlassian.net"]
 
 [[rules]]
 id = "known-slack-user-ids"

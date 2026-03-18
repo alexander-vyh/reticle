@@ -960,13 +960,13 @@ function testSeedLinksPeopleToTeams() {
   const { db, mainDb } = freshDbs();
   seedData.seedAll(db, mainDb);
 
-  const morgan = db.prepare("SELECT id FROM entities WHERE canonical_name = 'Gandalf Grey'").get();
+  const gandalf = db.prepare("SELECT id FROM entities WHERE canonical_name = 'Gandalf Grey'").get();
   const infra = db.prepare("SELECT id FROM entities WHERE canonical_name = 'Infrastructure'").get();
 
   const link = mainDb.prepare(
     "SELECT * FROM entity_links WHERE source_type = 'person' AND source_id = ? AND target_type = 'team' AND target_id = ? AND relationship = 'member_of'"
-  ).get(morgan.id, infra.id);
-  assert.ok(link, 'Morgan should be member_of Infrastructure');
+  ).get(gandalf.id, infra.id);
+  assert.ok(link, 'Gandalf should be member_of Infrastructure');
   db.close(); mainDb.close(); cleanup();
   console.log('  PASS: seed links people to teams');
 }
@@ -988,8 +988,8 @@ function testSeedIsIdempotent() {
   seedData.seedAll(db, mainDb); // Run twice
 
   const people = db.prepare("SELECT * FROM entities WHERE entity_type = 'person'").all();
-  const morgan = people.filter(p => p.canonical_name === 'Gandalf Grey');
-  assert.strictEqual(morgan.length, 1, 'Should not duplicate Gandalf Grey');
+  const gandalf = people.filter(p => p.canonical_name === 'Gandalf Grey');
+  assert.strictEqual(gandalf.length, 1, 'Should not duplicate Gandalf Grey');
   db.close(); mainDb.close(); cleanup();
   console.log('  PASS: seed is idempotent');
 }

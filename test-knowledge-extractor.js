@@ -628,7 +628,7 @@ function cleanup(dbPath) {
   try {
     const entity = kg.createEntity(db, { entityType: 'person', canonicalName: 'Gimli Stone' });
     kg.addIdentity(db, { entityId: entity.id, source: 'slack', externalId: 'U_DAN', displayName: 'Gimli Stone' });
-    kg.addIdentity(db, { entityId: entity.id, source: 'jira', externalId: 'dan-jira', displayName: 'J. Smith' });
+    kg.addIdentity(db, { entityId: entity.id, source: 'jira', externalId: 'dan-jira', displayName: 'G. Stone' });
 
     kg.seedAliases(db);
 
@@ -637,7 +637,7 @@ function cleanup(dbPath) {
 
     const aliasValues = aliases.map(a => a.alias);
     assert.ok(aliasValues.includes('Gimli Stone'), 'should include canonical_name / display_name');
-    assert.ok(aliasValues.includes('J. Smith'), 'should include display_name from jira');
+    assert.ok(aliasValues.includes('G. Stone'), 'should include display_name from jira');
 
     console.log('PASS: seedAliases populates from identity_map display_name');
   } finally {
@@ -828,7 +828,7 @@ function cleanup(dbPath) {
     kg.addIdentity(db, { entityId: entity.id, source: 'slack', externalId: 'U_DAN', displayName: 'Gimli Stone' });
     kg.addAlias(db, { entityId: entity.id, alias: 'Gimli Stone', aliasSource: 'canonical_name' });
 
-    // Insert a raw message from Jordan
+    // Insert a raw message from Gimli
     kg.insertRawMessage(db, {
       source: 'slack', sourceId: 'slack:msg1', channelName: 'general',
       authorExtId: 'U_DAN', authorName: 'Gimli Stone',
@@ -948,7 +948,7 @@ function cleanup(dbPath) {
 
     // Mentioned name has different case
     kg.upsertFact(db, {
-      entityId: null, mentionedName: 'casey park',
+      entityId: null, mentionedName: 'eowyn rider',
       attribute: 'decided', value: 'approve the plan',
       factType: 'event',
     });
@@ -956,7 +956,7 @@ function cleanup(dbPath) {
     const { runSweep } = require('./knowledge-extractor');
     const metrics = runSweep(db);
 
-    const fact = db.prepare("SELECT entity_id FROM facts WHERE mentioned_name = 'casey park'").get();
+    const fact = db.prepare("SELECT entity_id FROM facts WHERE mentioned_name = 'eowyn rider'").get();
     assert.strictEqual(fact.entity_id, entity.id, 'case-insensitive match should work');
     assert.strictEqual(metrics.sweepPathBMatched, 1);
 
@@ -1023,7 +1023,7 @@ function cleanup(dbPath) {
     const { runSweep } = require('./knowledge-extractor');
     const metrics = runSweep(db);
 
-    // "Gandalf Grey" should be attributed (Path B), "M. Chen" should not
+    // "Gandalf Grey" should be attributed (Path B), "G. Grey" should not
     assert.strictEqual(metrics.sweepPathBMatched, 1);
     // "M. Chen" has no alias → stays unattributed, but it's NOT a "known name"
     // (no alias exists for "M. Chen"), so knownNamesUnattributed = 0

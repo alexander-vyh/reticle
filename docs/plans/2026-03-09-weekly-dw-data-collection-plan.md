@@ -16,19 +16,19 @@
 
 | Team | Person | Role |
 |------|--------|------|
-| Corporate Systems Engineering | Gandalf Grey | Corporate Systems Engineer |
-| Corporate Systems Engineering | Aragorn King | Digital Workplace ... |
-| Corporate Systems Engineering | Samwise Brown | Digital Workplace ... |
-| Platform & Endpoint Security | Legolas Wood | Staff Engineer, Security |
-| Platform & Endpoint Security | Gimli 'G' Stone | Endpoint Systems Engineer |
-| Desktop Support | Eowyn Rider | Desktop Support Manager |
-| Desktop Support | Faramir Guard | Desktop Support Specialist |
+| Corporate Systems Engineering | Kinski Wu | Corporate Systems Engineer |
+| Corporate Systems Engineering | Bill Price | Digital Workplace ... |
+| Corporate Systems Engineering | Daniel Richardson | Digital Workplace ... |
+| Platform & Endpoint Security | Geoffrey Schuette | Staff Engineer, Security |
+| Platform & Endpoint Security | Daniel 'D' Sherr | Endpoint Systems Engineer |
+| Desktop Support | Ken Dominiec | Desktop Support Manager |
+| Desktop Support | Keshon Bowman | Desktop Support Specialist |
 
 ## Data Sources
 
 | Source | Scope | Stored as |
 |--------|-------|-----------|
-| Slack messages | `eng-infra`, `eng-platform-desktop-support`, `eng-platform-infosec`, `eng-platform` + any channel these 7 people post in | `raw_messages` with `source='slack'` |
+| Slack messages | `iops-dw-cse`, `iops-dw-desktop-support`, `iops-dw-infosec`, `iops-dw` + any channel these 7 people post in | `raw_messages` with `source='slack'` |
 | Jira activity | `DWDEV` and `DWS` projects — ticket transitions, comments, new issues | `raw_messages` with `source='jira'` |
 
 ---
@@ -69,9 +69,9 @@ const msg = kg.insertRawMessage(db, {
   source: 'slack',
   sourceId: 'C123:1234567890.000',
   channelId: 'C123',
-  channelName: 'eng-infra',
+  channelName: 'iops-dw-cse',
   authorId: null,
-  authorName: 'Gandalf Grey',
+  authorName: 'Kinski Wu',
   content: 'Finished UKG lifecycle automation validation',
   threadId: null,
   occurredAt: Math.floor(Date.now() / 1000),
@@ -79,12 +79,12 @@ const msg = kg.insertRawMessage(db, {
 
 assert.ok(msg.id, 'Message should have an ID');
 assert.strictEqual(msg.source, 'slack');
-assert.strictEqual(msg.author_name, 'Gandalf Grey');
+assert.strictEqual(msg.author_name, 'Kinski Wu');
 
 // Verify the message is in the database
 const rows = db.prepare('SELECT * FROM raw_messages').all();
 assert.strictEqual(rows.length, 1);
-assert.strictEqual(rows[0].channel_name, 'eng-infra');
+assert.strictEqual(rows[0].channel_name, 'iops-dw-cse');
 
 // Cleanup
 fs.rmSync(tmpDir, { recursive: true });
@@ -270,11 +270,11 @@ Create `lib/jira-capture.js` following the pattern of `lib/slack-capture.js`. Ma
 const { captureJiraActivity } = require('./lib/jira-capture');
 
 const jiraActivity = {
-  issueKey: 'ENG-1234',
+  issueKey: 'DWDEV-1234',
   summary: 'Implement Jamf IAM integration',
   status: 'In Progress',
   assigneeAccountId: 'jira-abc123',
-  assigneeName: 'Legolas Wood',
+  assigneeName: 'Geoffrey Schuette',
   projectKey: 'DWDEV',
   updatedAt: Math.floor(Date.now() / 1000),
   changeType: 'status_change',   // or 'comment', 'created', 'resolved'
@@ -283,7 +283,7 @@ const jiraActivity = {
 
 const msg = captureJiraActivity(omDb, jiraActivity);
 assert.strictEqual(msg.source, 'jira');
-assert.ok(msg.source_id.includes('ENG-1234'), 'Source ID should include issue key');
+assert.ok(msg.source_id.includes('DWDEV-1234'), 'Source ID should include issue key');
 assert.strictEqual(msg.channel_name, 'DWDEV');
 ```
 
@@ -370,7 +370,7 @@ const { seedDwTeam } = require('./lib/seed-data');
 
 // Mock team data
 const dwTeam = [
-  { name: 'Gandalf Grey', team: 'cse', email: 'kinski@example.com' },
+  { name: 'Kinski Wu', team: 'cse', email: 'kinski@example.com' },
 ];
 
 seedDwTeam(omDb, dwTeam);
@@ -463,13 +463,13 @@ The payoff: a script that queries `raw_messages` for the past 7 days, filters to
 // 5. Format output as structured markdown:
 //
 //    ## Corporate Systems Engineering
-//    ### Gandalf Grey
+//    ### Kinski Wu
 //    **Slack activity:**
-//    - [eng-infra] Finished UKG lifecycle automation validation
-//    - [eng-infra] Working on IaC prep for CSE environments
+//    - [iops-dw-cse] Finished UKG lifecycle automation validation
+//    - [iops-dw-cse] Working on IaC prep for CSE environments
 //    **Jira activity:**
-//    - [ENG-1234] Implement Jamf IAM integration — Moved to In Progress
-//    - [ENGSUP-567] Routine config issue — Resolved
+//    - [DWDEV-1234] Implement Jamf IAM integration — Moved to In Progress
+//    - [DWS-567] Routine config issue — Resolved
 //
 // 6. Deliver to Slack DM via sendSlackDM()
 // 7. Write heartbeat
@@ -497,7 +497,7 @@ git commit -m "feat: add weekly DW report consumer — person-first raw data by 
 ```json
 {
   "jiraApiToken": "<real token>",
-  "jiraBaseUrl": "https://company.atlassian.net",
+  "jiraBaseUrl": "https://simplifi.atlassian.net",
   "jiraUserEmail": "<your email>"
 }
 ```

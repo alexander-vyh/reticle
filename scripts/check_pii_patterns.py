@@ -25,12 +25,12 @@ PII_PATTERNS = [
     # Real company emails
     (r"[a-z.]+@simpli\.fi", "Real company email (use user@example.com)"),
     # Personal identifiers
-    (r"USERNAME", "Personal identifier (use a placeholder)"),
+    (r"alexandervyhmeister", "Personal identifier (use a placeholder)"),
     # Personal file paths
-    (r"/Users/USERNAME", "Personal file path (use /Users/USERNAME)"),
+    (r"/Users/alexandervyhmeister", "Personal file path (use /Users/USERNAME)"),
     # Real internal Slack channels
-    (r"\beng-platform\b", "Real internal Slack channel (use eng-platform)"),
-    (r"vendor_channel", "Real customer-specific Slack channel"),
+    (r"\biops-dw\b", "Real internal Slack channel (use eng-platform)"),
+    (r"cox_simplifi", "Real customer-specific Slack channel"),
 ]
 
 # Lines matching these patterns are exempt even if they also match a PII pattern
@@ -41,7 +41,7 @@ ALLOWED_PATTERNS = [
     r"/Users/USERNAME",
     r"/Users/username",
     # GitHub username in CODEOWNERS is acceptable
-    r"@USERNAME.*CODEOWNERS",
+    r"@alexandervyhmeister.*CODEOWNERS",
     # Detection rules in gitleaks config are acceptable
     r'keyword\s*=\s*\[.*simpli',
     r'description\s*=.*simpli',

@@ -53,7 +53,7 @@ Every collector produces items in this uniform shape. The four explainability fi
 
   // Explainability (PRD Section 13 — all mandatory)
   observation: "Gandalf Grey sent you a DM 26 hours ago that you haven't replied to",
-  reason: "Unreplied for >24h. You typically reply to Morgan within 4 hours.",
+  reason: "Unreplied for >24h. You typically reply to Gandalf within 4 hours.",
   authority: "Auto-capture: hygiene obligation (unreplied DM)",
   consequence: "Will escalate to tomorrow's digest if still unreplied. No enforcement configured.",
 
