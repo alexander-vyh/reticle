@@ -205,7 +205,7 @@ async function getSlackWorkspaceUrl() {
       req.end();
     });
     if (result.ok && result.url) {
-      slackWorkspaceUrl = result.url.replace(/\/$/, ''); // e.g. https://simpli-fi.slack.com
+      slackWorkspaceUrl = result.url.replace(/\/$/, ''); // e.g. https://example.slack.com
     }
   } catch (e) {
     slackWorkspaceUrl = null;
