@@ -78,6 +78,12 @@ async function main() {
     fn: () => collectCalendar(db, accountId, calendarEvents)
   });
 
+  // Expire stale conversations before collecting — prevents noise accumulation
+  const expiredCount = reticleDb.expireStaleConversations(db, accountId, { maxAgeDays: 7 });
+  if (expiredCount > 0) {
+    log.info({ expiredCount }, 'Expired stale conversations before collection');
+  }
+
   let allItems = [];
   const failedCollectors = [];
 
@@ -140,11 +146,25 @@ async function main() {
   // Separate feedback items from regular digest items for narration
   const regularItems = allItems.filter(i => i.collector !== 'feedback');
 
+  // Cap items for narration — prioritize high/critical, suppress low-priority overflow
+  const MAX_NARRATION_ITEMS = 15;
+  const priorityOrder = ['critical', 'high', 'normal', 'low'];
+  const sortedItems = [...regularItems].sort((a, b) => {
+    const ai = priorityOrder.indexOf(a.priority);
+    const bi = priorityOrder.indexOf(b.priority);
+    return (ai === -1 ? 999 : ai) - (bi === -1 ? 999 : bi);
+  });
+  const narrationItems = sortedItems.slice(0, MAX_NARRATION_ITEMS);
+  const suppressedCount = regularItems.length - narrationItems.length;
+  if (suppressedCount > 0) {
+    log.info({ suppressedCount, total: regularItems.length }, 'Suppressed low-priority items from narration');
+  }
+
   // Layer 3: AI narration
   let message;
   let narrationSucceeded = false;
   try {
-    message = await narrateDaily(regularItems);
+    message = await narrateDaily(narrationItems);
     if (message) narrationSucceeded = true;
   } catch (err) {
     log.warn({ err }, 'First narration attempt failed');
@@ -154,7 +174,7 @@ async function main() {
     log.warn('Retrying narration in 30s');
     await new Promise(r => setTimeout(r, 30000));
     try {
-      message = await narrateDaily(regularItems);
+      message = await narrateDaily(narrationItems);
       if (message) narrationSucceeded = true;
     } catch (err) {
       log.warn({ err }, 'Second narration attempt failed');
@@ -163,7 +183,12 @@ async function main() {
 
   if (!message) {
     log.warn('Narration failed — using fallback');
-    message = formatFallback(regularItems);
+    message = formatFallback(narrationItems);
+  }
+
+  // Add suppression note
+  if (suppressedCount > 0) {
+    message += `\n\n_${suppressedCount} lower-priority items suppressed._`;
   }
 
   // Add note about failed collectors
@@ -196,7 +221,7 @@ async function main() {
   }
 
   const heartbeatStatus = narrationSucceeded ? 'ok' : 'degraded';
-  const heartbeatData = { status: heartbeatStatus, metrics: { itemCount: allItems.length } };
+  const heartbeatData = { status: heartbeatStatus, checkInterval: 24 * 60 * 60 * 1000, metrics: { itemCount: allItems.length } };
   if (!narrationSucceeded) heartbeatData.degradedReason = 'narration-unavailable';
   heartbeat.write(SERVICE_NAME, heartbeatData);
   process.exit(0);

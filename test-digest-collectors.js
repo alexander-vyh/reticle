@@ -27,7 +27,7 @@ const acct = reticleDb.upsertAccount(db, {
 // --- Seed test data ---
 const now = Math.floor(Date.now() / 1000);
 
-// Unreplied email: 52 hours old (should be high priority)
+// Unreplied email: 52 hours old, originally triaged as urgent
 reticleDb.trackConversation(db, acct.id, {
   id: 'email:old-unreplied',
   type: 'email',
@@ -36,7 +36,8 @@ reticleDb.trackConversation(db, acct.id, {
   from_name: 'Sarah Chen',
   last_sender: 'them',
   waiting_for: 'my-response',
-  last_activity: now - (52 * 3600)
+  last_activity: now - (52 * 3600),
+  metadata: { urgency: 'urgent', reason: 'VIP sender' },
 });
 
 // Unreplied DM: 2 hours old (collected as low priority — under 24h threshold)
@@ -96,20 +97,20 @@ assert.ok(items.length >= 4, `Should have at least 4 items, got ${items.length}`
 // Check the old unreplied email is high priority
 const oldUnreplied = items.find(i => i.entityId === 'email:old-unreplied');
 assert.ok(oldUnreplied, 'Should include 52h unreplied email');
-assert.strictEqual(oldUnreplied.priority, 'high', '48-72h unreplied should be high');
+assert.strictEqual(oldUnreplied.priority, 'critical', '48-72h urgent unreplied should be critical');
 assert.strictEqual(oldUnreplied.category, 'unreplied');
 assert.strictEqual(oldUnreplied.collector, 'followup');
 assert.ok(oldUnreplied.observation.includes('Sarah Chen'), 'Observation should name the counterparty');
 assert.ok(oldUnreplied.reason, 'Must have a reason');
 assert.ok(oldUnreplied.authority, 'Must have authority');
 assert.ok(oldUnreplied.consequence, 'Must have consequence');
-console.log('PASS: old unreplied email is high priority with full explainability');
+console.log('PASS: old urgent unreplied email is critical with full explainability');
 
 // Check awaiting reply
 const awaitingItem = items.find(i => i.entityId === 'email:awaiting-old');
 assert.ok(awaitingItem, 'Should include 5-day awaiting reply');
 assert.strictEqual(awaitingItem.category, 'awaiting');
-assert.strictEqual(awaitingItem.priority, 'normal', '3-7d awaiting should be normal');
+assert.strictEqual(awaitingItem.priority, 'low', '3-7d awaiting should be low');
 console.log('PASS: awaiting reply item with correct priority');
 
 // Check resolved today (low priority positive signal)

@@ -521,6 +521,20 @@ function resolveConversation(db, id) {
   `).run(id);
 }
 
+/**
+ * Expire stale conversations — set state='expired' on conversations with
+ * no activity for more than maxAgeDays. Returns the number of expired rows.
+ */
+function expireStaleConversations(db, accountId, { maxAgeDays = 7 } = {}) {
+  const cutoff = Math.floor(Date.now() / 1000) - maxAgeDays * 86400;
+  const result = db.prepare(`
+    UPDATE conversations
+    SET state = 'expired', updated_at = strftime('%s', 'now')
+    WHERE account_id = ? AND state = 'active' AND last_activity < ?
+  `).run(accountId, cutoff);
+  return result.changes;
+}
+
 function getPendingResponses(db, accountId, options = {}) {
   const { type = null, olderThan = null, limit = null } = options;
 
@@ -845,6 +859,7 @@ module.exports = {
   trackConversation,
   updateConversationState,
   resolveConversation,
+  expireStaleConversations,
   getPendingResponses,
   getAwaitingReplies,
   getResolvedToday,

@@ -219,33 +219,49 @@ FORMAT:
 - Each team section: 1-2 paragraph narrative + bullet points for specific accomplishments
 - End each team section with hiring status if relevant
 
-CONTENT RULES:
-- Every claim must trace to the provided data. Do not invent information.
-- Synthesize Jira tickets + Slack messages into narrative themes, not ticket-by-ticket lists.
-- Group routine access provisioning/identity lifecycle as a single summary line with counts.
-- Call out Terraform, automation, and process improvement work specifically.
-- Highlight any issues discovered and their resolution status.
-- Hardware provisioning: summarize as counts, not individual tickets.
-- Mention documentation (Confluence) updates where relevant.
-- Interview activity: mention count and role, not candidate names.
+CONTENT RULES — Include ONLY:
+- Capability advancement (new automation, new IaC coverage, new SSO, new processes)
+- Validation/correctness work that prevented future problems
+- Risk reduction (naming convention changes, prevent-destroy safeguards)
+- Hiring status with pipeline details (always last line for CSE and Security)
+
+CONTENT RULES — Exclude (strictly):
+- Ticket counts (never mention how many tickets were resolved)
+- Individual employee names (never — say "the team" or use role/team names)
+- Dollar amounts, incident blow-by-blow, sprint/velocity metrics
+- Meeting counts, vendor negotiations, future commitments with specific dates
+- Screenshots, links, embedded content, ticket keys (DWDEV-xxxx, DWS-xxxxx)
+
+ALWAYS KTLO — Never surface these. They are invisible daily operations:
+- User/application access provisioning and deprovisioning (Okta, Salesforce, Jira, etc.) — whether 1 request or 50, this is daily routine. NEVER list individual access requests. NEVER summarize them as a count. Just omit.
+- Password resets, MFA enrollment, login troubleshooting
+- Hardware ordering, shipping, receiving, desk setup — unless a fleet-wide lifecycle event
+- Slack channel management, workspace changes
+- Routine onboarding/offboarding task execution
+- Confluence documentation updates for existing procedures
+- Storage metrics, backup status checks (unless a notable anomaly)
+
+COMPRESSION — The restraint IS the style:
+- Maximum 5 bullets per team section. If you have more, you are too detailed.
+- Desktop Support is almost always ONE SENTENCE with ZERO bullets. Only add bullets for facts a VP would want.
+- Each bullet must describe a CAPABILITY ADVANCEMENT — something new. If it is not new capability, new automation, new coverage, or new process, it is not a bullet.
+- Compress related signals into one bullet. Three Terraform tickets about the same attribute = one bullet.
+- If in doubt whether something is notable or KTLO, it is KTLO. Omit it.
+- "Routine identity lifecycle operations continued" is the MAXIMUM acknowledgment of KTLO. Usually, say nothing.
 
 VOCABULARY:
-- "remained stable" / "steady" for normal operations
-- "expanded" / "continued to mature" for growing capabilities
-- "no employee-impacting disruptions" when true
-- Never use: "crushing it", "great work", "team did amazing"
+- "remained stable" / "no employee-impacting disruptions" — exec summary opener
+- "risk posture remains unchanged" — exec summary closer
+- "Normal operational activity" — Desktop Support default
+- "operational maturity", "validated", "continued", "expanded", "implemented", "configured", "standardized"
 - Tone: calm, factual, resolution-oriented. Executive audience.
 
-THREE QUESTIONS to answer in the executive summary:
-1. Were there any employee-impacting disruptions this week?
-2. What capabilities expanded or matured?
-3. What is the overall risk posture heading into next week?
+THREE QUESTIONS the section answers for a scanning executive:
+1. Is anything broken or at risk? (Executive Summary — almost always "no")
+2. What capability advanced this week? (Team Notes — 2-5 bullets per team MAX)
+3. Where are we on hiring? (Last line of CSE and Security)
 
-IMPORTANT:
-- Do NOT list individual ticket keys (DWDEV-xxxx, DWS-xxxxx) in the notes.
-- Do NOT name individual team members. Refer to teams, not people.
-- Do NOT include meeting titles or dates inline.
-- The audience is executive leadership — they want themes and outcomes, not activity logs.`;
+The notes should be exactly as long as the content warrants. Do not pad. Do not cut for brevity. If only one capability advanced, write one bullet. If five advanced, write five.`;
 
 async function narrateWeeklySummary(curatedData) {
   const client = ai.getClient();
@@ -275,14 +291,14 @@ Please draft this week's Monday Morning Meeting notes following the same format 
 
   try {
     const response = await client.messages.create({
-      model: process.env.SPIKE_MODEL || 'claude-sonnet-4-20250514',
+      model: process.env.SPIKE_MODEL || 'claude-sonnet-4-6',
       max_tokens: 3000,
       system: WEEKLY_SUMMARY_SYSTEM,
       messages: [{ role: 'user', content: userMessage }],
     });
 
     const text = response.content[0]?.text;
-    const modelUsed = process.env.SPIKE_MODEL || 'claude-sonnet-4-20250514';
+    const modelUsed = process.env.SPIKE_MODEL || 'claude-sonnet-4-6';
     console.error(`[narration] model=${modelUsed} input_tokens=${response.usage?.input_tokens} output_tokens=${response.usage?.output_tokens}`);
     return text || null;
   } catch (err) {
