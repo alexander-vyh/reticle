@@ -149,7 +149,7 @@ final class RecorderDaemon {
         refreshPermissionStatus()
 
         // Resolve audio source: try Process Tap first, fall back to AUHAL
-        let audioSource = resolveAudioSource(browserMeeting: browserMeeting)
+        let audioSource = resolveAudioSource(browserMeeting: browserMeeting, deviceHint: deviceHint)
 
         var captureMode: String
         var tapCapture: ProcessTapCapture?
@@ -330,10 +330,10 @@ final class RecorderDaemon {
     /// - Parameter browserMeeting: If true, include browser apps in tap targets
     ///   (for Google Meet, WebEx in browser).
     /// - Returns: The resolved audio source.
-    private func resolveAudioSource(browserMeeting: Bool = false) -> AudioSource {
+    private func resolveAudioSource(browserMeeting: Bool = false, deviceHint: String? = nil) -> AudioSource {
         // TODO: Process Tap delivers silent buffers (f149196 regression) — force AUHAL until fixed
         logger.notice("Process Tap disabled (silent buffer regression), using AUHAL device capture")
-        return resolveDeviceSource()
+        return resolveDeviceSource(hint: deviceHint)
 
         // Check if Process Tap is available on this macOS version
         guard ProcessTapCapture.isAvailable else {
@@ -360,8 +360,8 @@ final class RecorderDaemon {
     }
 
     /// Wrap resolveDevice() into an AudioSource enum value.
-    private func resolveDeviceSource() -> AudioSource {
-        let deviceID = resolveDevice(hint: nil)
+    private func resolveDeviceSource(hint: String? = nil) -> AudioSource {
+        let deviceID = resolveDevice(hint: hint)
         return deviceID != 0 ? .device(deviceID) : .none
     }
 
