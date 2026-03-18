@@ -235,10 +235,10 @@ function testResolveIdentity() {
   const kg = require('./lib/knowledge-graph');
   const person = kg.createEntity(db, { entityType: 'person', canonicalName: 'Faramir Guard' });
   kg.addIdentity(db, { entityId: person.id, source: 'slack', externalId: 'U04ABC123' });
-  kg.addIdentity(db, { entityId: person.id, source: 'email', externalId: 'riley@co.com' });
+  kg.addIdentity(db, { entityId: person.id, source: 'email', externalId: 'faramir@co.com' });
 
   assert.strictEqual(kg.resolveIdentity(db, 'slack', 'U04ABC123'), person.id);
-  assert.strictEqual(kg.resolveIdentity(db, 'email', 'riley@co.com'), person.id);
+  assert.strictEqual(kg.resolveIdentity(db, 'email', 'faramir@co.com'), person.id);
   assert.strictEqual(kg.resolveIdentity(db, 'slack', 'UNKNOWN'), null);
   db.close();
   cleanup();

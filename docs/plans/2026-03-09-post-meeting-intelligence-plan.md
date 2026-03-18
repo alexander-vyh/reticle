@@ -541,7 +541,7 @@ and occasional errors. Focus on substance, not filler.
 
 You are given the meeting attendee list. Use it to resolve speaker labels and names
 mentioned in conversation to specific people. When someone says "Mark should do X",
-match "Pat" to the attendee named Boromir Hall if present.
+match "Boromir" to the attendee named Boromir Hall if present.
 
 Return a JSON object with these fields:
 {
@@ -1552,7 +1552,7 @@ reticleDb.saveMeetingSummary(db, {
   ],
   decisions: ['Build adoption through champions, not top-down mandate'],
   openQuestions: ['Salesforce credit usage?'],
-  keyPeople: [{ mentioned: 'Pat', resolvedName: 'Boromir Hall', context: 'AI policy owner' }],
+  keyPeople: [{ mentioned: 'Boromir', resolvedName: 'Boromir Hall', context: 'AI policy owner' }],
   flaggedItems: [
     { type: 'unresolved_speaker', label: 'SPEAKER_02', segmentCount: 3 },
     { type: 'low_confidence_action', item: 'Identify AI champions', owner: 'Alexander' }
