@@ -396,10 +396,10 @@ function runSweep(db, { log } = {}) {
  * @param {Object} client - Anthropic client
  * @param {Object[]} messages - Messages to extract from
  * @param {Object} [opts]
- * @param {string} [opts.model='claude-sonnet-4-20250514'] - Model to use
+ * @param {string} [opts.model] - Model to use (env EXTRACT_MODEL or claude-haiku-4-5-20251001)
  * @returns {Promise<Object[]>} Parsed facts
  */
-async function extractBatch(client, messages, { model = 'claude-sonnet-4-20250514', openCommitmentsContext = '' } = {}) {
+async function extractBatch(client, messages, { model = process.env.EXTRACT_MODEL || 'claude-haiku-4-5-20251001', openCommitmentsContext = '' } = {}) {
   const userContent = formatBatchForPrompt(messages);
   const systemPrompt = EXTRACTION_SYSTEM_PROMPT + openCommitmentsContext;
 

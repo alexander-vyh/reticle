@@ -9,7 +9,10 @@ const { sendSlackDM } = require('./lib/slack');
 const { collectFollowups, collectEmail, collectO3, collectCalendar } = require('./lib/digest-collectors');
 const { deduplicateItems } = require('./lib/digest-item');
 const { detectPatterns } = require('./lib/digest-patterns');
-const { narrateWeekly, formatFallback } = require('./lib/digest-narration');
+const { narrateWeekly, formatFallback, narrateWeeklySummary, formatWeeklySummaryFallback } = require('./lib/digest-narration');
+const { collectSlackTeamChannels } = require('./lib/slack-team-collector');
+const { collectJiraResolved } = require('./lib/jira-collector');
+const { buildTeamsFromDB, curateForWeeklySummary } = require('./lib/digest-curation');
 const calendarAuth = require('./calendar-auth');
 
 const SERVICE_NAME = 'digest-weekly';
@@ -106,46 +109,113 @@ async function main() {
   }
   log.info({ patternCount: patterns.length }, 'Pattern detection complete');
 
-  // Layer 3: AI narration (with resilient retry)
-  let message;
-  let narrationSucceeded = false;
+  // Layer 3: Monday Morning Meeting summary (new pipeline)
+  // Collect from additional sources: Slack team channels + Jira resolved
+  const weekEnd = Math.floor(today.getTime() / 1000);
+  const weekStart = weekEnd - (7 * 24 * 60 * 60);
+  const summarySourceWarnings = [];
+
+  let slackTeamData = { messages: [], warnings: [], channelsRead: 0, messagesFound: 0 };
   try {
-    message = await narrateWeekly(allItems, patterns);
-    if (message) narrationSucceeded = true;
+    const slackToken = config.slackBotToken;
+    if (slackToken) {
+      slackTeamData = await collectSlackTeamChannels(db, slackToken, weekStart, weekEnd);
+      log.info({ channels: slackTeamData.channelsRead, messages: slackTeamData.messagesFound }, 'Slack team channels collected');
+      summarySourceWarnings.push(...slackTeamData.warnings);
+    } else {
+      log.warn('Slack token not configured — skipping team channel collection');
+      summarySourceWarnings.push('Slack team channels: token not configured');
+    }
   } catch (err) {
-    log.warn({ err }, 'First narration attempt failed');
+    log.warn({ err }, 'Slack team channel collection failed');
+    summarySourceWarnings.push('Slack team channels: collection failed');
   }
 
-  if (!message) {
-    log.warn('Retrying narration in 30s');
-    await new Promise(r => setTimeout(r, 30000));
-    try {
-      message = await narrateWeekly(allItems, patterns);
-      if (message) narrationSucceeded = true;
-    } catch (err) {
-      log.warn({ err }, 'Second narration attempt failed');
+  let jiraData = { tickets: [], ktloCount: 0, warnings: [], totalResolved: 0 };
+  try {
+    const jiraToken = config.jiraToken;
+    if (jiraToken) {
+      jiraData = await collectJiraResolved(db, jiraToken, weekStart, weekEnd);
+      log.info({ capability: jiraData.tickets.length, ktloStripped: jiraData.ktloCount, total: jiraData.totalResolved }, 'Jira resolved collected');
+      summarySourceWarnings.push(...jiraData.warnings);
+    } else {
+      log.warn('Jira token not configured — skipping Jira collection');
+      summarySourceWarnings.push('Jira: token not configured');
     }
+  } catch (err) {
+    log.warn({ err }, 'Jira collection failed');
+    summarySourceWarnings.push('Jira: collection failed');
   }
 
-  if (!message) {
-    log.warn('Narration failed — using fallback');
-    message = formatFallback(allItems);
-    if (patterns.length > 0) {
-      message += '\n\n*Patterns detected:*\n';
-      message += patterns.map(p => `• [${p.significance}] ${p.observation}`).join('\n');
-    }
+  // Build team roster from DB (dynamic, not hardcoded)
+  const teams = buildTeamsFromDB(db);
+
+  // Curate all sources into team-attributed capability signals
+  const curatedData = curateForWeeklySummary({
+    jiraTickets: jiraData.tickets,
+    slackMessages: slackTeamData.messages,
+    digestItems: allItems,
+    previousNotes: null // TODO: fetch from Confluence in future increment
+  }, teams);
+
+  log.info({
+    cseAccomplishments: curatedData.teams?.cse?.accomplishments?.length || 0,
+    desktopAccomplishments: curatedData.teams?.desktop?.accomplishments?.length || 0,
+    securityAccomplishments: curatedData.teams?.security?.accomplishments?.length || 0,
+    gaps: curatedData.gaps?.length || 0
+  }, 'Curation complete');
+
+  // Narrate as Monday Morning Meeting summary
+  let summaryMessage;
+  let summaryNarrationSucceeded = false;
+  try {
+    summaryMessage = await narrateWeeklySummary(curatedData, null);
+    if (summaryMessage) summaryNarrationSucceeded = true;
+  } catch (err) {
+    log.warn({ err }, 'Summary narration failed');
   }
+
+  if (!summaryMessage) {
+    log.warn('Summary narration failed — using fallback');
+    summaryMessage = formatWeeklySummaryFallback(curatedData);
+  }
+
+  // Build source availability header
+  const sourceLines = [];
+  sourceLines.push(`Slack (${slackTeamData.channelsRead} channels, ${slackTeamData.messagesFound} messages)`);
+  sourceLines.push(`Jira (${jiraData.tickets.length} capability / ${jiraData.ktloCount} KTLO stripped / ${jiraData.totalResolved} total)`);
+  sourceLines.push(`Digest collectors (${allItems.length} items)`);
+  const sourceHeader = `_Sources: ${sourceLines.join(' · ')}_`;
+
+  // Add gap markers if any team has thin signal
+  let gapNotice = '';
+  if (curatedData.gaps && curatedData.gaps.length > 0) {
+    gapNotice = '\n\n_⚠️ ' + curatedData.gaps.join('. ') + '_';
+  }
+
+  // Add source warnings
+  let warningNotice = '';
+  if (summarySourceWarnings.length > 0) {
+    warningNotice = '\n_' + summarySourceWarnings.join('. ') + '_';
+  }
+
+  // Compose final message: source header + summary draft + gaps + warnings
+  const message = `${sourceHeader}\n\n${summaryMessage}${gapNotice}${warningNotice}`;
+  const narrationSucceeded = summaryNarrationSucceeded;
 
   if (failedCollectors.length > 0) {
-    message += `\n\n_Note: ${failedCollectors.join(', ')} data unavailable for this digest._`;
+    // Note about original digest collector failures (followup, email, etc.)
+    // These feed the reflection digest, not the Monday notes — but still worth noting
+    log.warn({ failedCollectors }, 'Some digest collectors failed');
   }
 
-  // Save snapshot with narration text
+  // Save snapshot with both items and curated data
   reticleDb.saveSnapshot(db, accountId, {
     snapshotDate: dateStr,
     cadence: 'weekly',
     items: allItems,
-    narration: message
+    narration: summaryMessage,
+    curatedItems: JSON.stringify(curatedData)
   });
 
   // Deliver

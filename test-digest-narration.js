@@ -209,12 +209,14 @@ One open Security Engineer. Two candidates in final round interviews.`;
     })
   };
 
-  // Clear the digest-narration cache to pick up the mock
+  // Clear the digest-narration cache to pick up the mock, then disable CLI path
   delete require.cache[require.resolve('./lib/digest-narration')];
-  const { narrateWeeklySummary: mockedNarrate } = require('./lib/digest-narration');
+  const freshMod = require('./lib/digest-narration');
+  freshMod._setCliOverride(() => null); // CLI returns null → falls through to API mock
+  const { narrateWeeklySummary: mockedNarrate } = freshMod;
 
   mockedNarrate(sampleCuratedData, samplePreviousNotes).then(result => {
-    assert.strictEqual(result, mockResponse, 'Should return AI response text');
+    assert.strictEqual(result, mockResponse, 'Should return API response when CLI returns null');
     console.log('PASS: narrateWeeklySummary with AI mock');
 
     // Restore
@@ -238,7 +240,9 @@ One open Security Engineer. Two candidates in final round interviews.`;
   };
 
   delete require.cache[require.resolve('./lib/digest-narration')];
-  const { narrateWeeklySummary: fallbackNarrate } = require('./lib/digest-narration');
+  const fallbackMod = require('./lib/digest-narration');
+  fallbackMod._setCliOverride(() => null);
+  const { narrateWeeklySummary: fallbackNarrate } = fallbackMod;
 
   fallbackNarrate(sampleCuratedData, samplePreviousNotes).then(result => {
     // When AI is unavailable, should return the fallback
@@ -272,7 +276,9 @@ One open Security Engineer. Two candidates in final round interviews.`;
   };
 
   delete require.cache[require.resolve('./lib/digest-narration')];
-  const { narrateWeeklySummary: errorNarrate } = require('./lib/digest-narration');
+  const errorMod = require('./lib/digest-narration');
+  errorMod._setCliOverride(() => null);
+  const { narrateWeeklySummary: errorNarrate } = errorMod;
 
   errorNarrate(sampleCuratedData, samplePreviousNotes).then(result => {
     assert.ok(result, 'Should return fallback on error');
