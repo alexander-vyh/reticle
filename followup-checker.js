@@ -220,8 +220,20 @@ function buildEODSection(db) {
 
   // Conditional suppression: skip if no urgent unreplied and <= 5 total unreplied
   if (urgent.length === 0 && pendingEmails.length <= 5 && respondedTodayCount === 0) {
+    log.info({
+      urgentCount: 0,
+      pendingCount: pendingEmails.length,
+      respondedToday: 0,
+    }, 'EOD section suppressed — quiet email day');
     return null;
   }
+
+  log.info({
+    urgentCount: urgent.length,
+    nonUrgentCount: nonUrgent.length,
+    carryForwardCount: pendingEmails.length,
+    respondedToday: respondedTodayCount,
+  }, 'EOD section built');
 
   let section = `\n\n📊 *End of Day — Email*\n`;
   section += `Responded to ${respondedTodayCount} today.`;
@@ -313,7 +325,7 @@ async function check4Hour() {
   }
 
   if (!hasContent) {
-    log.debug('No 4-hour batch items or EOD content');
+    log.info('No 4-hour batch items or EOD content — skipping notification');
     return;
   }
 

@@ -396,6 +396,7 @@ async function handleEvent(event, db) {
 
   // Ignore bot messages
   if (event.bot_id) {
+    log.debug({ botId: event.bot_id, channel: event.channel }, 'Ignoring bot message');
     return;
   }
 
@@ -413,7 +414,7 @@ async function handleEvent(event, db) {
     try {
       trackSlackConversation(db, event, 'incoming');
     } catch (err) {
-      log.warn({ err, channel: event.channel }, 'Failed to track conversation — continuing');
+      log.warn({ err, channel: event.channel, ts: event.ts, user: event.user }, 'Failed to track conversation — continuing');
     }
   }
 
@@ -438,8 +439,9 @@ async function handleEvent(event, db) {
         clientMsgId: event.client_msg_id || null,
         subtype: event.subtype || null,
       });
+      log.debug({ channel: event.channel, user: event.user, channelName }, 'Message captured to org-memory');
     } catch (err) {
-      log.warn({ err, channel: event.channel, ts: event.ts }, 'Failed to capture message to org-memory');
+      log.warn({ err, channel: event.channel, ts: event.ts, user: event.user }, 'Failed to capture message to org-memory');
     }
   }
 

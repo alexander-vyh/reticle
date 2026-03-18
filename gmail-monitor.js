@@ -406,8 +406,15 @@ function applyUserRules(email) {
     if (rule.match_to && !recipients.includes(rule.match_to)) continue;
     if (rule.match_subject_contains && !subject.includes(rule.match_subject_contains)) continue;
 
-    // Record the hit (fire-and-forget — don't block on DB write)
+    // Record the hit and log the match
     try { reticleDb.recordRuleHit(followupsDbConn, rule.id); } catch { /* ignore */ }
+    log.info({
+      ruleId: rule.id,
+      action: rule.rule_type,
+      from: senderEmail,
+      subject: email.subject?.substring(0, 80),
+      ruleDescription: formatRuleDescription(rule),
+    }, 'User rule matched');
 
     return { action: rule.rule_type, reason: `Learned: ${formatRuleDescription(rule)}`, ruleId: rule.id };
   }

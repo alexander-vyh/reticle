@@ -215,7 +215,7 @@ async function testDateConversion() {
   // weekEnd   = 1742256000 = 2025-03-18 UTC
   assert.ok(capturedJql.includes('2025-03-11'), `JQL should contain start date 2025-03-11, got: ${capturedJql}`);
   assert.ok(capturedJql.includes('2025-03-18'), `JQL should contain end date 2025-03-18, got: ${capturedJql}`);
-  assert.ok(capturedJql.includes('project in (DWDEV, DWS)'), `JQL should filter by projects, got: ${capturedJql}`);
+  assert.ok(capturedJql.includes('project in (ENG, ENGSUP)'), `JQL should filter by projects, got: ${capturedJql}`);
   assert.ok(capturedJql.includes('resolved'), `JQL should filter by resolved date, got: ${capturedJql}`);
   console.log('  PASS: date conversion');
 }

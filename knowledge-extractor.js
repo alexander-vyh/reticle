@@ -10,6 +10,7 @@
 'use strict';
 
 const kg = require('./lib/knowledge-graph');
+const _log = require('./lib/logger')('knowledge-extractor');
 
 // --- Valid attributes and fact types (per design doc taxonomy) ---
 const VALID_ATTRIBUTES = new Set([
@@ -284,6 +285,7 @@ function storeFacts(db, facts) {
       }
       stored++;
     } catch (err) {
+      _log.warn({ err: err.message, entity: fact.entity, attribute: fact.attribute, value: fact.value?.substring(0, 60) }, 'Fact skipped — storage error');
       skipped++;
     }
   }

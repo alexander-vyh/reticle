@@ -99,10 +99,10 @@ async function testTeamMemberFiltering() {
   mockSlackReader.reset();
   _resetChannelCache();
   mockSlackReader._channels = [
-    { id: 'C_IOPS', name: 'eng-platform' }
+    { id: 'C_ENG', name: 'eng-platform' }
   ];
   mockSlackReader._historyByChannel = {
-    C_IOPS: [
+    C_ENG: [
       { type: 'message', user: 'U_ALICE', text: 'Deployed the new pipeline to production successfully', ts: String(now - 3600) },
       { type: 'message', user: 'U_OUTSIDER', text: 'This is from someone not on the team at all', ts: String(now - 3000) },
       { type: 'message', user: 'U_BOB', text: 'Working on the Terraform module for networking', ts: String(now - 2000) },
@@ -136,10 +136,10 @@ async function testTrivialMessageFiltering() {
   mockSlackReader.reset();
   _resetChannelCache();
   mockSlackReader._channels = [
-    { id: 'C_IOPS', name: 'eng-platform' }
+    { id: 'C_ENG', name: 'eng-platform' }
   ];
   mockSlackReader._historyByChannel = {
-    C_IOPS: [
+    C_ENG: [
       { type: 'message', user: 'U_ALICE', text: 'ok', ts: String(now - 5000) },
       { type: 'message', user: 'U_ALICE', text: 'thanks', ts: String(now - 4500) },
       { type: 'message', user: 'U_ALICE', text: 'Thanks!', ts: String(now - 4400) },
@@ -163,10 +163,10 @@ async function testBotMessageFiltering() {
   mockSlackReader.reset();
   _resetChannelCache();
   mockSlackReader._channels = [
-    { id: 'C_IOPS', name: 'eng-platform' }
+    { id: 'C_ENG', name: 'eng-platform' }
   ];
   mockSlackReader._historyByChannel = {
-    C_IOPS: [
+    C_ENG: [
       { type: 'message', user: 'U_ALICE', text: 'Real message from Alice about infrastructure', ts: String(now - 3000) },
       { type: 'message', user: 'U_ALICE', bot_id: 'B001', text: 'Bot message that happens to match a user', ts: String(now - 2500) },
       { type: 'message', subtype: 'bot_message', text: 'Automated deploy notification sent to channel', ts: String(now - 2000) },
@@ -187,14 +187,14 @@ async function testDateRangeFiltering() {
   mockSlackReader.reset();
   _resetChannelCache();
   mockSlackReader._channels = [
-    { id: 'C_IOPS', name: 'eng-platform' }
+    { id: 'C_ENG', name: 'eng-platform' }
   ];
 
   const twoWeeksAgo = now - (14 * 86400);
   const nextWeek = now + (7 * 86400);
 
   mockSlackReader._historyByChannel = {
-    C_IOPS: [
+    C_ENG: [
       { type: 'message', user: 'U_ALICE', text: 'Message from two weeks ago before window', ts: String(twoWeeksAgo) },
       { type: 'message', user: 'U_BOB', text: 'Message from within the current weekly window', ts: String(now - 3600) },
       { type: 'message', user: 'U_CAROL', text: 'Message from future time which should not appear', ts: String(nextWeek) },
@@ -216,10 +216,10 @@ async function testMissingChannelHandling() {
   _resetChannelCache();
   // Only one channel exists, but the collector looks for 4
   mockSlackReader._channels = [
-    { id: 'C_IOPS', name: 'eng-platform' }
+    { id: 'C_ENG', name: 'eng-platform' }
   ];
   mockSlackReader._historyByChannel = {
-    C_IOPS: [
+    C_ENG: [
       { type: 'message', user: 'U_ALICE', text: 'Alice is working on something important this week', ts: String(now - 3600) }
     ]
   };
@@ -246,22 +246,22 @@ async function testMultipleChannels() {
   mockSlackReader.reset();
   _resetChannelCache();
   mockSlackReader._channels = [
-    { id: 'C_IOPS', name: 'eng-platform' },
-    { id: 'C_CSE', name: 'eng-infra' },
-    { id: 'C_TF', name: 'project-automation' },
-    { id: 'C_DW', name: 'eng-general' },
+    { id: 'C_ENG', name: 'eng-platform' },
+    { id: 'C_INF', name: 'eng-infra' },
+    { id: 'C_AUTO', name: 'project-automation' },
+    { id: 'C_GEN', name: 'eng-general' },
   ];
   mockSlackReader._historyByChannel = {
-    C_IOPS: [
+    C_ENG: [
       { type: 'message', user: 'U_ALICE', text: 'Message from Alice in the eng-platform channel here', ts: String(now - 5000) }
     ],
-    C_CSE: [
+    C_INF: [
       { type: 'message', user: 'U_BOB', text: 'Message from Bob in the eng-infra channel here', ts: String(now - 4000) }
     ],
-    C_TF: [
+    C_AUTO: [
       { type: 'message', user: 'U_CAROL', text: 'Message from Carol in project-automation channel', ts: String(now - 3000) }
     ],
-    C_DW: [
+    C_GEN: [
       { type: 'message', user: 'U_ALICE', text: 'Alice again in the eng-general channel now', ts: String(now - 2000) }
     ],
   };
@@ -289,10 +289,10 @@ async function testEmptyResults() {
   mockSlackReader.reset();
   _resetChannelCache();
   mockSlackReader._channels = [
-    { id: 'C_IOPS', name: 'eng-platform' }
+    { id: 'C_ENG', name: 'eng-platform' }
   ];
   mockSlackReader._historyByChannel = {
-    C_IOPS: []
+    C_ENG: []
   };
 
   const result = await collectSlackTeamChannels(db, 'xoxb-fake', weekStart, weekEnd);
@@ -311,10 +311,10 @@ async function testAuthorTeamMapping() {
   mockSlackReader.reset();
   _resetChannelCache();
   mockSlackReader._channels = [
-    { id: 'C_IOPS', name: 'eng-platform' }
+    { id: 'C_ENG', name: 'eng-platform' }
   ];
   mockSlackReader._historyByChannel = {
-    C_IOPS: [
+    C_ENG: [
       { type: 'message', user: 'U_ALICE', text: 'Alice from CSE team is working on customer issues', ts: String(now - 5000) },
       { type: 'message', user: 'U_BOB', text: 'Bob from desktop team is fixing UI rendering bugs', ts: String(now - 4000) },
       { type: 'message', user: 'U_CAROL', text: 'Carol from security is reviewing access control policy', ts: String(now - 3000) },
