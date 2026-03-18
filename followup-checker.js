@@ -394,7 +394,10 @@ async function checkEscalations() {
     return false;
   });
 
-  if (escalated.length === 0) return;
+  if (escalated.length === 0) {
+    log.debug('No items eligible for escalation');
+    return;
+  }
 
   let message = `🚨 *ESCALATION: Old pending items*\n\n`;
 

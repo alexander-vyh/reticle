@@ -172,7 +172,7 @@ async function getMyUserId() {
  * Track Slack conversation in follow-ups database
  */
 function trackSlackConversation(db, event, direction) {
-  if (!db) return;
+  if (!db) { log.warn('trackSlackConversation skipped — DB connection unavailable'); return; }
 
   try {
     const now = Math.floor(Date.now() / 1000);

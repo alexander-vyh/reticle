@@ -289,7 +289,7 @@ async function sendPostMeetingNudge(db, event, report) {
  * Uses FreeBusy API for gap-finding (async).
  */
 async function checkO3Notifications(events, db, accountId) {
-  if (!db) return;
+  if (!db) { log.warn('checkO3Notifications skipped — DB connection unavailable'); return; }
 
   // Refresh direct reports from DB each cycle so changes take effect without a restart
   O3_CONFIG.directReports = peopleStore.getDirectReports(db);
@@ -370,7 +370,7 @@ let lastWeeklySummaryDate = null;
  * Fires once on Sunday at 6pm (or the next poll after 6pm).
  */
 function checkWeeklySummary(db) {
-  if (!db) return;
+  if (!db) { log.warn('checkWeeklySummary skipped — DB connection unavailable'); return; }
   const now = new Date();
   if (now.getDay() !== O3_CONFIG.weeklySummaryDay) return;
   if (now.getHours() < O3_CONFIG.weeklySummaryHour) return;
@@ -379,7 +379,9 @@ function checkWeeklySummary(db) {
   if (lastWeeklySummaryDate === todayKey) return;
 
   lastWeeklySummaryDate = todayKey;
-  sendWeeklySummary(db);
+  sendWeeklySummary(db).catch(err => {
+    log.error({ err }, 'sendWeeklySummary failed');
+  });
 }
 
 /**

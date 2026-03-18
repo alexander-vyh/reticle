@@ -372,7 +372,7 @@ function sendSlackMessage(channel, message, blocks = null) {
 let userRules = [];
 
 function loadUserRules() {
-  if (!followupsDbConn) return;
+  if (!followupsDbConn) { log.warn('loadUserRules skipped — DB connection unavailable'); return; }
   try {
     userRules = reticleDb.getActiveRules(followupsDbConn, accountId);
     if (userRules.length > 0) {
@@ -785,7 +785,7 @@ function getEmailThreadId(email) {
  * Track email conversation in follow-ups database
  */
 function trackEmailConversation(db, email, direction, metadata) {
-  if (!db) return;
+  if (!db) { log.warn('trackEmailConversation skipped — DB connection unavailable'); return; }
 
   try {
     const threadId = getEmailThreadId(email);
@@ -959,7 +959,7 @@ async function sendBatchSummary() {
  * Flips waiting_for from 'my-response' to 'their-response' when a reply is found
  */
 async function checkSentEmails() {
-  if (!followupsDbConn) return;
+  if (!followupsDbConn) { log.warn('checkSentEmails skipped — DB connection unavailable'); return; }
 
   try {
     const gmail = getGmailClient();
@@ -1267,7 +1267,7 @@ async function maybeSendHealthCheck() {
         rulesLine = `\n  📋 Learned Rules: ${rulesSummary.total} active\n${topLines.join('\n')}`;
       }
     }
-  } catch { /* don't break health check for rules summary */ }
+  } catch (e) { log.warn({ err: e.message }, 'Failed to build rules summary for health check'); }
 
   const summary = [
     `*Gmail Monitor Health Check*`,
