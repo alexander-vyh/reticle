@@ -27,7 +27,7 @@ if (existingTeam.length === 0 && config.dwTeamEmails && config.dwTeamEmails.leng
   for (const t of config.dwTeamEmails) {
     peopleStore.addPerson(db, { email: t.email, name: t.name, team: t.team });
   }
-  console.log(`Seeded ${config.dwTeamEmails.length} team members from team.json`);
+  log.info({ count: config.dwTeamEmails.length }, 'Seeded team members from team.json');
 }
 
 // GET /people — list all monitored people
@@ -851,7 +851,7 @@ app.use((err, req, res, _next) => {
 });
 
 app.listen(PORT, () => {
-  console.log(`Reticle Gateway listening on port ${PORT}`);
+  log.info({ port: PORT }, 'Reticle Gateway listening');
 });
 
 module.exports = app; // for testing

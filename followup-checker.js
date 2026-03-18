@@ -406,7 +406,9 @@ async function checkEscalations() {
  * Main check loop
  */
 async function runChecks() {
-  log.info('Running follow-up checks');
+  const pendingCount = reticleDb.getPendingResponses(db, accountId, {}).length;
+  const awaitingCount = reticleDb.getAwaitingReplies(db, accountId, {}).length;
+  log.info({ pendingCount, awaitingCount }, 'Running follow-up checks');
 
   try {
     await checkImmediate();
@@ -416,7 +418,8 @@ async function runChecks() {
 
     heartbeat.write('followup-checker', {
       checkInterval: CONFIG.checkInterval,
-      status: 'ok'
+      status: 'ok',
+      metrics: { pendingCount, awaitingCount },
     });
   } catch (error) {
     log.error({ err: error }, 'Error in checks');

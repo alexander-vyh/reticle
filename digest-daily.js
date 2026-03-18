@@ -91,7 +91,12 @@ async function main() {
     try {
       const items = collector.fn();
       allItems.push(...items);
-      log.info({ collector: collector.name, count: items.length }, 'Collector completed');
+      // Log per-collector breakdown by priority for decision trail
+      const byPriority = {};
+      for (const item of items) {
+        byPriority[item.priority || 'unknown'] = (byPriority[item.priority || 'unknown'] || 0) + 1;
+      }
+      log.info({ collector: collector.name, count: items.length, byPriority }, 'Collector completed');
     } catch (err) {
       log.error({ err, collector: collector.name }, 'Collector failed');
       failedCollectors.push(collector.name);
