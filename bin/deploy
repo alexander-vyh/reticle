@@ -182,6 +182,16 @@ INFOPLIST
 
 codesign --sign "Reticle Local Dev" --force "$POPUP_APP"
 
+# Smoke test: verify popup creates a visible window
+if [ -x "$REPO_DIR/test-meeting-popup.sh" ]; then
+  info "Smoke-testing MeetingPopup..."
+  if "$REPO_DIR/test-meeting-popup.sh" "$POPUP_APP/Contents/MacOS/MeetingPopup"; then
+    info "MeetingPopup smoke test passed"
+  else
+    warn "MeetingPopup smoke test FAILED — popup may not show windows"
+  fi
+fi
+
 cd "$REPO_DIR"
 
 # --- Step 7: Generate and load launchd plists ---

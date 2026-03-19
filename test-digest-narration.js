@@ -133,7 +133,7 @@ One open Security Engineer. Two candidates in final round interviews.`;
   assert.ok(prompt.system.includes('Individual employee names'), 'System prompt should forbid individual names');
   assert.ok(prompt.system.includes('remained stable'), 'System prompt should include vocabulary');
   assert.ok(prompt.system.includes('Digital Workplace'), 'System prompt should reference the section name');
-  assert.ok(prompt.system.includes('Infrastructure'), 'System prompt should name sub-teams');
+  assert.ok(prompt.system.includes('Corporate Systems Engineering'), 'System prompt should name sub-teams');
   assert.ok(prompt.system.includes('Executive Summary'), 'System prompt should describe output structure');
 
   // User message includes curated data
@@ -161,7 +161,7 @@ One open Security Engineer. Two candidates in final round interviews.`;
   // Should contain the basic structure
   assert.ok(fallback.includes('Digital Workplace'), 'Fallback should have DW header');
   assert.ok(fallback.includes('Executive Summary'), 'Fallback should have exec summary');
-  assert.ok(fallback.includes('Infrastructure'), 'Fallback should have Infrastructure section');
+  assert.ok(fallback.includes('Corporate Systems Engineering'), 'Fallback should have CSE section');
   assert.ok(fallback.includes('Support'), 'Fallback should have Support section');
   assert.ok(fallback.includes('Security'), 'Fallback should have Security section');
 

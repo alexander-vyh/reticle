@@ -246,19 +246,19 @@ async function testMultipleChannels() {
   mockSlackReader.reset();
   _resetChannelCache();
   mockSlackReader._channels = [
-    { id: 'C_ENG', name: 'eng-platform' },
-    { id: 'C_INF', name: 'eng-infra' },
-    { id: 'C_AUTO', name: 'project-automation' },
+    { id: 'C_DW', name: 'eng-platform' },
+    { id: 'C_CSE', name: 'eng-infra' },
+    { id: 'C_TF', name: 'project-automation' },
     { id: 'C_GEN', name: 'eng-general' },
   ];
   mockSlackReader._historyByChannel = {
-    C_ENG: [
+    C_DW: [
       { type: 'message', user: 'U_ALICE', text: 'Message from Alice in the eng-platform channel here', ts: String(now - 5000) }
     ],
-    C_INF: [
+    C_CSE: [
       { type: 'message', user: 'U_BOB', text: 'Message from Bob in the eng-infra channel here', ts: String(now - 4000) }
     ],
-    C_AUTO: [
+    C_TF: [
       { type: 'message', user: 'U_CAROL', text: 'Message from Carol in project-automation channel', ts: String(now - 3000) }
     ],
     C_GEN: [
