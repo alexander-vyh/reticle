@@ -331,14 +331,10 @@ final class RecorderDaemon {
     ///   (for Google Meet, WebEx in browser).
     /// - Returns: The resolved audio source.
     private func resolveAudioSource(browserMeeting: Bool = false, deviceHint: String? = nil) -> AudioSource {
-        // TODO: Process Tap delivers silent buffers (f149196 regression) — force AUHAL until fixed
-        logger.notice("Process Tap disabled (silent buffer regression), using AUHAL device capture")
-        return resolveDeviceSource(hint: deviceHint)
-
         // Check if Process Tap is available on this macOS version
         guard ProcessTapCapture.isAvailable else {
             logger.notice("Process Taps unavailable (requires macOS 14.2+), using AUHAL fallback")
-            return resolveDeviceSource()
+            return resolveDeviceSource(hint: deviceHint)
         }
 
         // Build target bundle ID list
@@ -352,7 +348,7 @@ final class RecorderDaemon {
 
         guard !pids.isEmpty else {
             logger.notice("No meeting apps running, falling back to AUHAL device capture")
-            return resolveDeviceSource()
+            return resolveDeviceSource(hint: deviceHint)
         }
 
         logger.notice("Found \(pids.count) meeting process(es), will attempt Process Tap")

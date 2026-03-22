@@ -257,8 +257,12 @@ final class ProcessTapCapture {
 
     @available(macOS 14.2, *)
     private func startTap(processObjectIDs: [AudioObjectID], outputFile: URL) throws {
-        // Step 2: Create Process Tap
-        let tapDescription = CATapDescription(stereoMixdownOfProcesses: processObjectIDs)
+        // Step 2: Create Process Tap — capture all system audio except our own process
+        // stereoGlobalTapButExcludeProcesses captures everything, which is more reliable
+        // than stereoMixdownOfProcesses which can deliver zero buffers on some configurations
+        let ownPID = ProcessInfo.processInfo.processIdentifier
+        let ownAudioObjects = audioObjectIDs(for: [ownPID])
+        let tapDescription = CATapDescription(stereoGlobalTapButExcludeProcesses: ownAudioObjects)
         tapDescription.muteBehavior = .unmuted  // Don't mute the user's speakers
         tapDescription.isPrivate = true          // Hidden from system device list
 
@@ -409,14 +413,28 @@ final class ProcessTapCapture {
     // MARK: - Aggregate Device
 
     private func createAggregateDevice(tapUID: String) throws {
+        guard let outputUID = getDefaultOutputDeviceUID() else {
+            logger.error("Cannot get default output device UID for clock source")
+            throw CaptureError.aggregateDeviceFailed
+        }
+        logger.notice("Using output device as clock source: \(outputUID)")
+
         let aggregateDesc: [String: Any] = [
             kAudioAggregateDeviceNameKey: "Reticle Process Tap",
             kAudioAggregateDeviceUIDKey: "ai.reticle.process-tap-\(UUID().uuidString)",
+            kAudioAggregateDeviceMainSubDeviceKey: outputUID,
             kAudioAggregateDeviceIsPrivateKey: true,
-            kAudioAggregateDeviceTapListKey: [
-                [kAudioSubTapUIDKey: tapUID]
-            ],
             kAudioAggregateDeviceIsStackedKey: false,
+            kAudioAggregateDeviceTapAutoStartKey: true,
+            kAudioAggregateDeviceSubDeviceListKey: [
+                [kAudioSubDeviceUIDKey: outputUID]
+            ],
+            kAudioAggregateDeviceTapListKey: [
+                [
+                    kAudioSubTapDriftCompensationKey: true,
+                    kAudioSubTapUIDKey: tapUID,
+                ]
+            ],
         ]
 
         var aggDeviceID: AudioObjectID = kAudioObjectUnknown
@@ -429,6 +447,34 @@ final class ProcessTapCapture {
 
         aggregateDeviceID = aggDeviceID
         logger.notice("Aggregate device created: objectID=\(aggDeviceID)")
+    }
+
+    private func getDefaultOutputDeviceUID() -> String? {
+        var deviceID = AudioDeviceID(0)
+        var propertySize = UInt32(MemoryLayout<AudioDeviceID>.size)
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioHardwarePropertyDefaultOutputDevice,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        let status = AudioObjectGetPropertyData(
+            AudioObjectID(kAudioObjectSystemObject),
+            &address, 0, nil, &propertySize, &deviceID
+        )
+        guard status == noErr, deviceID != 0 else { return nil }
+
+        var uidAddress = AudioObjectPropertyAddress(
+            mSelector: kAudioDevicePropertyDeviceUID,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        var uid: Unmanaged<CFString>?
+        var uidSize = UInt32(MemoryLayout<Unmanaged<CFString>?>.size)
+        let uidStatus = AudioObjectGetPropertyData(
+            deviceID, &uidAddress, 0, nil, &uidSize, &uid
+        )
+        guard uidStatus == noErr, let uidString = uid?.takeRetainedValue() else { return nil }
+        return uidString as String
     }
 
     private func queryStreamFormat() throws {
@@ -529,6 +575,7 @@ final class ProcessTapCapture {
         guard frameCount > 0 else { return noErr }
 
         let samples = data.assumingMemoryBound(to: Float32.self)
+
         let inputChannels = buffer.mNumberChannels
         let inputSampleRate = streamFormat.mSampleRate
         let outputSampleRate = outputFormat.mSampleRate
