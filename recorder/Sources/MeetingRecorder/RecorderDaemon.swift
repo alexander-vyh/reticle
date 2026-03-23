@@ -517,7 +517,7 @@ final class RecorderDaemon {
 
         let now = Date()
         let elapsed = now.timeIntervalSince(activeSession!.startTime)
-        let lastNonSilent = recorder.lastNonSilentTime
+        let lastNonSilent = activeSession?.processTap?.lastNonSilentTime ?? recorder.lastNonSilentTime
 
         if lastNonSilent == nil, elapsed > config.silenceOnsetTimeoutSeconds {
             logger.warning("Silence watchdog: no audio detected in \(Int(elapsed))s — stopping phantom recording")
