@@ -50,6 +50,17 @@ final class ProcessTapCapture {
     // Audio format from the aggregate device
     private var streamFormat = AudioStreamBasicDescription()
 
+    // Audio metering for silence detection (thread-safe, same pattern as CoreAudioRecorder)
+    private let meterLock = NSLock()
+    private var _lastNonSilentTime: Date?
+
+    /// Last time audio above the silence threshold was observed. Nil until first non-silent frame.
+    var lastNonSilentTime: Date? {
+        meterLock.lock()
+        defer { meterLock.unlock() }
+        return _lastNonSilentTime
+    }
+
     // Pre-allocated render buffer
     private var renderBuffer: UnsafeMutablePointer<Float32>?
     private var renderBufferSize: UInt32 = 0
@@ -382,6 +393,10 @@ final class ProcessTapCapture {
         isRunning = false
         onAudioChunk = nil
 
+        meterLock.lock()
+        _lastNonSilentTime = nil
+        meterLock.unlock()
+
         logger.notice("Process Tap capture stopped")
     }
 
@@ -577,6 +592,24 @@ final class ProcessTapCapture {
         let samples = data.assumingMemoryBound(to: Float32.self)
 
         let inputChannels = buffer.mNumberChannels
+
+        // Calculate audio metering for silence watchdog (same algorithm as CoreAudioRecorder)
+        let totalSamples = Int(frameCount) * Int(inputChannels)
+        if totalSamples > 0 {
+            var sum: Float = 0.0
+            for i in 0..<totalSamples {
+                let sample = abs(samples[i])
+                sum += sample * sample
+            }
+            let rms = sqrt(sum / Float(totalSamples))
+            let avgDb = 20.0 * log10(max(rms, 0.000001))
+            if avgDb > CoreAudioRecorder.silenceThresholdDb {
+                meterLock.lock()
+                _lastNonSilentTime = Date()
+                meterLock.unlock()
+            }
+        }
+
         let inputSampleRate = streamFormat.mSampleRate
         let outputSampleRate = outputFormat.mSampleRate
 
