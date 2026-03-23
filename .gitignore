@@ -60,6 +60,31 @@ test-seed-data.js
 docs/private/
 docs/simpli-fi-*
 
+# Meeting analysis data (contains employee names, strategic discussions)
+model-comparison/
+
+# Utility scripts referencing real meetings/people
+ab-test-prompt.js
+aggregate-all-runs.js
+analyze-all-meetings.js
+analyze-comparison.js
+analyze-meeting-quality.js
+compare-models.js
+prompt-variants.js
+summarize-meeting.js
+
+# Conversation log dumps with PII (not actual design docs)
+docs/plans/2026-03-18-one-on-one-prep-template.md
+docs/plans/2026-03-18-weekly-summary-runbook.md
+docs/plans/2026-03-18-incident-investigation-template.md
+docs/plans/2026-03-18-tooling-architecture-blueprint.md
+
+# State/process files
+.git-credential-helper.sh
+followup-checker.pid
+slack-monitor-state.json
+recorder/scripts/__pycache__/
+
 # Meeting recorder
 recorder/.build/
 recorder/scripts/.venv/
