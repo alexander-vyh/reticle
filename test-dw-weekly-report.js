@@ -69,22 +69,22 @@ function seedPerson(db, { name, team, slackId, jiraId, messages }) {
     const now = Math.floor(Date.now() / 1000);
 
     seedPerson(db, {
-      name: 'Gandalf Grey',
+      name: 'Kinski Wu',
       team: 'Corporate Systems Engineering',
       slackId: 'U001',
       jiraId: 'jira-001',
       messages: [
-        { source: 'slack', sourceId: 'ch1:1001', channelName: 'eng-infra', content: 'Finished UKG lifecycle automation validation', occurredAt: now - 3600 },
-        { source: 'jira', sourceId: 'ENG-1234:status:' + (now - 7200), channelName: 'ENG', content: '[ENG-1234] Implement Jamf IAM (In Progress) — status: To Do -> In Progress', threadId: 'ENG-1234', occurredAt: now - 7200 },
+        { source: 'slack', sourceId: 'ch1:1001', channelName: 'iops-dw-cse', content: 'Finished UKG lifecycle automation validation', occurredAt: now - 3600 },
+        { source: 'jira', sourceId: 'DWDEV-1234:status:' + (now - 7200), channelName: 'DWDEV', content: '[DWDEV-1234] Implement Jamf IAM (In Progress) — status: To Do -> In Progress', threadId: 'DWDEV-1234', occurredAt: now - 7200 },
       ]
     });
 
     seedPerson(db, {
-      name: 'Eowyn Rider',
+      name: 'Ken Dominiec',
       team: 'Desktop Support',
       slackId: 'U002',
       messages: [
-        { source: 'slack', sourceId: 'ch2:2001', channelName: 'eng-platform-desktop', content: 'Imaging new laptops for Q2 hire class', occurredAt: now - 1800 },
+        { source: 'slack', sourceId: 'ch2:2001', channelName: 'iops-dw-desktop', content: 'Imaging new laptops for Q2 hire class', occurredAt: now - 1800 },
       ]
     });
 
@@ -98,14 +98,14 @@ function seedPerson(db, { name, team, slackId, jiraId, messages }) {
     const cse = report.teams.find(t => t.name === 'Corporate Systems Engineering');
     assert.ok(cse, 'should have CSE team');
     assert.strictEqual(cse.members.length, 1);
-    assert.strictEqual(cse.members[0].name, 'Gandalf Grey');
+    assert.strictEqual(cse.members[0].name, 'Kinski Wu');
     assert.strictEqual(cse.members[0].slackMessages.length, 1);
     assert.strictEqual(cse.members[0].jiraMessages.length, 1);
 
     const desktop = report.teams.find(t => t.name === 'Desktop Support');
     assert.ok(desktop, 'should have Desktop Support team');
     assert.strictEqual(desktop.members.length, 1);
-    assert.strictEqual(desktop.members[0].name, 'Eowyn Rider');
+    assert.strictEqual(desktop.members[0].name, 'Ken Dominiec');
 
     console.log('PASS: buildReport groups messages by team and person');
   } finally {
@@ -210,8 +210,8 @@ function seedPerson(db, { name, team, slackId, jiraId, messages }) {
       name: 'Both Sources',
       team: 'Corporate Systems Engineering',
       messages: [
-        { source: 'slack', sourceId: 'bs:1', channelName: 'eng-platform', content: 'Working on IaC prep', occurredAt: now - 600 },
-        { source: 'jira', sourceId: 'ENGSUP-567:status:' + (now - 1200), channelName: 'ENGSUP', content: '[ENGSUP-567] Routine config issue (Done) — status: In Progress -> Done', threadId: 'ENGSUP-567', occurredAt: now - 1200 },
+        { source: 'slack', sourceId: 'bs:1', channelName: 'iops-dw', content: 'Working on IaC prep', occurredAt: now - 600 },
+        { source: 'jira', sourceId: 'DWS-567:status:' + (now - 1200), channelName: 'DWS', content: '[DWS-567] Routine config issue (Done) — status: In Progress -> Done', threadId: 'DWS-567', occurredAt: now - 1200 },
       ]
     });
 
@@ -220,8 +220,8 @@ function seedPerson(db, { name, team, slackId, jiraId, messages }) {
 
     assert.ok(md.includes('**Slack activity:**'), 'should have Slack header');
     assert.ok(md.includes('**Jira activity:**'), 'should have Jira header');
-    assert.ok(md.includes('[eng-platform]'), 'should include Slack channel');
-    assert.ok(md.includes('[ENGSUP-567]'), 'should include Jira issue key');
+    assert.ok(md.includes('[iops-dw]'), 'should include Slack channel');
+    assert.ok(md.includes('[DWS-567]'), 'should include Jira issue key');
 
     console.log('PASS: formatReport with both Slack and Jira activity');
   } finally {
@@ -242,7 +242,7 @@ function seedPerson(db, { name, team, slackId, jiraId, messages }) {
       team: 'Desktop Support',
       slackId: 'U_KNOWN',
       messages: [
-        { source: 'slack', sourceId: 'kn:1', channelName: 'eng-platform', content: 'Known person message', occurredAt: now - 600 },
+        { source: 'slack', sourceId: 'kn:1', channelName: 'iops-dw', content: 'Known person message', occurredAt: now - 600 },
       ]
     });
 
@@ -251,7 +251,7 @@ function seedPerson(db, { name, team, slackId, jiraId, messages }) {
       source: 'slack',
       sourceId: 'unresolved:1',
       channelId: 'C_TEAM',
-      channelName: 'eng-platform',
+      channelName: 'iops-dw',
       authorExtId: 'U_MYSTERY',
       authorId: null,
       authorName: 'Mystery Person',

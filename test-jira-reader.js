@@ -7,8 +7,8 @@ const { buildActivityJql, parseIssueActivity, formatChangelogEntry } = require('
 
 // Test: basic project filter with sinceDays
 {
-  const jql = buildActivityJql({ projects: ['ENG', 'ENGSUP'], sinceDays: 7 });
-  assert.ok(jql.includes('project in (ENG, ENGSUP)'), 'should include project filter');
+  const jql = buildActivityJql({ projects: ['DWDEV', 'DWS'], sinceDays: 7 });
+  assert.ok(jql.includes('project in (DWDEV, DWS)'), 'should include project filter');
   assert.ok(jql.includes('updated >= -7d'), 'should include updated filter');
   assert.ok(jql.includes('ORDER BY updated DESC'), 'should order by updated desc');
   assert.ok(!jql.includes('assignee'), 'should not include assignee when no accountIds');
@@ -17,11 +17,11 @@ const { buildActivityJql, parseIssueActivity, formatChangelogEntry } = require('
 // Test: with accountIds
 {
   const jql = buildActivityJql({
-    projects: ['ENG', 'ENGSUP'],
+    projects: ['DWDEV', 'DWS'],
     accountIds: ['abc123', 'def456'],
     sinceDays: 7
   });
-  assert.ok(jql.includes('project in (ENG, ENGSUP)'), 'should include project filter');
+  assert.ok(jql.includes('project in (DWDEV, DWS)'), 'should include project filter');
   assert.ok(jql.includes('abc123'), 'should include first accountId');
   assert.ok(jql.includes('def456'), 'should include second accountId');
   assert.ok(jql.includes('assignee in'), 'should include assignee filter');
@@ -29,15 +29,15 @@ const { buildActivityJql, parseIssueActivity, formatChangelogEntry } = require('
 
 // Test: single project, no accountIds
 {
-  const jql = buildActivityJql({ projects: ['ENG'], sinceDays: 14 });
-  assert.ok(jql.includes('project in (ENG)'), 'should include single project');
+  const jql = buildActivityJql({ projects: ['DWDEV'], sinceDays: 14 });
+  assert.ok(jql.includes('project in (DWDEV)'), 'should include single project');
   assert.ok(jql.includes('updated >= -14d'), 'should use 14 day window');
   assert.ok(!jql.includes('assignee'), 'should not include assignee filter');
 }
 
 // Test: empty accountIds array treated as no filter
 {
-  const jql = buildActivityJql({ projects: ['ENG'], accountIds: [], sinceDays: 7 });
+  const jql = buildActivityJql({ projects: ['DWDEV'], accountIds: [], sinceDays: 7 });
   assert.ok(!jql.includes('assignee'), 'empty accountIds should not add assignee filter');
 }
 
@@ -46,7 +46,7 @@ const { buildActivityJql, parseIssueActivity, formatChangelogEntry } = require('
 // Test: extracts activity from issue with changelog
 {
   const issue = {
-    key: 'ENG-123',
+    key: 'DWDEV-123',
     fields: {
       summary: 'Fix login bug',
       status: { name: 'In Progress' },
@@ -71,7 +71,7 @@ const { buildActivityJql, parseIssueActivity, formatChangelogEntry } = require('
   };
 
   const activity = parseIssueActivity(issue, changelog);
-  assert.strictEqual(activity.key, 'ENG-123');
+  assert.strictEqual(activity.key, 'DWDEV-123');
   assert.strictEqual(activity.summary, 'Fix login bug');
   assert.strictEqual(activity.status, 'In Progress');
   assert.strictEqual(activity.issueType, 'Bug');
@@ -87,7 +87,7 @@ const { buildActivityJql, parseIssueActivity, formatChangelogEntry } = require('
 // Test: issue with empty changelog
 {
   const issue = {
-    key: 'ENGSUP-45',
+    key: 'DWS-45',
     fields: {
       summary: 'Support request',
       status: { name: 'Open' },
@@ -101,7 +101,7 @@ const { buildActivityJql, parseIssueActivity, formatChangelogEntry } = require('
   const changelog = { values: [] };
 
   const activity = parseIssueActivity(issue, changelog);
-  assert.strictEqual(activity.key, 'ENGSUP-45');
+  assert.strictEqual(activity.key, 'DWS-45');
   assert.strictEqual(activity.assignee, null);
   assert.strictEqual(activity.changes.length, 0);
 }
@@ -109,7 +109,7 @@ const { buildActivityJql, parseIssueActivity, formatChangelogEntry } = require('
 // Test: changelog entry with multiple items
 {
   const issue = {
-    key: 'ENG-200',
+    key: 'DWDEV-200',
     fields: {
       summary: 'Refactor module',
       status: { name: 'Done' },

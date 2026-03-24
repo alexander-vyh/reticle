@@ -51,12 +51,12 @@ function cleanup(dbPath) {
   const { db, path: p } = tmpDb();
   try {
     const result = captureJiraActivity(db, {
-      issueKey: 'ENG-42',
+      issueKey: 'DWDEV-42',
       summary: 'Fix the widget',
       status: 'In Progress',
       assigneeAccountId: '5f1234abc',
       assigneeName: 'Jane Doe',
-      projectKey: 'ENG',
+      projectKey: 'DWDEV',
       updatedAt: 1709900000,
       changeType: 'status',
       changeDetail: 'To Do -> In Progress',
@@ -64,10 +64,10 @@ function cleanup(dbPath) {
 
     assert.ok(result, 'should return inserted raw_message');
     assert.strictEqual(result.source, 'jira');
-    assert.strictEqual(result.source_id, 'ENG-42:status:1709900000');
-    assert.strictEqual(result.thread_id, 'ENG-42');
+    assert.strictEqual(result.source_id, 'DWDEV-42:status:1709900000');
+    assert.strictEqual(result.thread_id, 'DWDEV-42');
     assert.strictEqual(result.occurred_at, 1709900000);
-    assert.ok(result.content.includes('ENG-42'), 'content should include issue key');
+    assert.ok(result.content.includes('DWDEV-42'), 'content should include issue key');
     assert.ok(result.content.includes('Fix the widget'), 'content should include summary');
     assert.ok(result.content.includes('status'), 'content should include change type');
     assert.ok(result.content.includes('To Do -> In Progress'), 'content should include change detail');
@@ -86,12 +86,12 @@ function cleanup(dbPath) {
     kg.addIdentity(db, { entityId: entity.id, source: 'jira', externalId: '5f1234abc', displayName: 'Jane Doe' });
 
     const result = captureJiraActivity(db, {
-      issueKey: 'ENG-99',
+      issueKey: 'DWDEV-99',
       summary: 'Another task',
       status: 'Done',
       assigneeAccountId: '5f1234abc',
       assigneeName: 'Jane Doe',
-      projectKey: 'ENG',
+      projectKey: 'DWDEV',
       updatedAt: 1709900100,
       changeType: 'resolution',
       changeDetail: 'Fixed',
@@ -111,12 +111,12 @@ function cleanup(dbPath) {
   const { db, path: p } = tmpDb();
   try {
     const result = captureJiraActivity(db, {
-      issueKey: 'ENGSUP-10',
+      issueKey: 'DWS-10',
       summary: 'Unassigned task',
       status: 'Open',
       assigneeAccountId: 'unknown-id',
       assigneeName: 'Unknown Person',
-      projectKey: 'ENGSUP',
+      projectKey: 'DWS',
       updatedAt: 1709900200,
       changeType: 'created',
       changeDetail: null,
@@ -136,12 +136,12 @@ function cleanup(dbPath) {
   const { db, path: p } = tmpDb();
   try {
     const activity = {
-      issueKey: 'ENG-42',
+      issueKey: 'DWDEV-42',
       summary: 'Fix the widget',
       status: 'In Progress',
       assigneeAccountId: '5f1234abc',
       assigneeName: 'Jane Doe',
-      projectKey: 'ENG',
+      projectKey: 'DWDEV',
       updatedAt: 1709900000,
       changeType: 'status',
       changeDetail: 'To Do -> In Progress',
@@ -166,19 +166,19 @@ function cleanup(dbPath) {
   const { db, path: p } = tmpDb();
   try {
     const result = captureJiraActivity(db, {
-      issueKey: 'ENGSUP-5',
+      issueKey: 'DWS-5',
       summary: 'Project channel test',
       status: 'Open',
       assigneeAccountId: null,
       assigneeName: null,
-      projectKey: 'ENGSUP',
+      projectKey: 'DWS',
       updatedAt: 1709900300,
       changeType: 'created',
       changeDetail: null,
     });
 
-    assert.strictEqual(result.channel_id, 'ENGSUP', 'channel_id should be projectKey');
-    assert.strictEqual(result.channel_name, 'ENGSUP', 'channel_name should be projectKey');
+    assert.strictEqual(result.channel_id, 'DWS', 'channel_id should be projectKey');
+    assert.strictEqual(result.channel_name, 'DWS', 'channel_name should be projectKey');
     assert.strictEqual(result.author_name, null, 'null assignee should yield null author_name');
     console.log('PASS: channelId uses projectKey');
   } finally {
@@ -192,12 +192,12 @@ function cleanup(dbPath) {
   const { db, path: p } = tmpDb();
   try {
     const result = captureJiraActivity(db, {
-      issueKey: 'ENG-1',
+      issueKey: 'DWDEV-1',
       summary: 'New ticket',
       status: 'Open',
       assigneeAccountId: null,
       assigneeName: null,
-      projectKey: 'ENG',
+      projectKey: 'DWDEV',
       updatedAt: 1709900400,
       changeType: 'created',
       changeDetail: null,

@@ -57,7 +57,7 @@ function cleanup(dbPath) {
     // Mock Jira API
     const mockIssues = [
       {
-        key: 'ENG-10',
+        key: 'DWDEV-10',
         fields: {
           summary: 'Build the feature',
           status: { name: 'In Progress' },
@@ -88,7 +88,7 @@ function cleanup(dbPath) {
     const result = collectAndCapture(db, {
       searchIssuesFn: searchIssues,
       getIssueChangelogFn: getIssueChangelog,
-      projects: ['ENG', 'ENGSUP'],
+      projects: ['DWDEV', 'DWS'],
       accountIds: ['jira-001'],
       sinceDays: 1,
     });
@@ -100,7 +100,7 @@ function cleanup(dbPath) {
       // Verify raw_message was inserted
       const msgs = db.prepare("SELECT * FROM raw_messages WHERE source = 'jira'").all();
       assert.strictEqual(msgs.length, 1);
-      assert.strictEqual(msgs[0].thread_id, 'ENG-10');
+      assert.strictEqual(msgs[0].thread_id, 'DWDEV-10');
       assert.strictEqual(msgs[0].author_id, entity.id, 'should resolve author via identity_map');
       assert.ok(msgs[0].content.includes('status'), 'content should include change type');
 
@@ -126,7 +126,7 @@ function cleanup(dbPath) {
   try {
     const mockIssues = [
       {
-        key: 'ENG-20',
+        key: 'DWDEV-20',
         fields: {
           summary: 'Dry run test',
           status: { name: 'Open' },
@@ -154,7 +154,7 @@ function cleanup(dbPath) {
     collectAndCapture(db, {
       searchIssuesFn: async () => mockIssues,
       getIssueChangelogFn: async () => mockChangelog,
-      projects: ['ENG'],
+      projects: ['DWDEV'],
       accountIds: ['jira-999'],
       sinceDays: 1,
       dryRun: true,
@@ -190,7 +190,7 @@ function cleanup(dbPath) {
 
     const mockIssues = [
       {
-        key: 'ENG-30',
+        key: 'DWDEV-30',
         fields: {
           summary: 'Mixed team test',
           status: { name: 'Done' },
@@ -226,7 +226,7 @@ function cleanup(dbPath) {
     collectAndCapture(db, {
       searchIssuesFn: async () => mockIssues,
       getIssueChangelogFn: async () => mockChangelog,
-      projects: ['ENG'],
+      projects: ['DWDEV'],
       accountIds: ['jira-001'],
       sinceDays: 1,
     }).then(({ captured }) => {

@@ -137,7 +137,7 @@ function testAuthorExtId() {
     channelName: 'ext-test',
     ts: '1709900000.000099',
     user: 'U_TEST_EXT_99',
-    userName: 'Aragorn King',
+    userName: 'Bill Price',
     text: 'Testing author_ext_id storage',
     threadTs: null,
     channelType: 'channel',

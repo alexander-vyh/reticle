@@ -966,6 +966,56 @@ function getMeetingSummary(db, meetingId) {
   ).get(meetingId);
 }
 
+// --- Speaker embeddings ---
+
+function saveSpeakerEmbedding(db, { personId, embedding, sourceMeetingId, modelVersion, qualityScore = null }) {
+  db.prepare(`
+    INSERT INTO speaker_embeddings (person_id, embedding, source_meeting_id, model_version, quality_score)
+    VALUES (?, ?, ?, ?, ?)
+    ON CONFLICT(person_id, source_meeting_id) DO UPDATE SET
+      embedding = excluded.embedding,
+      model_version = excluded.model_version,
+      quality_score = excluded.quality_score,
+      created_at = strftime('%s','now')
+  `).run(personId, embedding, sourceMeetingId, modelVersion, qualityScore ?? null);
+}
+
+function getSpeakerEmbeddings(db, personId) {
+  return db.prepare(
+    'SELECT * FROM speaker_embeddings WHERE person_id = ? ORDER BY created_at DESC'
+  ).all(personId);
+}
+
+function getAllActiveEmbeddings(db) {
+  return db.prepare(`
+    SELECT se.*, mp.name, mp.email
+    FROM speaker_embeddings se
+    LEFT JOIN monitored_people mp ON mp.id = se.person_id
+    ORDER BY se.person_id, se.created_at DESC
+  `).all();
+}
+
+// --- Transcription corrections ---
+
+function saveCorrection(db, { heard, correct, personId = null, sourceMeetingId = null }) {
+  db.prepare(`
+    INSERT INTO transcription_corrections (heard, correct, person_id, source_meeting_id)
+    VALUES (?, ?, ?, ?)
+  `).run(heard, correct, personId ?? null, sourceMeetingId ?? null);
+}
+
+function getCorrections(db) {
+  return db.prepare(
+    'SELECT * FROM transcription_corrections ORDER BY usage_count DESC, created_at DESC'
+  ).all();
+}
+
+function incrementCorrectionUsage(db, correctionId) {
+  db.prepare(
+    'UPDATE transcription_corrections SET usage_count = usage_count + 1 WHERE id = ?'
+  ).run(correctionId);
+}
+
 module.exports = {
   DB_PATH,
   ENTITY_TYPES,
@@ -1023,4 +1073,10 @@ module.exports = {
   updateMeetingReviewStatus,
   saveMeetingSummary,
   getMeetingSummary,
+  saveSpeakerEmbedding,
+  getSpeakerEmbeddings,
+  getAllActiveEmbeddings,
+  saveCorrection,
+  getCorrections,
+  incrementCorrectionUsage,
 };

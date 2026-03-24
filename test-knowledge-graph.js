@@ -233,7 +233,7 @@ function testGetCurrentState() {
 function testResolveIdentity() {
   const db = freshDb();
   const kg = require('./lib/knowledge-graph');
-  const person = kg.createEntity(db, { entityType: 'person', canonicalName: 'Faramir Guard' });
+  const person = kg.createEntity(db, { entityType: 'person', canonicalName: 'Keshon Bowman' });
   kg.addIdentity(db, { entityId: person.id, source: 'slack', externalId: 'U04ABC123' });
   kg.addIdentity(db, { entityId: person.id, source: 'email', externalId: 'faramir@co.com' });
 
@@ -252,9 +252,9 @@ function testInsertRawMessage() {
     source: 'slack',
     sourceId: 'C123:1234567890.123456',
     channelId: 'C123',
-    channelName: 'eng-platform',
+    channelName: 'iops-dw',
     authorId: null,
-    authorName: 'Gandalf Grey',
+    authorName: 'Kinski Wu',
     content: 'Let us use Permission Set Groups instead',
     threadId: null,
     occurredAt: Math.floor(Date.now() / 1000)
@@ -271,7 +271,7 @@ function testGetActiveEntities() {
   const kg = require('./lib/knowledge-graph');
   kg.createEntity(db, { entityType: 'decision', canonicalName: 'Use PSGs' });
   kg.createEntity(db, { entityType: 'action_item', canonicalName: 'Map profiles' });
-  kg.createEntity(db, { entityType: 'person', canonicalName: 'Gandalf Grey' });
+  kg.createEntity(db, { entityType: 'person', canonicalName: 'Kinski Wu' });
 
   const workEntities = kg.getActiveEntities(db, { types: ['decision', 'action_item'] });
   assert.strictEqual(workEntities.length, 2);

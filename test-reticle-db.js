@@ -1103,4 +1103,56 @@ console.log('PASS: getTodaysMeetings returns 1 row per meeting even with multipl
 
 console.log('\n--- Meeting tables + CRUD tests passed ---');
 
+// --- Speaker embeddings ---
+const embeddingBuffer = Buffer.alloc(192 * 4); // 192 floats × 4 bytes
+reticleDb.saveSpeakerEmbedding(db, {
+  personId: 'person-001',
+  embedding: embeddingBuffer,
+  sourceMeetingId: 'test-meeting-001',
+  modelVersion: 'ecapa-tdnn-v1',
+  qualityScore: 0.85
+});
+const embeddings = reticleDb.getSpeakerEmbeddings(db, 'person-001');
+assert.strictEqual(embeddings.length, 1);
+assert.strictEqual(embeddings[0].model_version, 'ecapa-tdnn-v1');
+assert.ok(Buffer.isBuffer(embeddings[0].embedding));
+console.log('PASS: saveSpeakerEmbedding + getSpeakerEmbeddings');
+
+const allEmb = reticleDb.getAllActiveEmbeddings(db);
+assert.ok(Array.isArray(allEmb));
+console.log('PASS: getAllActiveEmbeddings');
+
+// Upsert: same person+meeting — should update, not duplicate
+reticleDb.saveSpeakerEmbedding(db, {
+  personId: 'person-001',
+  embedding: embeddingBuffer,
+  sourceMeetingId: 'test-meeting-001',
+  modelVersion: 'ecapa-tdnn-v2',
+  qualityScore: 0.91
+});
+const afterUpsert = reticleDb.getSpeakerEmbeddings(db, 'person-001');
+assert.strictEqual(afterUpsert.length, 1, 'upsert should not duplicate');
+assert.strictEqual(afterUpsert[0].model_version, 'ecapa-tdnn-v2');
+console.log('PASS: saveSpeakerEmbedding upserts on same person+meeting');
+
+// --- Transcription corrections ---
+reticleDb.saveCorrection(db, {
+  heard: 'Kaczalka',
+  correct: 'Kaczorek',
+  personId: 'person-001',
+  sourceMeetingId: 'test-meeting-001'
+});
+const corrections = reticleDb.getCorrections(db);
+assert.strictEqual(corrections.length, 1);
+assert.strictEqual(corrections[0].heard, 'Kaczalka');
+assert.strictEqual(corrections[0].correct, 'Kaczorek');
+console.log('PASS: saveCorrection + getCorrections');
+
+reticleDb.incrementCorrectionUsage(db, corrections[0].id);
+const updated3 = reticleDb.getCorrections(db);
+assert.strictEqual(updated3[0].usage_count, 2);
+console.log('PASS: incrementCorrectionUsage');
+
+console.log('\n--- Speaker embedding + correction tests passed ---');
+
 console.log('\n=== ALL RETICLE-DB TESTS PASSED ===');

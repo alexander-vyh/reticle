@@ -110,12 +110,12 @@ function testInsertAndQueryRawMessage() {
   const id = crypto.randomUUID();
   db.prepare(`INSERT INTO raw_messages (id, source, source_id, channel_id, channel_name,
     author_name, content, occurred_at, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`)
-    .run(id, 'slack', 'C123:111', 'C123', 'eng-platform', 'Gandalf Grey',
+    .run(id, 'slack', 'C123:111', 'C123', 'iops-dw', 'Kinski Wu',
          'Test message content', now, now);
 
   const row = db.prepare('SELECT * FROM raw_messages WHERE id = ?').get(id);
   assert.strictEqual(row.source, 'slack');
-  assert.strictEqual(row.channel_name, 'eng-platform');
+  assert.strictEqual(row.channel_name, 'iops-dw');
   assert.strictEqual(row.extracted, 0);
 
   db.close();

@@ -143,7 +143,7 @@ async function main() {
     const { captured, skipped } = await collectAndCapture(db, {
       searchIssuesFn: searchIssues,
       getIssueChangelogFn: getIssueChangelog,
-      projects: ['ENG', 'ENGSUP'],
+      projects: ['DWDEV', 'DWS'],
       accountIds,
       sinceDays: 1,
       dryRun,

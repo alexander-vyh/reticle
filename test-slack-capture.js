@@ -28,10 +28,10 @@ function testCaptureSlackMessage() {
 
   capture.captureMessage(db, {
     channel: 'C123ABC',
-    channelName: 'eng-platform',
+    channelName: 'iops-dw',
     ts: '1709568000.123456',
     user: 'U04ABC123',
-    userName: 'Gandalf Grey',
+    userName: 'Kinski Wu',
     text: 'We should use Permission Set Groups instead',
     threadTs: null,
     channelType: 'channel',
@@ -42,8 +42,8 @@ function testCaptureSlackMessage() {
   assert.strictEqual(row.source, 'slack');
   assert.strictEqual(row.source_id, 'C123ABC:1709568000.123456');
   assert.strictEqual(row.channel_id, 'C123ABC');
-  assert.strictEqual(row.channel_name, 'eng-platform');
-  assert.strictEqual(row.author_name, 'Gandalf Grey');
+  assert.strictEqual(row.channel_name, 'iops-dw');
+  assert.strictEqual(row.author_name, 'Kinski Wu');
   assert.strictEqual(row.content, 'We should use Permission Set Groups instead');
   assert.strictEqual(row.extracted, 0);
 
@@ -61,7 +61,7 @@ function testCaptureDMMessage() {
     channelName: null, // DMs don't have names from the event
     ts: '1709568100.000001',
     user: 'U04DEF456',
-    userName: 'Faramir Guard',
+    userName: 'Keshon Bowman',
     text: 'Hey, can you review the PR?',
     threadTs: null,
     channelType: 'im',
@@ -69,7 +69,7 @@ function testCaptureDMMessage() {
 
   const row = db.prepare('SELECT * FROM raw_messages').get();
   assert.ok(row);
-  assert.strictEqual(row.channel_name, 'dm-Faramir Guard');
+  assert.strictEqual(row.channel_name, 'dm-Keshon Bowman');
 
   db.close();
   cleanup();
@@ -82,7 +82,7 @@ function testCaptureThreadReply() {
 
   capture.captureMessage(db, {
     channel: 'C123ABC',
-    channelName: 'eng-platform',
+    channelName: 'iops-dw',
     ts: '1709568200.000001',
     user: 'U04GHI789',
     userName: 'Marissa Chen',
@@ -106,10 +106,10 @@ function testCaptureDeduplicates() {
 
   const msg = {
     channel: 'C123ABC',
-    channelName: 'eng-platform',
+    channelName: 'iops-dw',
     ts: '1709568000.123456',
     user: 'U04ABC123',
-    userName: 'Gandalf Grey',
+    userName: 'Kinski Wu',
     text: 'Duplicate test',
     threadTs: null,
     channelType: 'channel',
@@ -132,15 +132,15 @@ function testCaptureResolvesIdentity() {
   const kg = require('./lib/knowledge-graph');
 
   // Set up a known identity
-  const person = kg.createEntity(db, { entityType: 'person', canonicalName: 'Gandalf Grey' });
+  const person = kg.createEntity(db, { entityType: 'person', canonicalName: 'Kinski Wu' });
   kg.addIdentity(db, { entityId: person.id, source: 'slack', externalId: 'U04ABC123' });
 
   capture.captureMessage(db, {
     channel: 'C123ABC',
-    channelName: 'eng-platform',
+    channelName: 'iops-dw',
     ts: '1709568300.000001',
     user: 'U04ABC123',
-    userName: 'Gandalf Grey',
+    userName: 'Kinski Wu',
     text: 'Identity resolution test',
     threadTs: null,
     channelType: 'channel',
@@ -161,7 +161,7 @@ function testCaptureUnknownIdentity() {
   // No identity set up — author_id should be null
   capture.captureMessage(db, {
     channel: 'C123ABC',
-    channelName: 'eng-platform',
+    channelName: 'iops-dw',
     ts: '1709568400.000001',
     user: 'U_UNKNOWN',
     userName: 'Unknown Person',

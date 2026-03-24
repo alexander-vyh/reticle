@@ -80,7 +80,7 @@ Each channel file:
   "channelType": "public_channel",
   "messageCount": 142,
   "messages": [
-    { "ts": "1740000000.000", "user": "Gandalf Grey", "text": "..." }
+    { "ts": "1740000000.000", "user": "Kinski Wu", "text": "..." }
   ]
 }
 ```

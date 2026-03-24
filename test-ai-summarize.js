@@ -14,7 +14,7 @@ const prompt = buildMeetingSummaryPrompt({
     { start: 0, end: 5, text: 'Hello everyone', speaker: 'SPEAKER_00' },
     { start: 5, end: 12, text: 'Let us discuss the roadmap', speaker: 'SPEAKER_01' }
   ],
-  attendees: ['the primary user', 'Jane Doe'],
+  attendees: ['Alexander Vyhmeister', 'Jane Doe'],
   title: 'Weekly Standup',
   durationMin: 30
 });
@@ -22,7 +22,7 @@ const prompt = buildMeetingSummaryPrompt({
 assert.ok(typeof prompt.systemMessage === 'string', 'systemMessage must be a string');
 assert.ok(typeof prompt.userMessage === 'string', 'userMessage must be a string');
 // Attendees appear in the user message for closed-set speaker resolution
-assert.ok(prompt.userMessage.includes('the primary user'), 'must include attendee names');
+assert.ok(prompt.userMessage.includes('Alexander Vyhmeister'), 'must include attendee names');
 // Speaker-attributed transcript lines are present
 assert.ok(prompt.userMessage.includes('[SPEAKER_00]'), 'must include speaker labels');
 assert.ok(prompt.userMessage.includes('Hello everyone'), 'must include transcript text');

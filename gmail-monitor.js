@@ -443,7 +443,7 @@ function applyRuleBasedFilter(email) {
   }
 
   // Auto-archive rules (noise, but keep in archive)
-  // NOTE: IT group (it@example.com) is now handled by a Gmail server-side filter
+  // NOTE: IT group (it@simpli.fi) is now handled by a Gmail server-side filter
 
   if (from.includes('no-reply@zoom.us')) {
     return { action: 'archive', reason: 'Zoom notification' };
@@ -502,17 +502,17 @@ function applyRuleBasedFilter(email) {
   }
 
   // Archive all Jira notification emails (already visible in Jira/Slack)
-  if (from.includes('jira@company.atlassian.net')) {
+  if (from.includes('jira@simplifi.atlassian.net')) {
     return { action: 'archive', reason: 'Jira notification (available in Jira)' };
   }
 
   // Archive Confluence digest emails (already visible in Confluence)
-  if (from.includes('confluence@company.atlassian.net') && subject.includes('digest')) {
+  if (from.includes('confluence@simplifi.atlassian.net') && subject.includes('digest')) {
     return { action: 'archive', reason: 'Confluence digest' };
   }
 
   // Archive Atlassian admin notifications (multiple domains)
-  // Keep automation failure emails from automation@company.atlassian.net
+  // Keep automation failure emails from automation@simplifi.atlassian.net
   if ((from.includes('@id.atlassian.net') || from.includes('@po.atlassian.net')) &&
       !subject.includes('failed')) {
     return { action: 'archive', reason: 'Atlassian admin notification' };

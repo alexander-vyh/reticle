@@ -306,11 +306,13 @@ console.log('\n=== CALENDAR COLLECTOR TESTS PASSED ===');
 // --- collectMeetings ---
 const { collectMeetings } = require('./lib/digest-collectors');
 
+const todayNoon = new Date(); todayNoon.setHours(12, 0, 0, 0);
+const meetingStart = Math.floor(todayNoon.getTime() / 1000);
 reticleDb.createMeeting(db, {
   id: 'digest-meeting-001',
   title: 'Architecture Review',
-  startTime: now - 3600,
-  endTime: now,
+  startTime: meetingStart,
+  endTime: meetingStart + 3600,
   durationSec: 3600,
   attendeeEmails: ['alex@test.com']
 });
@@ -337,8 +339,8 @@ console.log('PASS: collectMeetings returns meetings with flagged items at high p
 reticleDb.createMeeting(db, {
   id: 'digest-meeting-002',
   title: 'Clean Standup',
-  startTime: now - 900,
-  endTime: now,
+  startTime: meetingStart + 3600,
+  endTime: meetingStart + 4500,
   durationSec: 900,
   attendeeEmails: ['alex@test.com']
 });
