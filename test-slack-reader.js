@@ -68,10 +68,33 @@ function testResolveUserMentionsUnknown() {
   console.log('  PASS: resolveUserMentions — leaves unknown IDs unchanged');
 }
 
+function testSearchMessagesExported() {
+  const slackReader = require('./lib/slack-reader');
+
+  assert.strictEqual(typeof slackReader.searchMessages, 'function',
+    'searchMessages should be exported as a function');
+
+  console.log('  PASS: searchMessages — exported as a function');
+}
+
+function testSearchRateLimiterExported() {
+  const slackReader = require('./lib/slack-reader');
+
+  // The search rate limiter is separate from the default (Tier 2: 20/min vs Tier 3: 40/min)
+  assert.strictEqual(typeof slackReader.searchLimiter, 'object',
+    'searchLimiter should be exported');
+  assert.strictEqual(typeof slackReader.searchLimiter.acquire, 'function',
+    'searchLimiter should have acquire method');
+
+  console.log('  PASS: searchLimiter — exported with acquire method');
+}
+
 console.log('slack-reader tests:');
 testRateLimiter();
 testParseSlackMessages();
 testParseMessagesKeepsThreadInfo();
 testResolveUserMentions();
 testResolveUserMentionsUnknown();
+testSearchMessagesExported();
+testSearchRateLimiterExported();
 console.log('All slack-reader tests passed');

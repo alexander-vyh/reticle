@@ -13,6 +13,7 @@ const { narrateWeekly, formatFallback, narrateWeeklySummary, formatWeeklySummary
 const { collectSlackTeamChannels } = require('./lib/slack-team-collector');
 const { collectJiraResolved } = require('./lib/jira-collector');
 const { buildTeamsFromDB, curateForWeeklySummary } = require('./lib/digest-curation');
+const { fetchPreviousWeekNotes } = require('./lib/confluence-reader');
 const calendarAuth = require('./calendar-auth');
 
 const SERVICE_NAME = 'digest-weekly';
@@ -65,7 +66,7 @@ async function main() {
       calendarEvents = (response.data.items || []).filter(e => e.start.dateTime);
     }
   } catch (err) {
-    log.warn({ err }, 'Calendar fetch failed — skipping calendar collector');
+    log.warn({ err }, 'Calendar fetch failed \u2014 skipping calendar collector');
   }
 
   collectors.push({
@@ -88,7 +89,7 @@ async function main() {
   }
 
   if (allItems.length === 0 && failedCollectors.length === collectors.length) {
-    await sendSlackDM('Weekly digest unavailable — all collectors failed. Check logs.');
+    await sendSlackDM('Weekly digest unavailable \u2014 all collectors failed. Check logs.');
     process.exit(1);
   }
 
@@ -105,7 +106,7 @@ async function main() {
   try {
     patterns = detectPatterns(db, accountId, allItems, dateStr);
   } catch (err) {
-    log.warn({ err }, 'Pattern detection failed — proceeding without patterns');
+    log.warn({ err }, 'Pattern detection failed \u2014 proceeding without patterns');
   }
   log.info({ patternCount: patterns.length }, 'Pattern detection complete');
 
@@ -123,7 +124,7 @@ async function main() {
       log.info({ channels: slackTeamData.channelsRead, messages: slackTeamData.messagesFound }, 'Slack team channels collected');
       summarySourceWarnings.push(...slackTeamData.warnings);
     } else {
-      log.warn('Slack token not configured — skipping team channel collection');
+      log.warn('Slack token not configured \u2014 skipping team channel collection');
       summarySourceWarnings.push('Slack team channels: token not configured');
     }
   } catch (err) {
@@ -133,13 +134,13 @@ async function main() {
 
   let jiraData = { tickets: [], ktloCount: 0, warnings: [], totalResolved: 0 };
   try {
-    const jiraToken = config.jiraToken;
+    const jiraToken = config.jiraToken || config.jiraApiToken;
     if (jiraToken) {
       jiraData = await collectJiraResolved(db, jiraToken, weekStart, weekEnd);
       log.info({ capability: jiraData.tickets.length, ktloStripped: jiraData.ktloCount, total: jiraData.totalResolved }, 'Jira resolved collected');
       summarySourceWarnings.push(...jiraData.warnings);
     } else {
-      log.warn('Jira token not configured — skipping Jira collection');
+      log.warn('Jira token not configured \u2014 skipping Jira collection');
       summarySourceWarnings.push('Jira: token not configured');
     }
   } catch (err) {
@@ -147,65 +148,144 @@ async function main() {
     summarySourceWarnings.push('Jira: collection failed');
   }
 
+  // Abort-and-notify: if BOTH primary sources returned zero qualifying items
+  if (slackTeamData.messagesFound === 0 && jiraData.tickets.length === 0) {
+    log.warn('No qualifying activity from Slack or Jira \u2014 aborting');
+    await sendSlackDM('Weekly summary unavailable \u2014 no qualifying activity found for the week. Manual process required.');
+
+    // Still save snapshot for record
+    reticleDb.saveSnapshot(db, accountId, {
+      snapshotDate: dateStr,
+      cadence: 'weekly',
+      items: allItems,
+      narration: null,
+      curatedItems: JSON.stringify({ sections: [], unassigned: [], gaps: [], secondaryKtloCount: 0 })
+    });
+
+    heartbeat.write(SERVICE_NAME, { status: 'degraded', degradedReason: 'no-qualifying-activity' });
+    process.exit(0);
+  }
+
   // Build team roster from DB (dynamic, not hardcoded)
   const teams = buildTeamsFromDB(db);
 
+  // Fetch previous week's notes from Confluence for continuity context
+  let previousNotes = null;
+  let continuitySource = null;
+  try {
+    const confluenceResult = await fetchPreviousWeekNotes(today);
+    if (confluenceResult.notes) {
+      previousNotes = confluenceResult.notes;
+      continuitySource = 'Confluence';
+      log.info({ pageTitle: confluenceResult.pageTitle }, 'Confluence previous notes fetched from ' + confluenceResult.pageTitle);
+    } else {
+      // Confluence fetch succeeded but no DW section found \u2014 fall back to stored snapshot
+      log.warn({ warning: confluenceResult.warning }, 'Confluence fetch did not return DW section \u2014 falling back to stored snapshot');
+      const latestSnapshot = reticleDb.getLatestSnapshot(db, 'weekly');
+      if (latestSnapshot && latestSnapshot.narration) {
+        previousNotes = latestSnapshot.narration;
+        continuitySource = 'stored snapshot';
+        summarySourceWarnings.push('Continuity: using stored snapshot (Confluence unavailable)');
+        log.info({ snapshotDate: latestSnapshot.snapshot_date }, 'Using stored snapshot narration for continuity');
+      } else {
+        summarySourceWarnings.push(confluenceResult.warning || 'Continuity: no previous notes available');
+      }
+    }
+  } catch (err) {
+    log.warn({ err }, 'Confluence fetch failed \u2014 falling back to stored snapshot');
+    const latestSnapshot = reticleDb.getLatestSnapshot(db, 'weekly');
+    if (latestSnapshot && latestSnapshot.narration) {
+      previousNotes = latestSnapshot.narration;
+      continuitySource = 'stored snapshot';
+      summarySourceWarnings.push('Continuity: using stored snapshot (Confluence unavailable)');
+      log.info({ snapshotDate: latestSnapshot.snapshot_date }, 'Using stored snapshot narration for continuity');
+    } else {
+      summarySourceWarnings.push('Continuity: no previous notes available (Confluence and snapshot both unavailable)');
+    }
+  }
+
   // Curate all sources into team-attributed capability signals
+  // (curateForWeeklySummary now handles object-format sources, secondary KTLO
+  //  filtering, gap threshold detection, and source traceability)
   const curatedData = curateForWeeklySummary({
     jiraTickets: jiraData.tickets,
     slackMessages: slackTeamData.messages,
     digestItems: allItems,
-    previousNotes: null // TODO: fetch from Confluence in future increment
   }, teams);
 
+  const totalCuratedItems = curatedData.sections.reduce((sum, s) => sum + s.items.length, 0);
   log.info({
-    cseAccomplishments: curatedData.teams?.cse?.accomplishments?.length || 0,
-    desktopAccomplishments: curatedData.teams?.desktop?.accomplishments?.length || 0,
-    securityAccomplishments: curatedData.teams?.security?.accomplishments?.length || 0,
-    gaps: curatedData.gaps?.length || 0
+    sections: curatedData.sections.length,
+    totalItems: totalCuratedItems,
+    unassigned: curatedData.unassigned.length,
+    secondaryKtloFiltered: curatedData.secondaryKtloCount,
+    gaps: curatedData.gaps?.length || 0,
+    hasContinuityContext: !!previousNotes
   }, 'Curation complete');
 
   // Narrate as Monday Morning Meeting summary
   let summaryMessage;
   let summaryNarrationSucceeded = false;
   try {
-    summaryMessage = await narrateWeeklySummary(curatedData, null);
+    summaryMessage = await narrateWeeklySummary(curatedData, previousNotes);
     if (summaryMessage) summaryNarrationSucceeded = true;
   } catch (err) {
     log.warn({ err }, 'Summary narration failed');
   }
 
   if (!summaryMessage) {
-    log.warn('Summary narration failed — using fallback');
+    log.warn('Summary narration failed \u2014 using fallback');
     summaryMessage = formatWeeklySummaryFallback(curatedData);
   }
 
-  // Build source availability header
-  const sourceLines = [];
-  sourceLines.push(`Slack (${slackTeamData.channelsRead} channels, ${slackTeamData.messagesFound} messages)`);
-  sourceLines.push(`Jira (${jiraData.tickets.length} capability / ${jiraData.ktloCount} KTLO stripped / ${jiraData.totalResolved} total)`);
-  sourceLines.push(`Digest collectors (${allItems.length} items)`);
-  const sourceHeader = `_Sources: ${sourceLines.join(' · ')}_`;
+  // Build metadata header \u2014 signal quality, not raw counts
+  const metadataLines = [];
 
-  // Add gap markers if any team has thin signal
-  let gapNotice = '';
+  // Source line: show active channels and capability/maintenance split
+  const sourceLineParts = [];
+  const slackStrategy = slackTeamData.strategy || 'sweep';
+  sourceLineParts.push(`Slack (${slackTeamData.channelsRead} channels, ${slackStrategy})`);
+  const ktloTotal = jiraData.ktloCount + curatedData.secondaryKtloCount;
+  sourceLineParts.push(`Jira (${jiraData.tickets.length} capability / ${ktloTotal} maintenance excluded)`);
+  metadataLines.push(`_Sources: ${sourceLineParts.join(' \u00B7 ')}_`);
+
+  // Status check: verified Done count
+  const verifiedCount = jiraData.tickets.length;
+  if (verifiedCount > 0) {
+    metadataLines.push(`_Status check: ${verifiedCount}/${verifiedCount} capability tickets verified Done_`);
+  }
+
+  // Gap markers BEFORE content (not after)
   if (curatedData.gaps && curatedData.gaps.length > 0) {
-    gapNotice = '\n\n_⚠️ ' + curatedData.gaps.join('. ') + '_';
+    for (const gap of curatedData.gaps) {
+      metadataLines.push(`_\u26A0\uFE0F ${gap}_`);
+    }
   }
 
-  // Add source warnings
-  let warningNotice = '';
+  // Continuity note
+  if (continuitySource) {
+    metadataLines.push(`_Continuity: previous week fetched from ${continuitySource}_`);
+  }
+
+  // Source warnings (collection failures, missing tokens)
   if (summarySourceWarnings.length > 0) {
-    warningNotice = '\n_' + summarySourceWarnings.join('. ') + '_';
+    for (const warning of summarySourceWarnings) {
+      metadataLines.push(`_${warning}_`);
+    }
   }
 
-  // Compose final message: source header + summary draft + gaps + warnings
-  const message = `${sourceHeader}\n\n${summaryMessage}${gapNotice}${warningNotice}`;
+  // Delimiter with explicit paste instruction
+  metadataLines.push('');
+  metadataLines.push('_Delete everything above the line before copying to Confluence._');
+  metadataLines.push('\u2014\u2014\u2014\u2014\u2014\u2014\u2014\u2014\u2014\u2014\u2014\u2014\u2014\u2014\u2014\u2014\u2014\u2014\u2014\u2014\u2014\u2014\u2014\u2014\u2014\u2014\u2014\u2014\u2014\u2014\u2014\u2014\u2014\u2014\u2014\u2014\u2014\u2014\u2014\u2014');
+
+  // Compose final message: metadata header + delimiter + narrated draft
+  const message = `${metadataLines.join('\n')}\n\n${summaryMessage}`;
   const narrationSucceeded = summaryNarrationSucceeded;
 
   if (failedCollectors.length > 0) {
     // Note about original digest collector failures (followup, email, etc.)
-    // These feed the reflection digest, not the Monday notes — but still worth noting
+    // These feed the reflection digest, not the Monday notes \u2014 but still worth noting
     log.warn({ failedCollectors }, 'Some digest collectors failed');
   }
 
@@ -233,7 +313,7 @@ async function main() {
     reticleDb.pruneOldSnapshots(db, accountId, SNAPSHOT_MAX_AGE_DAYS);
     log.info({ maxAgeDays: SNAPSHOT_MAX_AGE_DAYS }, 'Old snapshots pruned');
   } catch (err) {
-    log.warn({ err }, 'Snapshot pruning failed — non-critical, continuing');
+    log.warn({ err }, 'Snapshot pruning failed \u2014 non-critical, continuing');
   }
 
   const heartbeatStatus = narrationSucceeded ? 'ok' : 'degraded';

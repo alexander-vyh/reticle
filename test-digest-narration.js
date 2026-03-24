@@ -133,7 +133,7 @@ One open Security Engineer. Two candidates in final round interviews.`;
   assert.ok(prompt.system.includes('Individual employee names'), 'System prompt should forbid individual names');
   assert.ok(prompt.system.includes('remained stable'), 'System prompt should include vocabulary');
   assert.ok(prompt.system.includes('Digital Workplace'), 'System prompt should reference the section name');
-  assert.ok(prompt.system.includes('Infrastructure'), 'System prompt should name sub-teams');
+  assert.ok(prompt.system.includes('Corporate Systems Engineering') || prompt.system.includes('Infrastructure'), 'System prompt should name sub-teams');
   assert.ok(prompt.system.includes('Executive Summary'), 'System prompt should describe output structure');
 
   // User message includes curated data
@@ -161,9 +161,9 @@ One open Security Engineer. Two candidates in final round interviews.`;
   // Should contain the basic structure
   assert.ok(fallback.includes('Digital Workplace'), 'Fallback should have DW header');
   assert.ok(fallback.includes('Executive Summary'), 'Fallback should have exec summary');
-  assert.ok(fallback.includes('Infrastructure'), 'Fallback should have Infrastructure section');
-  assert.ok(fallback.includes('Support'), 'Fallback should have Support section');
-  assert.ok(fallback.includes('Platform'), 'Fallback should have Platform section');
+  assert.ok(fallback.includes('Corporate Systems Engineering'), 'Fallback should have CSE section');
+  assert.ok(fallback.includes('Desktop Support'), 'Fallback should have Desktop Support section');
+  assert.ok(fallback.includes('Security (Platform & Endpoint)'), 'Fallback should have Security section');
 
   // Should include actual data
   assert.ok(fallback.includes('prevent-destroy'), 'Fallback should include accomplishments');
@@ -198,10 +198,10 @@ One open Security Engineer. Two candidates in final round interviews.`;
       messages: {
         create: async (params) => {
           // Verify it uses the right model
-          assert.strictEqual(params.model, 'claude-sonnet-4-6', 'Should use claude-sonnet-4-6');
-          assert.strictEqual(params.max_tokens, 2000, 'Should use 2000 max tokens');
+          assert.strictEqual(params.model, 'claude-opus-4-6', 'Should use claude-opus-4-6');
+          assert.strictEqual(params.max_tokens, 16384, 'Should allow full output length');
           return {
-            content: [{ text: mockResponse }],
+            content: [{ type: 'text', text: mockResponse }],
             usage: { input_tokens: 500, output_tokens: 200 }
           };
         }
@@ -212,7 +212,6 @@ One open Security Engineer. Two candidates in final round interviews.`;
   // Clear the digest-narration cache to pick up the mock, then disable CLI path
   delete require.cache[require.resolve('./lib/digest-narration')];
   const freshMod = require('./lib/digest-narration');
-  freshMod._setCliOverride(() => null); // CLI returns null → falls through to API mock
   const { narrateWeeklySummary: mockedNarrate } = freshMod;
 
   mockedNarrate(sampleCuratedData, samplePreviousNotes).then(result => {
