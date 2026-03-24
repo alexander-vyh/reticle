@@ -1,12 +1,12 @@
 #!/usr/bin/env node
 /**
- * Reticle Slack Events Monitor - Socket Mode event tracking
- * Monitors unanswered DMs and @mentions via Slack Socket Mode
+ * Reticle Slack Events Monitor — Bolt.js + Agent SDK
+ * Monitors unanswered DMs and @mentions via Slack Socket Mode (Bolt.js)
+ * Conversational agent responds to Alexander's DMs with streaming
  */
 
-const https = require('https');
+const { App, LogLevel } = require('@slack/bolt');
 const fs = require('fs');
-const WebSocket = require('ws');
 const { execSync } = require('child_process');
 const crypto = require('crypto');
 const emailCache = require('./email-cache');
@@ -17,6 +17,8 @@ const log = require('./lib/logger')('slack-events');
 const orgMemoryDb = require('./lib/org-memory-db');
 const slackCapture = require('./lib/slack-capture');
 const slackReader = require('./lib/slack-reader');
+const { query: agentQuery } = require('@anthropic-ai/claude-agent-sdk');
+const { createReticleMcpServer } = require('./lib/reticle-mcp-server');
 
 const os = require('os');
 const path = require('path');
@@ -24,93 +26,56 @@ const config = require('./lib/config');
 const heartbeat = require('./lib/heartbeat');
 const { validatePrerequisites } = require('./lib/startup-validation');
 
-// Configuration
+// ── Configuration ────────────────────────────────────────────────────
 const CONFIG = {
-  appToken: config.slackAppToken,
-  botToken: config.slackBotToken,
-  myUserId: null, // Will be determined on startup
-  responseTimeout: 10 * 60 * 1000, // 10 minutes
-  checkInterval: 60 * 1000, // Check for timeouts every minute
+  myUserId: null,      // Authenticated user (Alexander when using user token)
+  botUserId: null,      // Bot's own user ID (for filtering bot echo messages)
+  responseTimeout: 10 * 60 * 1000,
+  checkInterval: 60 * 1000,
   stateFile: path.join(__dirname, 'slack-events-state.json'),
-  reconnectDelay: 3000 // 3 seconds
 };
 
-// Tracked messages awaiting response
+// ── State ────────────────────────────────────────────────────────────
 let pendingMessages = {};
-let ws = null;
-let reconnectTimeout = null;
-let heartbeatInterval = null;
 let followupsDbConn = null;
 let accountId = null;
-let errorCount = 0;
-
-// Active "Match differently" thread conversations: threadTs → { emailMeta, ruleType, currentConditions, ruleId, channel }
+let heartbeatInterval = null;
 const ruleRefinementThreads = new Map();
+let agentAvailable = false;
 
-/**
- * Make Slack API call
- */
-function slackAPI(endpoint, params = {}, method = 'GET', body = null) {
-  return new Promise((resolve, reject) => {
-    const query = method === 'GET' ? '?' + new URLSearchParams(params).toString() : '';
-    const path = `/api/${endpoint}${query}`;
+// ── Bolt App ─────────────────────────────────────────────────────────
+const app = new App({
+  token: config.slackUserToken || config.slackBotToken,
+  appToken: config.slackAppToken,
+  socketMode: true,
+  logLevel: LogLevel.WARN,
+});
 
-    const options = {
-      hostname: 'slack.com',
-      path: path,
-      method: method,
-      headers: { 'Authorization': `Bearer ${CONFIG.botToken}` }
-    };
+// ── State Management ─────────────────────────────────────────────────
 
-    if (method === 'POST') {
-      const data = JSON.stringify(body || params);
-      options.headers['Content-Type'] = 'application/json';
-      options.headers['Content-Length'] = Buffer.byteLength(data);
-
-      const req = https.request(options, (res) => {
-        let responseBody = '';
-        res.on('data', (chunk) => responseBody += chunk);
-        res.on('end', () => {
-          try {
-            const response = JSON.parse(responseBody);
-            if (response.ok) {
-              resolve(response);
-            } else {
-              reject(new Error(`Slack API error: ${response.error}`));
-            }
-          } catch (e) {
-            reject(e);
-          }
-        });
-      });
-
-      req.on('error', reject);
-      req.write(data);
-      req.end();
-    } else {
-      https.get(options, (res) => {
-        let responseBody = '';
-        res.on('data', (chunk) => responseBody += chunk);
-        res.on('end', () => {
-          try {
-            const data = JSON.parse(responseBody);
-            if (data.ok) {
-              resolve(data);
-            } else {
-              reject(new Error(`Slack API error: ${data.error}`));
-            }
-          } catch (e) {
-            reject(e);
-          }
-        });
-      }).on('error', reject);
+function loadState() {
+  try {
+    if (fs.existsSync(CONFIG.stateFile)) {
+      const data = fs.readFileSync(CONFIG.stateFile, 'utf-8');
+      pendingMessages = JSON.parse(data);
+      log.info({ count: Object.keys(pendingMessages).length }, 'State loaded');
     }
-  });
+  } catch (error) {
+    log.error({ err: error }, 'Error loading state');
+    pendingMessages = {};
+  }
 }
 
-/**
- * Send macOS notification
- */
+function saveState() {
+  try {
+    fs.writeFileSync(CONFIG.stateFile, JSON.stringify(pendingMessages, null, 2));
+  } catch (error) {
+    log.error({ err: error }, 'Error saving state');
+  }
+}
+
+// ── Utility Functions ────────────────────────────────────────────────
+
 function sendMacOSNotification(title, message) {
   try {
     const escapedTitle = title.replace(/"/g, '\\"').substring(0, 100);
@@ -121,56 +86,6 @@ function sendMacOSNotification(title, message) {
   }
 }
 
-/**
- * Get Socket Mode WebSocket URL
- */
-async function getSocketModeUrl() {
-  return new Promise((resolve, reject) => {
-    const data = '';
-    const options = {
-      hostname: 'slack.com',
-      path: '/api/apps.connections.open',
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${CONFIG.appToken}`,
-        'Content-Type': 'application/json',
-        'Content-Length': 0
-      }
-    };
-
-    const req = https.request(options, (res) => {
-      let body = '';
-      res.on('data', (chunk) => body += chunk);
-      res.on('end', () => {
-        try {
-          const response = JSON.parse(body);
-          if (response.ok) {
-            resolve(response.url);
-          } else {
-            reject(new Error(`Slack API error: ${response.error}`));
-          }
-        } catch (e) {
-          reject(e);
-        }
-      });
-    });
-
-    req.on('error', reject);
-    req.end();
-  });
-}
-
-/**
- * Get my user ID
- */
-async function getMyUserId() {
-  const data = await slackAPI('auth.test');
-  return data.user_id;
-}
-
-/**
- * Track Slack conversation in follow-ups database
- */
 function trackSlackConversation(db, event, direction) {
   if (!db) { log.warn('trackSlackConversation skipped — DB connection unavailable'); return; }
 
@@ -179,11 +94,9 @@ function trackSlackConversation(db, event, direction) {
     let conversationId, conversationType;
 
     if (event.channel_type === 'im') {
-      // Direct message
       conversationId = `slack:dm:${event.user}`;
       conversationType = 'slack-dm';
     } else {
-      // Channel mention - use message timestamp for uniqueness
       conversationId = `slack:mention:${event.channel}-${event.ts}`;
       conversationType = 'slack-mention';
     }
@@ -207,82 +120,30 @@ function trackSlackConversation(db, event, direction) {
   }
 }
 
-/**
- * Get user info
- */
-async function getUserInfo(userId) {
-  try {
-    const data = await slackAPI('users.info', { user: userId });
-    return data.user;
-  } catch (error) {
-    return null;
-  }
-}
+// ── Message Tracking ─────────────────────────────────────────────────
 
-/**
- * Get channel info
- */
-async function getChannelInfo(channelId) {
-  try {
-    const data = await slackAPI('conversations.info', { channel: channelId });
-    return data.channel;
-  } catch (error) {
-    return null;
-  }
-}
-
-/**
- * Post Slack message
- */
-async function postMessage(channel, text) {
-  return slackAPI('chat.postMessage', {}, 'POST', { channel, text, unfurl_links: false });
-}
-
-/**
- * Load state
- */
-function loadState() {
-  try {
-    if (fs.existsSync(CONFIG.stateFile)) {
-      const data = fs.readFileSync(CONFIG.stateFile, 'utf-8');
-      pendingMessages = JSON.parse(data);
-      log.info({ count: Object.keys(pendingMessages).length }, 'State loaded');
-    }
-  } catch (error) {
-    log.error({ err: error }, 'Error loading state');
-    pendingMessages = {};
-  }
-}
-
-/**
- * Save state
- */
-function saveState() {
-  try {
-    fs.writeFileSync(CONFIG.stateFile, JSON.stringify(pendingMessages, null, 2));
-  } catch (error) {
-    log.error({ err: error }, 'Error saving state');
-  }
-}
-
-/**
- * Track new message that needs response
- */
-async function trackMessage(channel, ts, userId, text, type) {
+async function trackMessage(client, channel, ts, userId, text, type) {
   const msgKey = `${channel}_${ts}`;
+  if (pendingMessages[msgKey]) return;
 
-  if (pendingMessages[msgKey]) {
-    return; // Already tracking
+  let user, channelInfo;
+  try {
+    const userRes = await client.users.info({ user: userId });
+    user = userRes.user;
+  } catch (_) { user = null; }
+
+  if (type === 'mention') {
+    try {
+      const chRes = await client.conversations.info({ channel });
+      channelInfo = chRes.channel;
+    } catch (_) { channelInfo = null; }
   }
-
-  const user = await getUserInfo(userId);
-  const channelInfo = type === 'mention' ? await getChannelInfo(channel) : null;
 
   pendingMessages[msgKey] = {
     channel,
     channelName: channelInfo?.name || 'DM',
     user: user?.name || user?.real_name || userId,
-    text: text.substring(0, 100),
+    text: (text || '').substring(0, 100),
     ts,
     time: parseFloat(ts) * 1000,
     type,
@@ -293,11 +154,7 @@ async function trackMessage(channel, ts, userId, text, type) {
   saveState();
 }
 
-/**
- * Mark message as responded
- */
 function markResponded(channel, ts) {
-  // Find any pending messages in this channel that are older than this response
   let removed = 0;
   for (const [key, msg] of Object.entries(pendingMessages)) {
     if (msg.channel === channel && !msg.reminded) {
@@ -315,10 +172,7 @@ function markResponded(channel, ts) {
   }
 }
 
-/**
- * Check for messages that need reminders
- */
-async function checkTimeouts() {
+async function checkTimeouts(client) {
   const now = Date.now();
   let reminders = 0;
 
@@ -332,15 +186,15 @@ async function checkTimeouts() {
       const location = msg.type === 'mention' ? `#${msg.channelName}` : 'DM';
 
       try {
-        await postMessage(
-          CONFIG.myUserId,
-          `⏰ *Unanswered ${type} Reminder*\n` +
-          `You haven't responded to a ${type} from *${msg.user}* in ${location}\n` +
-          `*${minutesAgo} minutes ago*\n` +
-          `_"${msg.text}${msg.text.length >= 100 ? '...' : ''}"_`
-        );
+        await client.chat.postMessage({
+          channel: CONFIG.myUserId,
+          text: `⏰ *Unanswered ${type} Reminder*\n` +
+            `You haven't responded to a ${type} from *${msg.user}* in ${location}\n` +
+            `*${minutesAgo} minutes ago*\n` +
+            `_"${msg.text}${msg.text.length >= 100 ? '...' : ''}"_`,
+          unfurl_links: false,
+        });
 
-        // Also send macOS notification
         sendMacOSNotification(
           `⏰ Unanswered ${type} (${minutesAgo}m)`,
           `From ${msg.user} in ${location}: ${msg.text.substring(0, 100)}`
@@ -356,9 +210,7 @@ async function checkTimeouts() {
     }
   }
 
-  if (reminders > 0) {
-    saveState();
-  }
+  if (reminders > 0) saveState();
 
   // Clean up old entries (>24 hours)
   const dayAgo = now - (24 * 60 * 60 * 1000);
@@ -375,51 +227,507 @@ async function checkTimeouts() {
   }
 }
 
-/**
- * Handle incoming Slack event
- */
-async function handleEvent(event, db) {
-  // Check if this is my message (responding to something)
-  if (event.user === CONFIG.myUserId) {
-    markResponded(event.channel, event.ts);
+// ── Agent (Claude Agent SDK) ─────────────────────────────────────────
 
-    // Mark conversation as resolved in follow-ups database
-    if (db && event.type === 'message' && event.channel_type === 'im') {
-      // For DMs, we need to find the other user in the conversation
-      // The channel is a DM channel, so we need to look up who we're talking to
-      // This is a simplified approach - in a real implementation we'd get the user from the channel
-      // For now, we'll track outgoing messages
-      trackSlackConversation(db, event, 'outgoing');
+const AGENT_SYSTEM_PROMPT = `You are Reticle's Slack assistant for Alexander. You respond to messages in Slack DMs — you are NOT a CLI tool, file editor, or coding assistant.
+
+Your capabilities:
+- Query Alexander's follow-ups, commitments, and work state via the Reticle MCP tools
+- Search the web for work-relevant information (weather, flight status, news) via WebSearch
+- Fetch web pages for details via WebFetch
+
+Your constraints:
+- You can read files but CANNOT write, edit, or delete files
+- You CANNOT run shell commands or execute code
+- You CANNOT see images or screenshots shared in Slack
+- If conversation history is provided below, use it for context
+- If asked about something you can't access, say so directly
+
+Local access:
+- You CAN read files on this machine (meeting transcripts, documents, config)
+- Transcripts are at ~/.config/reticle/transcripts/
+- Project files are at ~/GitHub/reticle/
+- Use Read/Glob to find and read files when relevant
+- Do NOT write, edit, or delete files unless explicitly asked
+
+Style:
+- Be concise and direct — this is Slack, not an essay
+- No filler ("Great question!", "I'd be happy to help!")
+- Use tools for real data — never guess or speculate
+- Summarize tool results conversationally — don't dump raw JSON`;
+
+async function handleAgentMessage(client, event) {
+  const startTime = Date.now();
+  log.info({ channel: event.channel, textLen: (event.text || '').length }, 'Agent handling message');
+
+  // Add thinking indicator
+  try {
+    await client.reactions.add({ channel: event.channel, name: 'hourglass_flowing_sand', timestamp: event.ts });
+  } catch (_) {}
+
+  try {
+    // Fetch conversation history for context
+    let threadContext = '';
+    try {
+      const historyResult = await client.conversations.history({
+        channel: event.channel,
+        limit: 20,
+      });
+      if (historyResult.messages && historyResult.messages.length > 1) {
+        const recentMessages = historyResult.messages
+          .slice(0, 20)
+          .reverse()
+          .filter(m => !m.subtype)
+          .map(m => {
+            const role = m.user === CONFIG.myUserId ? 'Reticle' : 'Alexander';
+            return `${role}: ${m.text || ''}`;
+          })
+          .join('\n');
+        threadContext = `\n\nConversation history (most recent messages in this DM):\n${recentMessages}`;
+      }
+    } catch (err) {
+      log.debug({ err }, 'Could not fetch conversation history — proceeding without context');
+    }
+
+    let resultText = '';
+    let toolsUsed = [];
+    let messageTypes = [];
+
+    for await (const message of agentQuery({
+      prompt: event.text || '',
+      options: {
+        model: 'claude-haiku-4-5',
+        maxTurns: 10,
+        systemPrompt: AGENT_SYSTEM_PROMPT + threadContext,
+        permissionMode: 'bypassPermissions',
+        allowedTools: ['WebSearch', 'WebFetch', 'Read', 'Glob', 'Grep'],
+        disallowedTools: ['Write', 'Edit', 'Bash', 'Agent', 'AskUserQuestion'],
+        cwd: process.env.HOME,
+        mcpServers: {
+          reticle: {
+            command: 'node',
+            args: [path.join(__dirname, 'lib', 'reticle-mcp-server.js')],
+          }
+        },
+      },
+    })) {
+      messageTypes.push(message.type);
+      if (message.type === 'result') {
+        resultText = message.result || '';
+        log.debug({ stopReason: message.stop_reason, resultLen: resultText.length }, 'Agent result received');
+      } else if (message.type === 'assistant' && message.content) {
+        // Log tool use blocks
+        for (const block of (Array.isArray(message.content) ? message.content : [])) {
+          if (block.type === 'tool_use') {
+            toolsUsed.push(block.name);
+            log.debug({ tool: block.name }, 'Agent used tool');
+          }
+        }
+      }
+    }
+
+    const elapsed = Date.now() - startTime;
+    log.info({ channel: event.channel, elapsed, toolsUsed, messageCount: messageTypes.length }, 'Agent response ready');
+
+    // Remove thinking indicator
+    try {
+      await client.reactions.remove({ channel: event.channel, name: 'hourglass_flowing_sand', timestamp: event.ts });
+    } catch (_) {}
+
+    if (resultText) {
+      await client.chat.postMessage({ channel: event.channel, text: resultText, unfurl_links: false });
+    }
+  } catch (err) {
+    const elapsed = Date.now() - startTime;
+    log.error({ err, channel: event.channel, elapsed }, 'Agent pipeline error');
+
+    try {
+      await client.reactions.remove({ channel: event.channel, name: 'hourglass_flowing_sand', timestamp: event.ts });
+    } catch (_) {}
+
+    await client.chat.postMessage({
+      channel: event.channel,
+      text: "Something went wrong — I couldn't process that. Try again?",
+      unfurl_links: false,
+    });
+  }
+}
+
+
+// ── Gmail Helpers ────────────────────────────────────────────────────
+
+function getGmailClient() {
+  const { google } = require('googleapis');
+  const credentials = JSON.parse(fs.readFileSync(config.gmailCredentialsPath));
+  const token = JSON.parse(fs.readFileSync(config.gmailTokenPath));
+  const { client_secret, client_id, redirect_uris } = credentials.installed;
+  const oAuth2Client = new google.auth.OAuth2(client_id, client_secret, redirect_uris[0]);
+  oAuth2Client.setCredentials(token);
+  return google.gmail({ version: 'v1', auth: oAuth2Client });
+}
+
+async function getEmailMeta(emailId) {
+  const cached = emailCache.getCachedEmail(emailId);
+  if (cached) return cached;
+
+  try {
+    const gmail = getGmailClient();
+    const res = await gmail.users.messages.get({ userId: 'me', id: emailId, format: 'metadata', metadataHeaders: ['From', 'To', 'Cc', 'Subject', 'Date'] });
+    const headers = res.data.payload.headers;
+    const meta = {
+      id: emailId,
+      from: headers.find(h => h.name === 'From')?.value || '',
+      to: headers.find(h => h.name === 'To')?.value || '',
+      cc: headers.find(h => h.name === 'Cc')?.value || '',
+      subject: headers.find(h => h.name === 'Subject')?.value || '',
+      date: headers.find(h => h.name === 'Date')?.value || ''
+    };
+    emailCache.cacheEmail(emailId, meta);
+    return meta;
+  } catch (error) {
+    log.error({ err: error, emailId }, 'Failed to fetch email metadata');
+    return null;
+  }
+}
+
+async function sendEmailContent(client, channel, userId, emailId) {
+  try {
+    let from, subject, date, body;
+
+    const cached = emailCache.getCachedEmail(emailId);
+    if (cached) {
+      from = cached.from; subject = cached.subject; date = cached.date; body = cached.body;
+    } else {
+      const gmail = getGmailClient();
+      const res = await gmail.users.messages.get({ userId: 'me', id: emailId, format: 'full' });
+      const email = res.data;
+      from = email.payload.headers.find(h => h.name === 'From')?.value || 'Unknown';
+      subject = email.payload.headers.find(h => h.name === 'Subject')?.value || 'No subject';
+      date = email.payload.headers.find(h => h.name === 'Date')?.value || 'Unknown date';
+
+      body = '';
+      const parts = email.payload.parts || [email.payload];
+      for (const part of parts) {
+        if (part.mimeType === 'text/plain' && part.body.data) {
+          body = Buffer.from(part.body.data, 'base64').toString();
+          break;
+        }
+      }
+      if (!body) {
+        for (const part of parts) {
+          if (part.mimeType === 'text/html' && part.body.data) {
+            const { convert } = require('html-to-text');
+            const html = Buffer.from(part.body.data, 'base64').toString();
+            body = convert(html, {
+              wordwrap: 80,
+              selectors: [
+                { selector: 'a', options: { ignoreHref: true } },
+                { selector: 'img', format: 'skip' },
+                { selector: 'table', options: { uppercaseHeaderCells: false } }
+              ]
+            });
+            break;
+          }
+        }
+      }
+      if (!body && email.payload.body?.data) {
+        body = Buffer.from(email.payload.body.data, 'base64').toString();
+      }
+      emailCache.cacheEmail(emailId, { from, subject, date, body });
+    }
+
+    if (body && body.length > 3000) {
+      body = body.substring(0, 3000) + '\n\n... (truncated)';
+    }
+
+    const blocks = [
+      { type: 'section', text: { type: 'mrkdwn', text: `📧 *Email Content*\n\n*From:* ${from}\n*Subject:* ${subject}\n*Date:* ${date}` } },
+      { type: 'divider' },
+      { type: 'section', text: { type: 'mrkdwn', text: '```\n' + (body || 'No content available').substring(0, 2800) + '\n```' } }
+    ];
+
+    await client.chat.postEphemeral({ channel, user: userId, blocks, text: 'Email content' });
+    log.info({ emailId }, 'Email content sent as ephemeral message');
+  } catch (error) {
+    log.error({ err: error, emailId }, 'Error sending email content');
+    throw error;
+  }
+}
+
+async function archiveEmailAction(emailId) {
+  try {
+    const gmail = getGmailClient();
+    await gmail.users.messages.modify({ userId: 'me', id: emailId, requestBody: { removeLabelIds: ['INBOX'] } });
+    log.info({ emailId }, 'Email archived via Gmail API');
+    return { success: true, message: '✓ Email archived' };
+  } catch (error) {
+    log.error({ err: error, emailId }, 'Archive failed');
+    return { success: false, message: `✗ Archive failed: ${error.message}` };
+  }
+}
+
+async function deleteEmailAction(emailId) {
+  try {
+    const gmail = getGmailClient();
+    await gmail.users.messages.trash({ userId: 'me', id: emailId });
+    log.info({ emailId }, 'Email trashed via Gmail API');
+    return { success: true, message: '✓ Email moved to trash' };
+  } catch (error) {
+    log.error({ err: error, emailId }, 'Delete failed');
+    return { success: false, message: `✗ Delete failed: ${error.message}` };
+  }
+}
+
+async function unsubscribeEmailAction(emailId) {
+  try {
+    const scriptPath = '/tmp/unsub-by-id.sh';
+    fs.writeFileSync(scriptPath, `#!/bin/bash\ncd ${__dirname}\n./unsub "id:${emailId}"\n`);
+    execSync(`chmod +x ${scriptPath}`);
+    execSync(scriptPath, { stdio: 'pipe', timeout: 30000 });
+    log.info({ emailId }, 'Unsubscribe automation completed');
+    return { success: true, message: '✓ Unsubscribe automation started' };
+  } catch (error) {
+    log.error({ err: error, emailId }, 'Unsubscribe failed');
+    return { success: false, message: `✗ Unsubscribe failed: ${error.message}` };
+  }
+}
+
+// ── Classification Helpers ───────────────────────────────────────────
+
+function decodeClassifyAction(value) {
+  const [code, emailId] = value.split('|');
+  const actionMap = { as: 'archive', ds: 'delete', ls: 'alert', dm: 'demote', ad: 'archive' };
+  return { actionType: actionMap[code], isDomain: code === 'ad', emailId };
+}
+
+function immediateActionForType(actionType) {
+  if (actionType === 'archive' || actionType === 'demote') return 'archive';
+  if (actionType === 'delete') return 'delete';
+  return null;
+}
+
+function buildRuleConfirmationBlocks(ruleType, description, ruleId, extra) {
+  const label = ruleType.charAt(0).toUpperCase() + ruleType.slice(1);
+  const elements = [];
+
+  if (extra?.suggested) {
+    elements.push(
+      { type: 'button', text: { type: 'plain_text', text: 'Yes, apply this rule' }, action_id: 'accept_suggested_rule', value: String(ruleId), style: 'primary' },
+      { type: 'button', text: { type: 'plain_text', text: 'No, just match sender' }, action_id: 'accept_default_rule', value: `${ruleId}|${extra.defaultRuleArgs}` },
+      { type: 'button', text: { type: 'plain_text', text: 'Match differently...' }, action_id: 'match_differently', value: String(ruleId) }
+    );
+  } else {
+    elements.push(
+      { type: 'button', text: { type: 'plain_text', text: 'Undo rule' }, action_id: 'undo_rule', value: String(ruleId) },
+      { type: 'button', text: { type: 'plain_text', text: 'Match differently...' }, action_id: 'match_differently', value: String(ruleId) }
+    );
+  }
+
+  return [
+    { type: 'section', text: { type: 'mrkdwn', text: extra?.suggested
+        ? `📋 Suggested rule: ${label} when ${description}\n${extra.reason}`
+        : `✓ Rule created: ${label} when ${description}` } },
+    { type: 'actions', elements }
+  ];
+}
+
+function extractDistributionList(recipients, myEmail) {
+  const addresses = recipients.match(/[\w.+-]+@[\w.-]+/g) || [];
+  const dlCandidates = addresses.filter(a => a.toLowerCase() !== myEmail);
+  return dlCandidates[0] || '';
+}
+
+function storeRefinementContext(threadTs, channel, emailMeta, ruleType, currentConditions, ruleId) {
+  ruleRefinementThreads.set(threadTs, { emailMeta, ruleType, currentConditions, ruleId, channel });
+  setTimeout(() => ruleRefinementThreads.delete(threadTs), 60 * 60 * 1000);
+}
+
+async function handleClassifyAction(client, action, channel, userId, messageTs) {
+  const selectedValue = action.selected_option?.value;
+  if (!selectedValue) return;
+
+  const { actionType, isDomain, emailId } = decodeClassifyAction(selectedValue);
+  const cid = `cls_${crypto.randomBytes(4).toString('hex')}`;
+  log.info({ cid, actionType, isDomain, emailId }, 'Classify action');
+
+  const meta = await getEmailMeta(emailId);
+  if (!meta) {
+    await client.chat.postMessage({ channel, text: '✗ Could not load email metadata', unfurl_links: false });
+    return;
+  }
+
+  const { email: senderEmail, domain: senderDomain } = parseSenderEmail(meta.from);
+
+  if (isDomain && config.filterPatterns?.companyDomain && senderDomain === config.filterPatterns.companyDomain) {
+    await client.chat.postMessage({ channel, text: `⚠️ Cannot ${actionType} emails from your own domain (@${senderDomain})`, unfurl_links: false });
+    return;
+  }
+
+  const immediateAction = immediateActionForType(actionType);
+  if (immediateAction === 'archive') {
+    try { await archiveEmailAction(emailId); } catch (e) { log.warn({ err: e, emailId }, 'Immediate archive failed'); }
+  } else if (immediateAction === 'delete') {
+    try { await deleteEmailAction(emailId); } catch (e) { log.warn({ err: e, emailId }, 'Immediate delete failed'); }
+  }
+
+  if (isDomain) {
+    const confirmBlocks = [
+      { type: 'section', text: { type: 'mrkdwn', text: `⚠️ This will ${actionType} *ALL* emails from @${senderDomain}` } },
+      { type: 'actions', elements: [
+        { type: 'button', text: { type: 'plain_text', text: 'Confirm' }, action_id: 'confirm_domain_rule', value: `${actionType}|${senderDomain}|${meta.from}|${meta.subject}`, style: 'danger' },
+        { type: 'button', text: { type: 'plain_text', text: 'Cancel' }, action_id: 'cancel_domain_rule', value: 'cancel' }
+      ]}
+    ];
+    const actionLabel = immediateAction === 'archive' ? '✓ Archived this email\n' : immediateAction === 'delete' ? '✓ Trashed this email\n' : '';
+    await client.chat.postMessage({ channel, text: `${actionLabel}⚠️ Confirm domain rule for @${senderDomain}`, unfurl_links: false });
+    await client.chat.postMessage({ channel, text: `Confirm domain rule`, blocks: confirmBlocks, unfurl_links: false });
+    return;
+  }
+
+  const myEmail = config.gmailAccount?.toLowerCase() || '';
+  const allRecipients = `${meta.to || ''} ${meta.cc || ''}`.toLowerCase();
+  const sentToDL = allRecipients && !allRecipients.includes(myEmail) && allRecipients.includes('@');
+
+  if (sentToDL) {
+    const toMatch = extractDistributionList(allRecipients, myEmail);
+    const suggestedConditions = { ruleType: actionType, matchFrom: senderEmail, matchTo: toMatch };
+    const description = `FROM ${senderEmail} AND TO ${toMatch}`;
+    const ruleRow = reticleDb.createRule(followupsDbConn, accountId, {
+      rule_type: actionType, match_from: senderEmail, match_to: toMatch,
+      source_email: meta.from, source_subject: meta.subject
+    });
+    const ruleId = ruleRow.id;
+    reticleDb.deactivateRule(followupsDbConn, ruleId);
+
+    const defaultRuleArgs = JSON.stringify({ rule_type: actionType, match_from: senderEmail, source_email: meta.from, source_subject: meta.subject });
+    const actionLabel = immediateAction === 'archive' ? '✓ Archived this email\n' : immediateAction === 'delete' ? '✓ Trashed this email\n' : '';
+    const blocks = buildRuleConfirmationBlocks(actionType, description, ruleId, {
+      suggested: true,
+      reason: '_(More targeted — this was sent to a distribution list, not directly to you)_',
+      defaultRuleArgs: Buffer.from(defaultRuleArgs).toString('base64').substring(0, 60)
+    });
+    if (actionLabel) {
+      blocks.unshift({ type: 'section', text: { type: 'mrkdwn', text: actionLabel.trim() } });
+    }
+    const resp = await client.chat.postMessage({ channel, text: `Suggested rule: ${description}`, blocks, unfurl_links: false });
+    if (resp?.ts) {
+      storeRefinementContext(resp.ts, channel, meta, actionType, { matchFrom: senderEmail, matchTo: toMatch }, ruleId);
+    }
+  } else {
+    const ruleRow2 = reticleDb.createRule(followupsDbConn, accountId, {
+      rule_type: actionType, match_from: senderEmail,
+      source_email: meta.from, source_subject: meta.subject
+    });
+    const ruleId = ruleRow2.id;
+    const description = formatRuleDescription(reticleDb.getRuleById(followupsDbConn, ruleId));
+    const actionLabel = immediateAction === 'archive' ? '✓ Archived this email\n' : immediateAction === 'delete' ? '✓ Trashed this email\n' : '';
+    const blocks = buildRuleConfirmationBlocks(actionType, description, ruleId);
+    if (actionLabel) {
+      blocks.unshift({ type: 'section', text: { type: 'mrkdwn', text: actionLabel.trim() } });
+    }
+    const resp = await client.chat.postMessage({ channel, text: `Rule created: ${actionType} when ${description}`, blocks, unfurl_links: false });
+    if (resp?.ts) {
+      storeRefinementContext(resp.ts, channel, meta, actionType, { matchFrom: senderEmail }, ruleId);
+    }
+    log.info({ cid, ruleId, description }, 'Default rule created');
+  }
+}
+
+async function handleRuleRefinementReply(client, event) {
+  const threadTs = event.thread_ts;
+  const ctx = ruleRefinementThreads.get(threadTs);
+  if (!ctx) return false;
+
+  const userText = event.text;
+  log.info({ threadTs, userText }, 'Rule refinement reply');
+
+  const result = await parseRuleRefinement({
+    emailMeta: { from: ctx.emailMeta.from, to: ctx.emailMeta.to, cc: ctx.emailMeta.cc, subject: ctx.emailMeta.subject },
+    currentRule: ctx.currentConditions,
+    userInstruction: userText
+  });
+
+  if (!result) {
+    await client.chat.postMessage({ channel: ctx.channel, text: "I couldn't parse that — try being more specific, e.g., \"only when subject mentions role audit\" or \"remove the To condition\"", thread_ts: threadTs, unfurl_links: false });
+    return true;
+  }
+
+  const description = formatRuleDescription({
+    match_from: result.matchFrom, match_from_domain: result.matchFromDomain,
+    match_to: result.matchTo, match_subject_contains: result.matchSubjectContains
+  });
+
+  const newRuleRow = reticleDb.createRule(followupsDbConn, accountId, {
+    rule_type: ctx.ruleType, match_from: result.matchFrom, match_from_domain: result.matchFromDomain,
+    match_to: result.matchTo, match_subject_contains: result.matchSubjectContains,
+    source_email: ctx.emailMeta.from, source_subject: ctx.emailMeta.subject
+  });
+  const newRuleId = newRuleRow.id;
+  reticleDb.deactivateRule(followupsDbConn, newRuleId);
+
+  ctx.currentConditions = result;
+  ctx.ruleId = newRuleId;
+
+  const label = ctx.ruleType.charAt(0).toUpperCase() + ctx.ruleType.slice(1);
+  const blocks = [
+    { type: 'section', text: { type: 'mrkdwn', text: `Updated rule: ${label} when ${description}` } },
+    { type: 'actions', elements: [
+      { type: 'button', text: { type: 'plain_text', text: 'Apply this rule' }, action_id: 'apply_refined_rule', value: String(newRuleId), style: 'primary' },
+      { type: 'button', text: { type: 'plain_text', text: 'Try again' }, action_id: 'try_again_refine', value: threadTs }
+    ]}
+  ];
+  await client.chat.postMessage({ channel: ctx.channel, text: `Updated rule: ${description}`, blocks, thread_ts: threadTs, unfurl_links: false });
+  return true;
+}
+
+// ── Bolt Event Handlers ──────────────────────────────────────────────
+
+// Handle all message events (DMs and channel messages)
+app.event('message', async ({ event, client }) => {
+  // Skip message subtypes (joins, leaves, etc.)
+  if (event.subtype) return;
+
+  // Bot's own echo messages — mark responses, don't process further
+  if (CONFIG.botUserId && event.user === CONFIG.botUserId) {
+    markResponded(event.channel, event.ts);
+    if (followupsDbConn && event.channel_type === 'im') {
+      trackSlackConversation(followupsDbConn, event, 'outgoing');
     }
     return;
   }
 
-  // Ignore bot messages
+  // Ignore other bot messages
   if (event.bot_id) {
     log.debug({ botId: event.bot_id, channel: event.channel }, 'Ignoring bot message');
     return;
   }
 
-  // Intercept thread replies for "Match differently" rule refinement conversations
-  if (event.type === 'message' && event.thread_ts && ruleRefinementThreads.has(event.thread_ts)) {
-    const handled = await handleRuleRefinementReply(event);
+  // Intercept rule refinement thread replies
+  if (event.thread_ts && ruleRefinementThreads.has(event.thread_ts)) {
+    const handled = await handleRuleRefinementReply(client, event);
     if (handled) return;
   }
 
-  const eventType = event.type === 'message' ? 'message' : event.type;
-  log.info({ eventType, channel: event.channel }, 'Event received');
+  log.info({ eventType: 'message', channel: event.channel }, 'Event received');
 
   // Track conversation in follow-ups database
-  if (event.type === 'message' && !event.subtype && event.user !== CONFIG.myUserId) {
+  const isMyMessage = event.user === CONFIG.myUserId;
+  if (!isMyMessage) {
     try {
-      trackSlackConversation(db, event, 'incoming');
+      trackSlackConversation(followupsDbConn, event, 'incoming');
     } catch (err) {
       log.warn({ err, channel: event.channel, ts: event.ts, user: event.user }, 'Failed to track conversation — continuing');
     }
+  } else if (followupsDbConn && event.channel_type === 'im') {
+    try {
+      trackSlackConversation(followupsDbConn, event, 'outgoing');
+    } catch (err) {
+      log.warn({ err }, 'Failed to track outgoing conversation');
+    }
   }
 
-  // Capture all non-bot messages to raw_messages for organizational memory
-  if (event.type === 'message' && !event.subtype && event.user !== CONFIG.myUserId) {
+  // Capture ALL non-bot messages to org-memory (including Alexander's own)
+  {
     try {
       const omDb = orgMemoryDb.getDatabase();
       const userName = await slackReader.getUserInfo(event.user);
@@ -445,943 +753,301 @@ async function handleEvent(event, db) {
     }
   }
 
-  switch (event.type) {
-    case 'message':
-      // Check if this is a DM (channel type 'im')
-      if (event.channel_type === 'im') {
-        await trackMessage(event.channel, event.ts, event.user, event.text, 'dm');
-      }
-      break;
-
-    case 'app_mention':
-      // Someone @mentioned me in a channel
-      await trackMessage(event.channel, event.ts, event.user, event.text, 'mention');
-      break;
+  // Route DMs from Alexander to the conversational agent (async, non-blocking)
+  if (agentAvailable && event.channel_type === 'im' && event.user === config.slackUserId) {
+    handleAgentMessage(client, event).catch(err => {
+      log.error({ err, channel: event.channel, ts: event.ts }, 'Agent pipeline failed');
+    });
   }
-}
 
-/**
- * Send email content as ephemeral message (only visible to requesting user)
- */
-async function sendEmailContent(channel, userId, emailId) {
+  // Track message for timeout reminders
+  if (event.channel_type === 'im') {
+    await trackMessage(client, event.channel, event.ts, event.user, event.text, 'dm');
+  }
+});
+
+// Handle @mentions in channels
+app.event('app_mention', async ({ event, client }) => {
+  if (event.bot_id) return;
+
+  log.info({ eventType: 'app_mention', channel: event.channel }, 'Event received');
+
+  // Track conversation
   try {
-    let from, subject, date, body;
-
-    // Check cache first (fast!)
-    const cached = emailCache.getCachedEmail(emailId);
-    if (cached) {
-      log.debug({ emailId }, 'Using cached email content');
-      from = cached.from;
-      subject = cached.subject;
-      date = cached.date;
-      body = cached.body;
-    } else {
-      // Cache miss - fetch from Gmail API (slow)
-      log.info({ emailId }, 'Fetching email from Gmail API');
-
-      const gmail = getGmailClient();
-
-      // Fetch email
-      const res = await gmail.users.messages.get({
-        userId: 'me',
-        id: emailId,
-        format: 'full'
-      });
-
-      const email = res.data;
-      from = email.payload.headers.find(h => h.name === 'From')?.value || 'Unknown';
-      subject = email.payload.headers.find(h => h.name === 'Subject')?.value || 'No subject';
-      date = email.payload.headers.find(h => h.name === 'Date')?.value || 'Unknown date';
-
-      // Get email body - try plain text first, then HTML
-      body = '';
-      const parts = email.payload.parts || [email.payload];
-
-      // Try to find plain text part
-      for (const part of parts) {
-        if (part.mimeType === 'text/plain' && part.body.data) {
-          body = Buffer.from(part.body.data, 'base64').toString();
-          break;
-        }
-      }
-
-      // If no plain text, try to get HTML and convert properly
-      if (!body) {
-        for (const part of parts) {
-          if (part.mimeType === 'text/html' && part.body.data) {
-            const { convert } = require('html-to-text');
-            const html = Buffer.from(part.body.data, 'base64').toString();
-
-            // Use proper HTML to text conversion
-            body = convert(html, {
-              wordwrap: 80,
-              selectors: [
-                { selector: 'a', options: { ignoreHref: true } },  // Don't show URLs inline
-                { selector: 'img', format: 'skip' },               // Skip images
-                { selector: 'table', options: { uppercaseHeaderCells: false } }
-              ]
-            });
-            break;
-          }
-        }
-      }
-
-      if (!body && email.payload.body?.data) {
-        body = Buffer.from(email.payload.body.data, 'base64').toString();
-      }
-
-      // Cache this email for next time
-      emailCache.cacheEmail(emailId, { from, subject, date, body });
-      log.debug({ emailId }, 'Cached email');
-    }
-
-    // Limit length for display
-    if (body && body.length > 3000) {
-      body = body.substring(0, 3000) + '\n\n... (truncated)';
-    }
-
-    // Create ephemeral message (only visible to user who clicked)
-    const blocks = [
-      {
-        type: 'section',
-        text: {
-          type: 'mrkdwn',
-          text: `📧 *Email Content*\n\n*From:* ${from}\n*Subject:* ${subject}\n*Date:* ${date}`
-        }
-      },
-      { type: 'divider' },
-      {
-        type: 'section',
-        text: {
-          type: 'mrkdwn',
-          text: '```\n' + (body || 'No content available').substring(0, 2800) + '\n```'
-        }
-      }
-    ];
-
-    // Send ephemeral message
-    const data = JSON.stringify({
-      channel: channel,
-      user: userId,
-      blocks: blocks,
-      text: 'Email content'
-    });
-
-    return new Promise((resolve, reject) => {
-      const options = {
-        hostname: 'slack.com',
-        path: '/api/chat.postEphemeral',
-        method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${CONFIG.botToken}`,
-          'Content-Type': 'application/json',
-          'Content-Length': Buffer.byteLength(data)
-        }
-      };
-
-      const req = https.request(options, (res) => {
-        let responseBody = '';
-        res.on('data', (chunk) => responseBody += chunk);
-        res.on('end', () => {
-          try {
-            const response = JSON.parse(responseBody);
-            if (response.ok) {
-              log.info({ emailId }, 'Email content sent as ephemeral message');
-              resolve(response);
-            } else {
-              reject(new Error(`Slack API error: ${response.error}`));
-            }
-          } catch (e) {
-            reject(e);
-          }
-        });
-      });
-
-      req.on('error', reject);
-      req.write(data);
-      req.end();
-    });
-  } catch (error) {
-    log.error({ err: error, emailId }, 'Error sending email content');
-    throw error;
+    trackSlackConversation(followupsDbConn, event, 'incoming');
+  } catch (err) {
+    log.warn({ err }, 'Failed to track mention conversation');
   }
-}
 
-// ── Email Classification Helpers ──────────────────────────────────────
-
-/**
- * Get email metadata from cache or fetch from Gmail API on cache miss.
- */
-async function getEmailMeta(emailId) {
-  const cached = emailCache.getCachedEmail(emailId);
-  if (cached) return cached;
-
-  // Cache miss — fetch from Gmail API
+  // Capture to org-memory
   try {
-    const gmail = getGmailClient();
-    const res = await gmail.users.messages.get({ userId: 'me', id: emailId, format: 'metadata', metadataHeaders: ['From', 'To', 'Cc', 'Subject', 'Date'] });
-    const headers = res.data.payload.headers;
-    const meta = {
-      id: emailId,
-      from: headers.find(h => h.name === 'From')?.value || '',
-      to: headers.find(h => h.name === 'To')?.value || '',
-      cc: headers.find(h => h.name === 'Cc')?.value || '',
-      subject: headers.find(h => h.name === 'Subject')?.value || '',
-      date: headers.find(h => h.name === 'Date')?.value || ''
-    };
-    emailCache.cacheEmail(emailId, meta);
-    return meta;
-  } catch (error) {
-    log.error({ err: error, emailId }, 'Failed to fetch email metadata');
-    return null;
-  }
-}
-
-/**
- * Post an ephemeral message (only visible to user).
- */
-async function postEphemeral(channel, userId, text, blocks) {
-  const body = { channel, user: userId, text };
-  if (blocks) body.blocks = blocks;
-  return slackAPI('chat.postEphemeral', {}, 'POST', body);
-}
-
-/**
- * Post a message (optionally in a thread).
- */
-async function postThreadMessage(channel, text, threadTs, blocks) {
-  const body = { channel, text, unfurl_links: false };
-  if (threadTs) body.thread_ts = threadTs;
-  if (blocks) body.blocks = blocks;
-  return slackAPI('chat.postMessage', {}, 'POST', body);
-}
-
-/**
- * Decode overflow menu short code → { actionType, emailId }
- * Codes: as=archive sender, ds=delete sender, ls=alert sender, dm=demote sender, ad=archive domain
- */
-function decodeClassifyAction(value) {
-  const [code, emailId] = value.split('|');
-  const actionMap = { as: 'archive', ds: 'delete', ls: 'alert', dm: 'demote', ad: 'archive' };
-  return { actionType: actionMap[code], isDomain: code === 'ad', emailId };
-}
-
-/**
- * Map overflow action type to the immediate action on the current email.
- * 'archive'/'demote' → archive the email, 'delete' → trash it, 'alert' → no immediate action needed
- */
-function immediateActionForType(actionType) {
-  if (actionType === 'archive' || actionType === 'demote') return 'archive';
-  if (actionType === 'delete') return 'delete';
-  return null; // 'alert' has no immediate destructive action
-}
-
-/**
- * Build the rule confirmation blocks with action buttons.
- */
-function buildRuleConfirmationBlocks(ruleType, description, ruleId, extra) {
-  const label = ruleType.charAt(0).toUpperCase() + ruleType.slice(1);
-  const elements = [];
-
-  if (extra?.suggested) {
-    // Suggested compound rule — needs explicit acceptance
-    elements.push(
-      { type: 'button', text: { type: 'plain_text', text: 'Yes, apply this rule' }, action_id: 'accept_suggested_rule', value: String(ruleId), style: 'primary' },
-      { type: 'button', text: { type: 'plain_text', text: 'No, just match sender' }, action_id: 'accept_default_rule', value: `${ruleId}|${extra.defaultRuleArgs}` },
-      { type: 'button', text: { type: 'plain_text', text: 'Match differently...' }, action_id: 'match_differently', value: String(ruleId) }
-    );
-  } else {
-    // Default rule — already applied
-    elements.push(
-      { type: 'button', text: { type: 'plain_text', text: 'Undo rule' }, action_id: 'undo_rule', value: String(ruleId) },
-      { type: 'button', text: { type: 'plain_text', text: 'Match differently...' }, action_id: 'match_differently', value: String(ruleId) }
-    );
-  }
-
-  return [
-    { type: 'section', text: { type: 'mrkdwn', text: extra?.suggested
-        ? `📋 Suggested rule: ${label} when ${description}\n${extra.reason}`
-        : `✓ Rule created: ${label} when ${description}` } },
-    { type: 'actions', elements }
-  ];
-}
-
-/**
- * Handle the classify_email overflow menu selection.
- */
-async function handleClassifyAction(action, channel, userId, messageTs) {
-  const selectedValue = action.selected_option?.value;
-  if (!selectedValue) return;
-
-  const { actionType, isDomain, emailId } = decodeClassifyAction(selectedValue);
-  const cid = `cls_${crypto.randomBytes(4).toString('hex')}`;
-  log.info({ cid, actionType, isDomain, emailId }, 'Classify action');
-
-  // Get email metadata
-  const meta = await getEmailMeta(emailId);
-  if (!meta) {
-    await postMessage(channel, '✗ Could not load email metadata');
-    return;
-  }
-
-  const { email: senderEmail, domain: senderDomain } = parseSenderEmail(meta.from);
-
-  // Self-domain protection
-  if (isDomain && config.filterPatterns?.companyDomain && senderDomain === config.filterPatterns.companyDomain) {
-    await postMessage(channel, `⚠️ Cannot ${actionType} emails from your own domain (@${senderDomain})`);
-    return;
-  }
-
-  // 1. Immediate action on current email (independent of rule creation)
-  const immediateAction = immediateActionForType(actionType);
-  if (immediateAction === 'archive') {
-    try { await archiveEmailAction(emailId); } catch (e) { log.warn({ err: e, emailId }, 'Immediate archive failed'); }
-  } else if (immediateAction === 'delete') {
-    try { await deleteEmailAction(emailId); } catch (e) { log.warn({ err: e, emailId }, 'Immediate delete failed'); }
-  }
-
-  // 2. Domain actions require confirmation
-  if (isDomain) {
-    const confirmBlocks = [
-      { type: 'section', text: { type: 'mrkdwn', text: `⚠️ This will ${actionType} *ALL* emails from @${senderDomain}` } },
-      { type: 'actions', elements: [
-        { type: 'button', text: { type: 'plain_text', text: 'Confirm' }, action_id: 'confirm_domain_rule', value: `${actionType}|${senderDomain}|${meta.from}|${meta.subject}`, style: 'danger' },
-        { type: 'button', text: { type: 'plain_text', text: 'Cancel' }, action_id: 'cancel_domain_rule', value: 'cancel' }
-      ]}
-    ];
-    const actionLabel = immediateAction === 'archive' ? '✓ Archived this email\n' : immediateAction === 'delete' ? '✓ Trashed this email\n' : '';
-    await postMessage(channel, `${actionLabel}⚠️ Confirm domain rule for @${senderDomain}`);
-    await postThreadMessage(channel, `Confirm domain rule`, null, confirmBlocks);
-    return;
-  }
-
-  // 3. Sender-level actions — check if smart inference applies
-  const myEmail = config.gmailAccount?.toLowerCase() || '';
-  const allRecipients = `${meta.to || ''} ${meta.cc || ''}`.toLowerCase();
-  const sentToDL = allRecipients && !allRecipients.includes(myEmail) && allRecipients.includes('@');
-
-  if (sentToDL) {
-    // Smart inference: suggest compound rule with TO condition
-    const toMatch = extractDistributionList(allRecipients, myEmail);
-    // Don't create the rule yet — propose it
-    const suggestedConditions = { ruleType: actionType, matchFrom: senderEmail, matchTo: toMatch };
-    const description = `FROM ${senderEmail} AND TO ${toMatch}`;
-    // Create the rule provisionally to get an ID, but we could also just pass args
-    const ruleRow = reticleDb.createRule(followupsDbConn, accountId, {
-      rule_type: actionType, match_from: senderEmail, match_to: toMatch,
-      source_email: meta.from, source_subject: meta.subject
+    const omDb = orgMemoryDb.getDatabase();
+    const userName = await slackReader.getUserInfo(event.user);
+    const channelName = await slackReader.getConversationInfo(event.channel);
+    slackCapture.captureMessage(omDb, {
+      channel: event.channel, channelName, ts: event.ts, user: event.user,
+      userName, text: event.text, threadTs: event.thread_ts || null,
+      channelType: event.channel_type, clientMsgId: event.client_msg_id || null,
+      subtype: null,
     });
-    const ruleId = ruleRow.id;
-    // Immediately deactivate — it's a proposal, not yet accepted
+  } catch (err) {
+    log.warn({ err }, 'Failed to capture mention to org-memory');
+  }
+
+  await trackMessage(client, event.channel, event.ts, event.user, event.text, 'mention');
+});
+
+// ── Bolt Interactive Handlers ────────────────────────────────────────
+
+// Helper: parse action context from interactive payload
+function parseActionContext(body) {
+  const action = body.actions[0];
+  const userId = body.user.id;
+  const channel = body.channel.id;
+  const valueParts = action.value ? action.value.split('|') : [];
+  const emailId = valueParts[0];
+  const threadId = valueParts[1] || null;
+  const cached = emailId ? emailCache.getCachedEmail(emailId) : null;
+  return { action, userId, channel, emailId, threadId, cached };
+}
+
+app.action('view_email_modal', async ({ ack, body, client }) => {
+  await ack();
+  const { userId, channel, emailId } = parseActionContext(body);
+  await sendEmailContent(client, channel, userId, emailId);
+});
+
+app.action('archive_email', async ({ ack, body, client }) => {
+  await ack();
+  const { channel, emailId, threadId } = parseActionContext(body);
+  const result = await archiveEmailAction(emailId);
+  if (result.message) await client.chat.postMessage({ channel, text: result.message, unfurl_links: false });
+  if (followupsDbConn && threadId) reticleDb.resolveConversation(followupsDbConn, `email:${threadId}`);
+});
+
+app.action('delete_email', async ({ ack, body, client }) => {
+  await ack();
+  const { channel, emailId, threadId } = parseActionContext(body);
+  const result = await deleteEmailAction(emailId);
+  if (result.message) await client.chat.postMessage({ channel, text: result.message, unfurl_links: false });
+  if (followupsDbConn && threadId) reticleDb.resolveConversation(followupsDbConn, `email:${threadId}`);
+});
+
+app.action('unsubscribe_email', async ({ ack, body, client }) => {
+  await ack();
+  const { channel, emailId, threadId } = parseActionContext(body);
+  const result = await unsubscribeEmailAction(emailId);
+  if (result.message) await client.chat.postMessage({ channel, text: result.message, unfurl_links: false });
+  if (followupsDbConn && threadId) reticleDb.resolveConversation(followupsDbConn, `email:${threadId}`);
+});
+
+app.action('mark_replied', async ({ ack, body, client }) => {
+  await ack();
+  const { channel, threadId } = parseActionContext(body);
+  if (threadId && followupsDbConn) {
+    reticleDb.updateConversationState(followupsDbConn, `email:${threadId}`, 'me', 'their-response');
+  }
+  await client.chat.postMessage({ channel, text: '✓ Marked as replied', unfurl_links: false });
+});
+
+app.action('mark_no_response_needed', async ({ ack, body, client }) => {
+  await ack();
+  const { channel, threadId } = parseActionContext(body);
+  if (threadId && followupsDbConn) {
+    reticleDb.resolveConversation(followupsDbConn, `email:${threadId}`);
+  }
+  await client.chat.postMessage({ channel, text: '✓ Marked as no reply needed', unfurl_links: false });
+});
+
+app.action('open_in_gmail', async ({ ack }) => {
+  await ack();
+  // Handled by Slack URL button — no server action needed
+});
+
+app.action('classify_email', async ({ ack, body, client }) => {
+  await ack();
+  const action = body.actions[0];
+  const userId = body.user.id;
+  const channel = body.channel.id;
+  await handleClassifyAction(client, action, channel, userId, body.message?.ts);
+});
+
+app.action('accept_suggested_rule', async ({ ack, body, client }) => {
+  await ack();
+  const { channel } = parseActionContext(body);
+  const ruleId = parseInt(body.actions[0].value);
+  if (followupsDbConn) {
+    reticleDb.createRule(followupsDbConn, accountId, (() => {
+      const r = reticleDb.getRuleById(followupsDbConn, ruleId);
+      if (!r) return { rule_type: 'archive' };
+      return { rule_type: r.rule_type, match_from: r.match_from, match_from_domain: r.match_from_domain, match_to: r.match_to, match_subject_contains: r.match_subject_contains, source_email: r.source_email, source_subject: r.source_subject };
+    })());
+    const rule = reticleDb.getRuleById(followupsDbConn, ruleId);
+    const desc = rule ? formatRuleDescription(rule) : 'unknown';
+    await client.chat.postMessage({ channel, text: `✓ Rule created: ${rule?.rule_type || 'archive'} when ${desc}`, unfurl_links: false });
+  }
+});
+
+app.action('accept_default_rule', async ({ ack, body, client }) => {
+  await ack();
+  const { channel } = parseActionContext(body);
+  const parts = body.actions[0].value.split('|');
+  const proposedRuleId = parseInt(parts[0]);
+  try {
+    const argsJson = Buffer.from(parts[1] || '', 'base64').toString();
+    const args = JSON.parse(argsJson);
+    if (followupsDbConn) {
+      reticleDb.deactivateRule(followupsDbConn, proposedRuleId);
+      const rule = reticleDb.createRule(followupsDbConn, accountId, args);
+      const desc = rule ? formatRuleDescription(rule) : 'unknown';
+      await client.chat.postMessage({ channel, text: `✓ Rule created: ${rule?.rule_type || 'archive'} when ${desc}`, unfurl_links: false });
+    }
+  } catch (e) {
+    log.warn({ err: e }, 'Failed to parse default rule args');
+    await client.chat.postMessage({ channel, text: '✗ Failed to create rule', unfurl_links: false });
+  }
+});
+
+app.action('undo_rule', async ({ ack, body, client }) => {
+  await ack();
+  const { channel } = parseActionContext(body);
+  const ruleId = parseInt(body.actions[0].value);
+  if (followupsDbConn) {
+    const rule = reticleDb.getRuleById(followupsDbConn, ruleId);
     reticleDb.deactivateRule(followupsDbConn, ruleId);
+    await client.chat.postMessage({ channel, text: `✓ Rule removed. Emails${rule?.match_from ? ` from ${rule.match_from}` : ''} will appear normally.`, unfurl_links: false });
+  }
+});
 
-    const defaultRuleArgs = JSON.stringify({ rule_type: actionType, match_from: senderEmail, source_email: meta.from, source_subject: meta.subject });
-    const actionLabel = immediateAction === 'archive' ? '✓ Archived this email\n' : immediateAction === 'delete' ? '✓ Trashed this email\n' : '';
-    const blocks = buildRuleConfirmationBlocks(actionType, description, ruleId, {
-      suggested: true,
-      reason: '_(More targeted — this was sent to a distribution list, not directly to you)_',
-      defaultRuleArgs: Buffer.from(defaultRuleArgs).toString('base64').substring(0, 60)
+app.action('match_differently', async ({ ack, body, client }) => {
+  await ack();
+  const { channel } = parseActionContext(body);
+  const ruleId = parseInt(body.actions[0].value);
+  const ctx = [...ruleRefinementThreads.values()].find(c => c.ruleId === ruleId);
+  if (ctx) {
+    const meta = ctx.emailMeta;
+    const currentDesc = formatRuleDescription({
+      match_from: ctx.currentConditions.matchFrom, match_from_domain: ctx.currentConditions.matchFromDomain,
+      match_to: ctx.currentConditions.matchTo, match_subject_contains: ctx.currentConditions.matchSubjectContains
     });
-    // Prepend immediate action confirmation
-    if (actionLabel) {
-      blocks.unshift({ type: 'section', text: { type: 'mrkdwn', text: actionLabel.trim() } });
-    }
-    const resp = await postThreadMessage(channel, `Suggested rule: ${description}`, null, blocks);
-    // Store context for potential "Match differently" thread
-    if (resp?.ts) {
-      storeRefinementContext(resp.ts, channel, meta, actionType, { matchFrom: senderEmail, matchTo: toMatch }, ruleId);
+    const prompt = [
+      'How should I match future emails like this?', '',
+      'This email:',
+      `  From: ${meta.from}`,
+      meta.to ? `  To: ${meta.to}` : null,
+      `  Subject: ${meta.subject}`, '',
+      `Current rule: ${ctx.ruleType.charAt(0).toUpperCase() + ctx.ruleType.slice(1)} when ${currentDesc}`, '',
+      'Tell me what to change — e.g., "only when subject mentions role audit", "from any sender to this DL", "remove the To condition"'
+    ].filter(x => x !== null).join('\n');
+
+    const msgTs = body.message?.ts || body.container?.message_ts;
+    await client.chat.postMessage({ channel, text: prompt, thread_ts: msgTs, unfurl_links: false });
+    if (msgTs) {
+      ruleRefinementThreads.set(msgTs, ctx);
     }
   } else {
-    // Default: simple sender rule — create immediately
-    const ruleRow2 = reticleDb.createRule(followupsDbConn, accountId, {
-      rule_type: actionType, match_from: senderEmail,
-      source_email: meta.from, source_subject: meta.subject
-    });
-    const ruleId = ruleRow2.id;
-    const description = formatRuleDescription(reticleDb.getRuleById(followupsDbConn, ruleId));
-    const actionLabel = immediateAction === 'archive' ? '✓ Archived this email\n' : immediateAction === 'delete' ? '✓ Trashed this email\n' : '';
-    const blocks = buildRuleConfirmationBlocks(actionType, description, ruleId);
-    if (actionLabel) {
-      blocks.unshift({ type: 'section', text: { type: 'mrkdwn', text: actionLabel.trim() } });
-    }
-    const resp = await postThreadMessage(channel, `Rule created: ${actionType} when ${description}`, null, blocks);
-    if (resp?.ts) {
-      storeRefinementContext(resp.ts, channel, meta, actionType, { matchFrom: senderEmail }, ruleId);
-    }
-    log.info({ cid, ruleId, description }, 'Default rule created');
+    await client.chat.postMessage({ channel, text: 'Session expired — click the overflow menu again to start over.', unfurl_links: false });
   }
-}
-
-/**
- * Extract the most likely distribution list address from recipients.
- */
-function extractDistributionList(recipients, myEmail) {
-  // Split on commas, find addresses that aren't the user's
-  const addresses = recipients.match(/[\w.+-]+@[\w.-]+/g) || [];
-  const dlCandidates = addresses.filter(a => a.toLowerCase() !== myEmail);
-  return dlCandidates[0] || '';
-}
-
-/**
- * Store context for a "Match differently" thread conversation.
- */
-function storeRefinementContext(threadTs, channel, emailMeta, ruleType, currentConditions, ruleId) {
-  ruleRefinementThreads.set(threadTs, { emailMeta, ruleType, currentConditions, ruleId, channel });
-  // Auto-expire after 1 hour
-  setTimeout(() => ruleRefinementThreads.delete(threadTs), 60 * 60 * 1000);
-}
-
-/**
- * Handle thread replies in rule refinement conversations.
- */
-async function handleRuleRefinementReply(event) {
-  const threadTs = event.thread_ts;
-  const ctx = ruleRefinementThreads.get(threadTs);
-  if (!ctx) return false; // Not a refinement thread
-
-  const userText = event.text;
-  log.info({ threadTs, userText }, 'Rule refinement reply');
-
-  const result = await parseRuleRefinement({
-    emailMeta: { from: ctx.emailMeta.from, to: ctx.emailMeta.to, cc: ctx.emailMeta.cc, subject: ctx.emailMeta.subject },
-    currentRule: ctx.currentConditions,
-    userInstruction: userText
-  });
-
-  if (!result) {
-    await postThreadMessage(ctx.channel, "I couldn't parse that — try being more specific, e.g., \"only when subject mentions role audit\" or \"remove the To condition\"", threadTs);
-    return true;
-  }
-
-  // Build description and propose
-  const description = formatRuleDescription({
-    match_from: result.matchFrom, match_from_domain: result.matchFromDomain,
-    match_to: result.matchTo, match_subject_contains: result.matchSubjectContains
-  });
-
-  // Create the proposed rule (deactivated until confirmed)
-  const newRuleRow = reticleDb.createRule(followupsDbConn, accountId, {
-    rule_type: ctx.ruleType, match_from: result.matchFrom, match_from_domain: result.matchFromDomain,
-    match_to: result.matchTo, match_subject_contains: result.matchSubjectContains,
-    source_email: ctx.emailMeta.from, source_subject: ctx.emailMeta.subject
-  });
-  const newRuleId = newRuleRow.id;
-  reticleDb.deactivateRule(followupsDbConn, newRuleId);
-
-  // Update context with new proposal
-  ctx.currentConditions = result;
-  ctx.ruleId = newRuleId;
-
-  const label = ctx.ruleType.charAt(0).toUpperCase() + ctx.ruleType.slice(1);
-  const blocks = [
-    { type: 'section', text: { type: 'mrkdwn', text: `Updated rule: ${label} when ${description}` } },
-    { type: 'actions', elements: [
-      { type: 'button', text: { type: 'plain_text', text: 'Apply this rule' }, action_id: 'apply_refined_rule', value: String(newRuleId), style: 'primary' },
-      { type: 'button', text: { type: 'plain_text', text: 'Try again' }, action_id: 'try_again_refine', value: threadTs }
-    ]}
-  ];
-  await postThreadMessage(ctx.channel, `Updated rule: ${description}`, threadTs, blocks);
-  return true;
-}
-
-/**
- * Handle interactive button clicks
- */
-async function handleInteractive(payload) {
-  if (payload.type === 'block_actions') {
-    const action = payload.actions[0];
-    const username = payload.user.username;
-    const userId = payload.user.id; // Actual user ID for ephemeral messages
-    const channel = payload.channel.id;
-    const actionId = action.action_id;
-    const cid = `act_${crypto.randomBytes(6).toString('hex')}`;
-    const startTime = Date.now();
-
-    // Parse compound value: emailId|threadId (backward compatible with plain emailId)
-    const valueParts = action.value ? action.value.split('|') : [];
-    const emailId = valueParts[0];
-    const threadId = valueParts[1] || null;
-
-    // Try to get email context from cache (no extra API call)
-    const cached = emailId ? emailCache.getCachedEmail(emailId) : null;
-    const subject = cached?.subject || undefined;
-    const from = cached?.from || undefined;
-
-    log.info({ cid, actionId, username, emailId, threadId, subject, from }, 'Slack action started');
-
-    try {
-      let result = null;
-
-      switch (actionId) {
-        case 'view_email_modal':
-          // Send ephemeral message (only visible to user) instead of modal
-          await sendEmailContent(channel, userId, emailId);
-          log.info({ cid, actionId, emailId, success: true, durationMs: Date.now() - startTime }, 'Slack action completed');
-          return; // No text response needed
-
-        case 'archive_email':
-          result = await archiveEmailAction(emailId);
-          break;
-
-        case 'delete_email':
-          result = await deleteEmailAction(emailId);
-          break;
-
-        case 'unsubscribe_email':
-          result = await unsubscribeEmailAction(emailId);
-          break;
-
-        case 'mark_replied':
-          // Flip conversation state — still waiting for their reply back
-          if (threadId && followupsDbConn) {
-            reticleDb.updateConversationState(followupsDbConn, `email:${threadId}`, 'me', 'their-response');
-          }
-          result = { success: true, message: '✓ Marked as replied' };
-          break;
-
-        case 'mark_no_response_needed':
-          // Resolve outright — this email doesn't need a reply
-          if (threadId && followupsDbConn) {
-            reticleDb.resolveConversation(followupsDbConn, `email:${threadId}`);
-          }
-          result = { success: true, message: '✓ Marked as no reply needed' };
-          break;
-
-        case 'open_in_gmail':
-          // This is handled by Slack URL button, no server action needed
-          result = { success: true, message: '✓ Opening in Gmail...' };
-          break;
-
-        // ── Email Classification Actions ──────────────────────────
-
-        case 'classify_email':
-          await handleClassifyAction(action, channel, userId, payload.message?.ts);
-          log.info({ cid, actionId, success: true, durationMs: Date.now() - startTime }, 'Classify action completed');
-          return;
-
-        case 'accept_suggested_rule': {
-          // User accepted the compound rule proposal — reactivate it
-          const ruleId = parseInt(action.value);
-          if (followupsDbConn) {
-            // Reactivate the previously deactivated proposed rule
-            reticleDb.createRule(followupsDbConn, accountId, (() => {
-              const r = reticleDb.getRuleById(followupsDbConn, ruleId);
-              if (!r) return { rule_type: 'archive' }; // fallback
-              return { rule_type: r.rule_type, match_from: r.match_from, match_from_domain: r.match_from_domain, match_to: r.match_to, match_subject_contains: r.match_subject_contains, source_email: r.source_email, source_subject: r.source_subject };
-            })());
-            const rule = reticleDb.getRuleById(followupsDbConn, ruleId);
-            const desc = rule ? formatRuleDescription(rule) : 'unknown';
-            result = { success: true, message: `✓ Rule created: ${rule?.rule_type || 'archive'} when ${desc}` };
-          }
-          break;
-        }
-
-        case 'accept_default_rule': {
-          // User rejected compound suggestion, wants simple sender-only rule
-          const parts = action.value.split('|');
-          const proposedRuleId = parseInt(parts[0]);
-          try {
-            const argsJson = Buffer.from(parts[1] || '', 'base64').toString();
-            const args = JSON.parse(argsJson);
-            if (followupsDbConn) {
-              // Deactivate the compound proposal
-              reticleDb.deactivateRule(followupsDbConn, proposedRuleId);
-              // Create the simple sender rule
-              const rule = reticleDb.createRule(followupsDbConn, accountId, args);
-              const desc = rule ? formatRuleDescription(rule) : 'unknown';
-              result = { success: true, message: `✓ Rule created: ${rule?.rule_type || 'archive'} when ${desc}` };
-            }
-          } catch (e) {
-            log.warn({ err: e }, 'Failed to parse default rule args');
-            result = { success: false, message: '✗ Failed to create rule' };
-          }
-          break;
-        }
-
-        case 'undo_rule': {
-          const ruleId = parseInt(action.value);
-          if (followupsDbConn) {
-            const rule = reticleDb.getRuleById(followupsDbConn, ruleId);
-            reticleDb.deactivateRule(followupsDbConn, ruleId);
-            result = { success: true, message: `✓ Rule removed. Emails${rule?.match_from ? ` from ${rule.match_from}` : ''} will appear normally.` };
-          }
-          break;
-        }
-
-        case 'match_differently': {
-          // Start a "Match differently" thread conversation
-          const ruleId = parseInt(action.value);
-          const ctx = [...ruleRefinementThreads.values()].find(c => c.ruleId === ruleId);
-          if (ctx) {
-            const meta = ctx.emailMeta;
-            const currentDesc = formatRuleDescription({
-              match_from: ctx.currentConditions.matchFrom, match_from_domain: ctx.currentConditions.matchFromDomain,
-              match_to: ctx.currentConditions.matchTo, match_subject_contains: ctx.currentConditions.matchSubjectContains
-            });
-            const prompt = [
-              'How should I match future emails like this?',
-              '',
-              'This email:',
-              `  From: ${meta.from}`,
-              meta.to ? `  To: ${meta.to}` : null,
-              `  Subject: ${meta.subject}`,
-              '',
-              `Current rule: ${ctx.ruleType.charAt(0).toUpperCase() + ctx.ruleType.slice(1)} when ${currentDesc}`,
-              '',
-              'Tell me what to change — e.g., "only when subject mentions role audit", "from any sender to this DL", "remove the To condition"'
-            ].filter(x => x !== null).join('\n');
-
-            // Find the thread this confirmation was posted in
-            const msgTs = payload.message?.ts || payload.container?.message_ts;
-            await postThreadMessage(channel, prompt, msgTs);
-            // Update the refinement thread context to use this message's thread
-            if (msgTs) {
-              ruleRefinementThreads.set(msgTs, ctx);
-            }
-          } else {
-            await postMessage(channel, 'Session expired — click the overflow menu again to start over.');
-          }
-          log.info({ cid, actionId, ruleId, success: true, durationMs: Date.now() - startTime }, 'Match differently started');
-          return;
-        }
-
-        case 'apply_refined_rule': {
-          // User accepted an AI-refined rule
-          const ruleId = parseInt(action.value);
-          if (followupsDbConn) {
-            // Reactivate it
-            const rule = reticleDb.getRuleById(followupsDbConn, ruleId);
-            if (rule) {
-              reticleDb.createRule(followupsDbConn, accountId, {
-                rule_type: rule.rule_type, match_from: rule.match_from, match_from_domain: rule.match_from_domain,
-                match_to: rule.match_to, match_subject_contains: rule.match_subject_contains,
-                source_email: rule.source_email, source_subject: rule.source_subject
-              });
-              const desc = formatRuleDescription(rule);
-              result = { success: true, message: `✓ Rule created: ${rule.rule_type} when ${desc}` };
-              // Deactivate any older rule for the same refinement thread
-              const threadTs = payload.message?.thread_ts || payload.container?.thread_ts;
-              if (threadTs) {
-                const ctx = ruleRefinementThreads.get(threadTs);
-                if (ctx && ctx.ruleId !== ruleId) {
-                  reticleDb.deactivateRule(followupsDbConn, ctx.ruleId);
-                }
-                ruleRefinementThreads.delete(threadTs);
-              }
-            } else {
-              result = { success: false, message: '✗ Rule not found' };
-            }
-          }
-          break;
-        }
-
-        case 'try_again_refine':
-          // User wants to try another refinement — just prompt them
-          await postThreadMessage(channel, 'Tell me how you\'d like to adjust the rule:', action.value);
-          log.info({ cid, actionId, success: true, durationMs: Date.now() - startTime }, 'Try again prompt sent');
-          return;
-
-        case 'confirm_domain_rule': {
-          // User confirmed a domain-level rule
-          const [ruleType, domain, sourceEmail, sourceSubject] = (action.value || '').split('|');
-          if (followupsDbConn && ruleType && domain) {
-            reticleDb.createRule(followupsDbConn, accountId, {
-              rule_type: ruleType, match_from_domain: domain,
-              source_email: sourceEmail || null, source_subject: sourceSubject || null
-            });
-            result = { success: true, message: `✓ Rule created: ${ruleType} when FROM DOMAIN @${domain}` };
-          }
-          break;
-        }
-
-        case 'cancel_domain_rule':
-          result = { success: true, message: '✓ Domain rule cancelled.' };
-          break;
-
-        case 'feedback_delivered':
-        case 'feedback_skipped': {
-          const feedbackTracker = require('./lib/feedback-tracker');
-          if (followupsDbConn) {
-            const val = action.value ? JSON.parse(action.value) : {};
-            const newStatus = actionId === 'feedback_delivered' ? 'delivered' : 'skipped';
-            feedbackTracker.logFeedbackAction(followupsDbConn, accountId, {
-              reportName: val.report || 'unknown',
-              feedbackType: val.feedbackType || 'unknown',
-              action: actionId,
-              entityId: val.entityId || ''
-            });
-            // Keep feedback_candidates in sync so Reticle/gateway reflect the status change
-            if (val.entityId) {
-              followupsDbConn.prepare(
-                `UPDATE feedback_candidates SET status = ? WHERE entity_id = ?`
-              ).run(newStatus, val.entityId);
-            }
-          }
-          const label = actionId === 'feedback_delivered' ? 'delivered' : 'skipped';
-          result = { success: true, message: `✓ Feedback marked as ${label}` };
-          break;
-        }
-
-        default:
-          result = { success: false, message: '✗ Unknown action' };
-      }
-
-      const durationMs = Date.now() - startTime;
-
-      // Send response to user
-      if (result && result.message) {
-        await postMessage(channel, result.message);
-      }
-
-      if (result?.success) {
-        log.info({ cid, actionId, emailId, success: true, durationMs }, 'Slack action completed');
-      } else {
-        log.warn({ cid, actionId, emailId, success: false, durationMs, message: result?.message }, 'Slack action completed with failure');
-      }
-
-      // Resolve email conversation in follow-ups when archived/deleted/unsubscribed
-      if (followupsDbConn && threadId && ['archive_email', 'delete_email', 'unsubscribe_email'].includes(actionId)) {
-        reticleDb.resolveConversation(followupsDbConn, `email:${threadId}`);
-      }
-    } catch (error) {
-      const durationMs = Date.now() - startTime;
-      log.error({ cid, err: error, actionId, emailId, durationMs }, 'Slack action failed');
-      await postMessage(channel, `✗ Error: ${error.message}`);
-    }
-  }
-}
-
-/**
- * Get full email content via Gmail API
- */
-async function getFullEmailContent(emailId) {
-  try {
-    const { google } = require('googleapis');
-    const fs = require('fs');
-
-    const credentials = JSON.parse(fs.readFileSync(config.gmailCredentialsPath));
-    const token = JSON.parse(fs.readFileSync(config.gmailTokenPath));
-
-    const { client_secret, client_id, redirect_uris } = credentials.installed;
-    const oAuth2Client = new google.auth.OAuth2(client_id, client_secret, redirect_uris[0]);
-    oAuth2Client.setCredentials(token);
-
-    const gmail = google.gmail({ version: 'v1', auth: oAuth2Client });
-    const res = await gmail.users.messages.get({
-      userId: 'me',
-      id: emailId,
-      format: 'full'
-    });
-
-    const email = res.data;
-    const from = email.payload.headers.find(h => h.name === 'From')?.value || 'Unknown';
-    const subject = email.payload.headers.find(h => h.name === 'Subject')?.value || 'No subject';
-    const date = email.payload.headers.find(h => h.name === 'Date')?.value || 'Unknown date';
-
-    // Get email body
-    let body = '';
-    const parts = email.payload.parts || [email.payload];
-    for (const part of parts) {
-      if (part.mimeType === 'text/plain' && part.body.data) {
-        body = Buffer.from(part.body.data, 'base64').toString().substring(0, 3000);
-        break;
-      }
-    }
-
-    if (!body && email.payload.body?.data) {
-      body = Buffer.from(email.payload.body.data, 'base64').toString().substring(0, 3000);
-    }
-
-    return `📧 *Full Email*\n\n*From:* ${from}\n*Subject:* ${subject}\n*Date:* ${date}\n\n${body || '_No text content_'}`;
-  } catch (error) {
-    return `✗ Failed to get email: ${error.message}`;
-  }
-}
-
-/**
- * Get Gmail API client (shared helper)
- */
-function getGmailClient() {
-  const { google } = require('googleapis');
-
-  const credentials = JSON.parse(fs.readFileSync(config.gmailCredentialsPath));
-  const token = JSON.parse(fs.readFileSync(config.gmailTokenPath));
-  const { client_secret, client_id, redirect_uris } = credentials.installed;
-  const oAuth2Client = new google.auth.OAuth2(client_id, client_secret, redirect_uris[0]);
-  oAuth2Client.setCredentials(token);
-
-  return google.gmail({ version: 'v1', auth: oAuth2Client });
-}
-
-/**
- * Archive email action (using Gmail API)
- */
-async function archiveEmailAction(emailId) {
-  try {
-    const gmail = getGmailClient();
-
-    // Remove INBOX label to archive
-    await gmail.users.messages.modify({
-      userId: 'me',
-      id: emailId,
-      requestBody: {
-        removeLabelIds: ['INBOX']
-      }
-    });
-
-    log.info({ emailId }, 'Email archived via Gmail API');
-    return { success: true, message: '✓ Email archived' };
-  } catch (error) {
-    log.error({ err: error, emailId }, 'Archive failed');
-    return { success: false, message: `✗ Archive failed: ${error.message}` };
-  }
-}
-
-/**
- * Delete email action (using Gmail API)
- */
-async function deleteEmailAction(emailId) {
-  try {
-    const gmail = getGmailClient();
-
-    // Move to trash (reversible - better than permanent delete)
-    await gmail.users.messages.trash({
-      userId: 'me',
-      id: emailId
-    });
-
-    log.info({ emailId }, 'Email trashed via Gmail API');
-    return { success: true, message: '✓ Email moved to trash' };
-  } catch (error) {
-    log.error({ err: error, emailId }, 'Delete failed');
-    return { success: false, message: `✗ Delete failed: ${error.message}` };
-  }
-}
-
-/**
- * Unsubscribe email action
- */
-async function unsubscribeEmailAction(emailId) {
-  try {
-    // Create a temporary script to unsubscribe by email ID
-    const scriptPath = '/tmp/unsub-by-id.sh';
-    fs.writeFileSync(scriptPath, `#!/bin/bash
-cd ${__dirname}
-./unsub "id:${emailId}"
-`);
-    execSync(`chmod +x ${scriptPath}`);
-    execSync(scriptPath, { stdio: 'pipe', timeout: 30000 });
-    log.info({ emailId }, 'Unsubscribe automation completed');
-    return { success: true, message: '✓ Unsubscribe automation started' };
-  } catch (error) {
-    log.error({ err: error, emailId }, 'Unsubscribe failed');
-    return { success: false, message: `✗ Unsubscribe failed: ${error.message}` };
-  }
-}
-
-/**
- * Connect to Socket Mode
- */
-async function connectSocketMode(db) {
-  try {
-    log.info('Connecting to Slack Socket Mode');
-    const url = await getSocketModeUrl();
-
-    ws = new WebSocket(url);
-
-    ws.on('open', () => {
-      log.info('Socket Mode connected');
-      heartbeat.write('slack-events', { checkInterval: 30000, status: 'ok' });
-      // Periodic heartbeat so tray doesn't flag us as stale during quiet periods
-      if (heartbeatInterval) clearInterval(heartbeatInterval);
-      heartbeatInterval = setInterval(() => {
-        heartbeat.write('slack-events', { checkInterval: 30000, status: 'ok' });
-      }, 30000);
-      if (reconnectTimeout) {
-        clearTimeout(reconnectTimeout);
-        reconnectTimeout = null;
-      }
-    });
-
-    ws.on('message', async (data) => {
-      try {
-        const envelope = JSON.parse(data);
-
-        // Acknowledge envelope
-        if (envelope.envelope_id) {
-          ws.send(JSON.stringify({ envelope_id: envelope.envelope_id }));
-        }
-
-        // Debug: Log all envelope types
-        log.debug({ envelopeType: envelope.type }, 'Envelope received');
-
-        // Handle different payload types
-        if (envelope.type === 'hello') {
-          log.info('Received hello from Slack');
-        } else if (envelope.type === 'disconnect') {
-          log.warn('Slack requested disconnect, reconnecting');
-          ws.close();
-        } else if (envelope.type === 'events_api') {
-          // This is an actual event
-          log.debug({ eventType: envelope.payload.event.type }, 'Events API payload');
-          await handleEvent(envelope.payload.event, db);
-        } else if (envelope.type === 'interactive') {
-          // Handle button clicks
-          await handleInteractive(envelope.payload);
-        } else {
-          log.warn({ envelopeType: envelope.type }, 'Unknown envelope type');
-        }
-        heartbeat.write('slack-events', { checkInterval: 30000, status: 'ok' });
-      } catch (error) {
-        log.error({ err: error }, 'Error processing WebSocket message');
-      }
-    });
-
-    ws.on('error', (error) => {
-      log.error({ err: error }, 'WebSocket error');
-      heartbeat.write('slack-events', {
-        checkInterval: 30000,
-        status: 'degraded',
-        errors: { lastError: 'WebSocket disconnected, reconnecting', lastErrorAt: Date.now(), countSinceStart: ++errorCount }
+});
+
+app.action('apply_refined_rule', async ({ ack, body, client }) => {
+  await ack();
+  const { channel } = parseActionContext(body);
+  const ruleId = parseInt(body.actions[0].value);
+  if (followupsDbConn) {
+    const rule = reticleDb.getRuleById(followupsDbConn, ruleId);
+    if (rule) {
+      reticleDb.createRule(followupsDbConn, accountId, {
+        rule_type: rule.rule_type, match_from: rule.match_from, match_from_domain: rule.match_from_domain,
+        match_to: rule.match_to, match_subject_contains: rule.match_subject_contains,
+        source_email: rule.source_email, source_subject: rule.source_subject
       });
-    });
-
-    ws.on('close', () => {
-      if (heartbeatInterval) { clearInterval(heartbeatInterval); heartbeatInterval = null; }
-      log.warn({ reconnectDelayMs: CONFIG.reconnectDelay }, 'Socket Mode disconnected, reconnecting');
-      heartbeat.write('slack-events', {
-        checkInterval: 30000,
-        status: 'degraded',
-        errors: { lastError: 'WebSocket disconnected, reconnecting', lastErrorAt: Date.now(), countSinceStart: ++errorCount }
-      });
-      ws = null;
-      reconnectTimeout = setTimeout(() => connectSocketMode(db), CONFIG.reconnectDelay);
-    });
-
-  } catch (error) {
-    log.error({ err: error }, 'Failed to connect to Socket Mode');
-    reconnectTimeout = setTimeout(() => connectSocketMode(db), CONFIG.reconnectDelay);
+      const desc = formatRuleDescription(rule);
+      const threadTs = body.message?.thread_ts || body.container?.thread_ts;
+      if (threadTs) {
+        const ctx = ruleRefinementThreads.get(threadTs);
+        if (ctx && ctx.ruleId !== ruleId) {
+          reticleDb.deactivateRule(followupsDbConn, ctx.ruleId);
+        }
+        ruleRefinementThreads.delete(threadTs);
+      }
+      await client.chat.postMessage({ channel, text: `✓ Rule created: ${rule.rule_type} when ${desc}`, unfurl_links: false });
+    } else {
+      await client.chat.postMessage({ channel, text: '✗ Rule not found', unfurl_links: false });
+    }
   }
-}
+});
 
-/**
- * Main
- */
+app.action('try_again_refine', async ({ ack, body, client }) => {
+  await ack();
+  const { channel } = parseActionContext(body);
+  await client.chat.postMessage({ channel, text: 'Tell me how you\'d like to adjust the rule:', thread_ts: body.actions[0].value, unfurl_links: false });
+});
+
+app.action('confirm_domain_rule', async ({ ack, body, client }) => {
+  await ack();
+  const { channel } = parseActionContext(body);
+  const [ruleType, domain, sourceEmail, sourceSubject] = (body.actions[0].value || '').split('|');
+  if (followupsDbConn && ruleType && domain) {
+    reticleDb.createRule(followupsDbConn, accountId, {
+      rule_type: ruleType, match_from_domain: domain,
+      source_email: sourceEmail || null, source_subject: sourceSubject || null
+    });
+    await client.chat.postMessage({ channel, text: `✓ Rule created: ${ruleType} when FROM DOMAIN @${domain}`, unfurl_links: false });
+  }
+});
+
+app.action('cancel_domain_rule', async ({ ack, body, client }) => {
+  await ack();
+  const { channel } = parseActionContext(body);
+  await client.chat.postMessage({ channel, text: '✓ Domain rule cancelled.', unfurl_links: false });
+});
+
+app.action('feedback_delivered', async ({ ack, body, client }) => {
+  await ack();
+  const { channel } = parseActionContext(body);
+  const feedbackTracker = require('./lib/feedback-tracker');
+  if (followupsDbConn) {
+    const val = body.actions[0].value ? JSON.parse(body.actions[0].value) : {};
+    feedbackTracker.logFeedbackAction(followupsDbConn, accountId, {
+      reportName: val.report || 'unknown', feedbackType: val.feedbackType || 'unknown',
+      action: 'feedback_delivered', entityId: val.entityId || ''
+    });
+    if (val.entityId) {
+      followupsDbConn.prepare('UPDATE feedback_candidates SET status = ? WHERE entity_id = ?').run('delivered', val.entityId);
+    }
+  }
+  await client.chat.postMessage({ channel, text: '✓ Feedback marked as delivered', unfurl_links: false });
+});
+
+app.action('feedback_skipped', async ({ ack, body, client }) => {
+  await ack();
+  const { channel } = parseActionContext(body);
+  const feedbackTracker = require('./lib/feedback-tracker');
+  if (followupsDbConn) {
+    const val = body.actions[0].value ? JSON.parse(body.actions[0].value) : {};
+    feedbackTracker.logFeedbackAction(followupsDbConn, accountId, {
+      reportName: val.report || 'unknown', feedbackType: val.feedbackType || 'unknown',
+      action: 'feedback_skipped', entityId: val.entityId || ''
+    });
+    if (val.entityId) {
+      followupsDbConn.prepare('UPDATE feedback_candidates SET status = ? WHERE entity_id = ?').run('skipped', val.entityId);
+    }
+  }
+  await client.chat.postMessage({ channel, text: '✓ Feedback marked as skipped', unfurl_links: false });
+});
+
+// ── Main ─────────────────────────────────────────────────────────────
+
 async function main() {
-  log.info({ responseTimeoutMin: CONFIG.responseTimeout / 60000 }, 'Slack Events Monitor starting');
+  log.info({ responseTimeoutMin: CONFIG.responseTimeout / 60000 }, 'Slack Events Monitor starting (Bolt.js)');
 
   // Clean old cache files
   emailCache.cleanOldCache();
-
-  // Show cache stats
   const stats = emailCache.getCacheStats();
   log.info({ cacheCount: stats.count, cacheSizeMB: stats.totalSizeMB }, 'Email cache stats');
 
-  // Get my user ID
-  CONFIG.myUserId = await getMyUserId();
-  log.info({ myUserId: CONFIG.myUserId }, 'Authenticated with Slack');
-
-  // Validate prerequisites before proceeding
+  // Validate prerequisites
   const validation = validatePrerequisites('slack-events', [
     { type: 'file', path: path.join(config.configDir, 'secrets.json'), description: 'Reticle secrets (Slack tokens)' },
     { type: 'database', path: reticleDb.DB_PATH, description: 'Reticle database' }
@@ -1391,14 +1057,11 @@ async function main() {
     process.exit(1);
   }
 
-  // Initialize follow-ups database
+  // Initialize database
   try {
     followupsDbConn = reticleDb.initDatabase();
     const primaryAccount = reticleDb.upsertAccount(followupsDbConn, {
-      email: config.gmailAccount,
-      provider: 'gmail',
-      display_name: 'Primary',
-      is_primary: 1
+      email: config.gmailAccount, provider: 'gmail', display_name: 'Primary', is_primary: 1
     });
     accountId = primaryAccount.id;
     log.info('Reticle DB initialized');
@@ -1406,26 +1069,84 @@ async function main() {
     log.error({ err: error }, 'Failed to init follow-ups DB');
   }
 
+  // Check Agent SDK availability (requires claude CLI)
+  try {
+    const claudePath = process.env.HOME + '/.local/bin/claude';
+    if (fs.existsSync(claudePath)) {
+      execSync(`${claudePath} --version`, { stdio: 'pipe', timeout: 5000 });
+      agentAvailable = true;
+      log.info('Claude CLI found — conversational agent enabled');
+    } else {
+      // Try PATH as fallback
+      execSync('claude --version', { stdio: 'pipe', timeout: 5000 });
+      agentAvailable = true;
+      log.info('Claude CLI found (PATH) — conversational agent enabled');
+    }
+  } catch (err) {
+    log.warn('Claude CLI not found — running without conversational agent');
+  }
+
   // Load state
   loadState();
 
-  // Connect to Socket Mode
-  await connectSocketMode(followupsDbConn);
+  // Authenticate and resolve user IDs
+  try {
+    const authResult = await app.client.auth.test();
+    CONFIG.myUserId = authResult.user_id;
+    log.info({ myUserId: CONFIG.myUserId, user: authResult.user }, 'Authenticated with Slack');
 
-  // Start timeout checker
+    // If using user token, also resolve the bot's ID for echo filtering
+    if (config.slackBotToken && config.slackUserToken) {
+      try {
+        const https = require('https');
+        const botAuth = await new Promise((resolve, reject) => {
+          const req = https.request({
+            hostname: 'slack.com', path: '/api/auth.test', method: 'POST',
+            headers: { 'Authorization': `Bearer ${config.slackBotToken}`, 'Content-Type': 'application/x-www-form-urlencoded' }
+          }, res => { let d = ''; res.on('data', c => d += c); res.on('end', () => resolve(JSON.parse(d))); });
+          req.on('error', reject); req.end();
+        });
+        if (botAuth.ok) {
+          CONFIG.botUserId = botAuth.user_id;
+          log.info({ botUserId: CONFIG.botUserId }, 'Resolved bot user ID for echo filtering');
+        }
+      } catch (err) {
+        log.warn({ err }, 'Could not resolve bot user ID — bot echo filtering may not work');
+      }
+    } else {
+      // Using bot token directly — bot IS the authenticated user
+      CONFIG.botUserId = CONFIG.myUserId;
+    }
+  } catch (err) {
+    log.fatal({ err }, 'Failed to authenticate with Slack');
+    process.exit(1);
+  }
+
+  // Start Bolt app (Socket Mode)
+  await app.start();
+  log.info('Bolt.js Socket Mode connected');
+
+  // Heartbeat
+  heartbeat.write('slack-events', { checkInterval: 30000, status: 'ok' });
+  heartbeatInterval = setInterval(() => {
+    heartbeat.write('slack-events', { checkInterval: 30000, status: 'ok' });
+  }, 30000);
+
+  // Timeout checker
   setInterval(async () => {
     log.debug('Checking for message timeouts');
-    await checkTimeouts();
+    await checkTimeouts(app.client);
   }, CONFIG.checkInterval);
 }
 
-// Handle graceful shutdown
-function shutdown(signal) {
+// ── Shutdown ─────────────────────────────────────────────────────────
+
+async function shutdown(signal) {
   heartbeat.write('slack-events', { checkInterval: 30000, status: 'shutting-down' });
   log.info({ signal }, 'Received signal, shutting down');
   saveState();
-  if (ws) ws.close();
-  if (reconnectTimeout) clearTimeout(reconnectTimeout);
+  if (heartbeatInterval) clearInterval(heartbeatInterval);
+  try { await app.stop(); } catch (_) {}
   process.exit(0);
 }
 
