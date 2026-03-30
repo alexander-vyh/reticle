@@ -1,6 +1,7 @@
 import AppKit
 import Foundation
 import CoreAudio
+import AudioToolbox
 import os
 
 /// Orchestrates audio recording sessions: manages CoreAudioRecorder, Python live transcription
@@ -23,6 +24,7 @@ final class RecorderDaemon {
     private var zombieWatchdogTimer: DispatchSourceTimer?
     private(set) var wasAutoStopped = false
     private var appTerminationObserver: NSObjectProtocol?
+    private var appLaunchObserver: NSObjectProtocol?
 
     // File-based health heartbeat (separate from SSE heartbeat above)
     private var fileHeartbeatTimer: DispatchSourceTimer?
@@ -30,6 +32,9 @@ final class RecorderDaemon {
     private var errorCount: Int = 0
     private var lastError: String?
     private var lastErrorAt: Double?
+
+    // Mic WAV output (ExtAudioFile for writing mic audio)
+    private var micAudioFile: ExtAudioFileRef?
 
     // Capture session state (hotkey voice capture)
     private var activeCaptureSession: CaptureSession?
@@ -57,6 +62,7 @@ final class RecorderDaemon {
         let startTime: Date
         let deviceID: AudioDeviceID
         let wavPath: String
+        let micWavPath: String?  // Separate WAV for user's mic audio
         let pythonProcess: Process?
         let pythonStdinPipe: Pipe?
         let captureMode: String  // "tap" or "fallback"
@@ -75,12 +81,14 @@ final class RecorderDaemon {
         httpServer = HTTPServer(port: port, daemon: self)
         httpServer?.start()
         startFileHeartbeat()
+        startCptHostLaunchObserver()
     }
 
     func stop() {
         if activeSession != nil {
             stopRecording()
         }
+        stopCptHostLaunchObserver()
         stopFileHeartbeat()
         httpServer?.stop()
     }
@@ -206,10 +214,12 @@ final class RecorderDaemon {
         }
 
         // Start mic monitor for self/others detection
+        var micStarted = false
         let micDeviceID = resolveMicDevice()
         if micDeviceID != 0 && micDeviceID != deviceID {
             do {
                 try micMonitor.start(deviceID: micDeviceID)
+                micStarted = true
             } catch {
                 logger.warning("Mic monitor failed to start: \(error.localizedDescription). Self/others detection disabled.")
             }
@@ -217,14 +227,34 @@ final class RecorderDaemon {
             logger.warning("Mic device is same as capture device (\(deviceID)). Self/others detection may be inaccurate.")
             do {
                 try micMonitor.start(deviceID: micDeviceID)
+                micStarted = true
             } catch {
                 logger.warning("Mic monitor failed to start: \(error.localizedDescription). Self/others detection disabled.")
             }
         } else if micDeviceID != 0 {
             do {
                 try micMonitor.start(deviceID: micDeviceID)
+                micStarted = true
             } catch {
                 logger.warning("Mic monitor failed to start: \(error.localizedDescription). Self/others detection disabled.")
+            }
+        }
+
+        // Set up mic WAV output for user's own voice
+        var micWavPath: String? = nil
+        if micStarted {
+            let micWavFilename = "meeting-\(meetingId)-\(dateStr)-mic.wav"
+            let micPath = "\(config.resolvedRecordingsDir)/\(micWavFilename)"
+            let micURL = URL(fileURLWithPath: micPath)
+
+            if let file = createMicWavFile(at: micURL) {
+                micAudioFile = file
+                micWavPath = micPath
+
+                micMonitor.onAudioChunk = { [weak self] data in
+                    self?.writeMicAudioChunk(data)
+                }
+                logger.notice("Mic WAV output enabled: \(micWavFilename)")
             }
         }
 
@@ -241,6 +271,7 @@ final class RecorderDaemon {
             startTime: Date(),
             deviceID: deviceID,
             wavPath: wavPath,
+            micWavPath: micWavPath,
             pythonProcess: pythonProcess,
             pythonStdinPipe: stdinPipe,
             captureMode: captureMode,
@@ -288,9 +319,11 @@ final class RecorderDaemon {
         liveStore?.removeAllSubscribers()
         liveStore = nil
 
-        // Stop mic monitor
+        // Stop mic monitor and close mic WAV
+        micMonitor.onAudioChunk = nil
         micMonitor.stop()
         micMonitor.clearHistory()
+        closeMicWavFile()
 
         // Stop heartbeat
         stopHeartbeat()
@@ -315,6 +348,88 @@ final class RecorderDaemon {
 
         logger.notice("Recording stopped. WAV at \(session.wavPath)")
         return session.wavPath
+    }
+
+    // MARK: - Mic WAV Output
+
+    /// Create an ExtAudioFile for writing mic audio (16kHz mono Int16 WAV).
+    private func createMicWavFile(at url: URL) -> ExtAudioFileRef? {
+        if FileManager.default.fileExists(atPath: url.path) {
+            try? FileManager.default.removeItem(at: url)
+        }
+
+        var format = AudioStreamBasicDescription(
+            mSampleRate: 16000.0,
+            mFormatID: kAudioFormatLinearPCM,
+            mFormatFlags: kAudioFormatFlagIsSignedInteger | kAudioFormatFlagIsPacked,
+            mBytesPerPacket: 2,
+            mFramesPerPacket: 1,
+            mBytesPerFrame: 2,
+            mChannelsPerFrame: 1,
+            mBitsPerChannel: 16,
+            mReserved: 0
+        )
+
+        var fileRef: ExtAudioFileRef?
+        let status = ExtAudioFileCreateWithURL(
+            url as CFURL,
+            kAudioFileWAVEType,
+            &format,
+            nil,
+            AudioFileFlags.eraseFile.rawValue,
+            &fileRef
+        )
+
+        guard status == noErr, let file = fileRef else {
+            logger.error("Failed to create mic WAV file at \(url.path): \(status)")
+            return nil
+        }
+
+        var clientFormat = format
+        let setStatus = ExtAudioFileSetProperty(
+            file,
+            kExtAudioFileProperty_ClientDataFormat,
+            UInt32(MemoryLayout<AudioStreamBasicDescription>.size),
+            &clientFormat
+        )
+
+        guard setStatus == noErr else {
+            ExtAudioFileDispose(file)
+            logger.error("Failed to set client format on mic WAV file: \(setStatus)")
+            return nil
+        }
+
+        return file
+    }
+
+    /// Write a chunk of Int16 PCM data to the mic WAV file.
+    private func writeMicAudioChunk(_ data: Data) {
+        guard let file = micAudioFile else { return }
+
+        let frameCount = UInt32(data.count / MemoryLayout<Int16>.size)
+        data.withUnsafeBytes { rawBuffer in
+            guard let baseAddress = rawBuffer.baseAddress else { return }
+            var bufferList = AudioBufferList(
+                mNumberBuffers: 1,
+                mBuffers: AudioBuffer(
+                    mNumberChannels: 1,
+                    mDataByteSize: UInt32(data.count),
+                    mData: UnsafeMutableRawPointer(mutating: baseAddress)
+                )
+            )
+            let status = ExtAudioFileWrite(file, frameCount, &bufferList)
+            if status != noErr {
+                logger.error("ExtAudioFileWrite (mic) failed: \(status)")
+            }
+        }
+    }
+
+    /// Close and dispose of the mic WAV file.
+    private func closeMicWavFile() {
+        if let file = micAudioFile {
+            ExtAudioFileDispose(file)
+            micAudioFile = nil
+        }
     }
 
     // MARK: - Audio Source Resolution
@@ -646,6 +761,52 @@ final class RecorderDaemon {
         }
     }
 
+    // MARK: - Ad-hoc Call Detection (CptHost)
+
+    /// Watch for Zoom's CptHost process launch — indicates user joined a meeting.
+    /// CptHost only runs during active Zoom calls, not when Zoom is idle.
+    private func startCptHostLaunchObserver() {
+        appLaunchObserver = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didLaunchApplicationNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] notification in
+            guard let self = self,
+                  let app = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication,
+                  let name = app.localizedName,
+                  name == "CptHost" else { return }
+
+            // Already recording (calendar-triggered or another ad-hoc) — skip
+            guard self.activeSession == nil else {
+                self.logger.info("CptHost launched but already recording — skipping ad-hoc start")
+                return
+            }
+
+            self.logger.notice("CptHost launched — ad-hoc Zoom call detected, starting recording")
+            let meetingId = "adhoc-zoom-\(Int(Date().timeIntervalSince1970))"
+            do {
+                try self.startRecording(
+                    meetingId: meetingId,
+                    title: "Zoom — Ad-hoc",
+                    attendees: [],
+                    startTime: nil,
+                    endTime: nil,
+                    deviceHint: nil
+                )
+            } catch {
+                self.logger.error("Failed to start ad-hoc recording: \(error.localizedDescription)")
+            }
+        }
+        logger.notice("CptHost launch observer active — ad-hoc Zoom calls will be auto-recorded")
+    }
+
+    private func stopCptHostLaunchObserver() {
+        if let observer = appLaunchObserver {
+            NSWorkspace.shared.notificationCenter.removeObserver(observer)
+            appLaunchObserver = nil
+        }
+    }
+
     // MARK: - Voice Capture (Hotkey)
 
     func startCapture(mode: String, source: String) throws -> String {
@@ -840,6 +1001,13 @@ final class RecorderDaemon {
         ]
         if config.language != "auto" {
             process.arguments?.append(contentsOf: ["--language", config.language])
+        }
+
+        // Pass mic WAV for dual-stream transcription (user's own voice)
+        if let micPath = session.micWavPath,
+           FileManager.default.fileExists(atPath: micPath) {
+            process.arguments?.append(contentsOf: ["--mic-wav", micPath])
+            logger.notice("Post-processor will include mic audio: \(micPath)")
         }
 
         // Capture stdout for transcript path output

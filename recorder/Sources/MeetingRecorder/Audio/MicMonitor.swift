@@ -16,6 +16,27 @@ final class MicMonitor {
     private var renderBuffer: UnsafeMutablePointer<Float32>?
     private var renderBufferSize: UInt32 = 0
 
+    // Conversion buffer (Float32 -> Int16 16kHz mono)
+    private var conversionBuffer: UnsafeMutablePointer<Int16>?
+    private var conversionBufferSize: UInt32 = 0
+
+    // Output format: 16kHz mono Int16 (matches ProcessTapCapture)
+    private let outputFormat = AudioStreamBasicDescription(
+        mSampleRate: 16000.0,
+        mFormatID: kAudioFormatLinearPCM,
+        mFormatFlags: kAudioFormatFlagIsSignedInteger | kAudioFormatFlagIsPacked,
+        mBytesPerPacket: 2,
+        mFramesPerPacket: 1,
+        mBytesPerFrame: 2,
+        mChannelsPerFrame: 1,
+        mBitsPerChannel: 16,
+        mReserved: 0
+    )
+
+    /// Called on the audio thread with raw PCM data (16-bit, 16kHz, mono) for streaming.
+    /// Same interface as ProcessTapCapture.onAudioChunk and CoreAudioRecorder.onAudioChunk.
+    var onAudioChunk: ((_ data: Data) -> Void)?
+
     // Thread-safe VAD state
     private let lock = NSLock()
     private var _rmsEnergy: Float = 0.0
@@ -123,6 +144,12 @@ final class MicMonitor {
         renderBuffer = UnsafeMutablePointer<Float32>.allocate(capacity: Int(bufferSamples))
         renderBufferSize = bufferSamples
 
+        // Allocate conversion buffer (account for sample rate difference)
+        let ratio = outputFormat.mSampleRate / max(deviceFormat.mSampleRate, 1.0)
+        let maxOutputFrames = UInt32(Double(maxFrames) * ratio) + 1
+        conversionBuffer = UnsafeMutablePointer<Int16>.allocate(capacity: Int(maxOutputFrames))
+        conversionBufferSize = maxOutputFrames
+
         // Set callback
         var callbackStruct = AURenderCallbackStruct(
             inputProc: micInputCallback,
@@ -156,6 +183,10 @@ final class MicMonitor {
         renderBuffer?.deallocate()
         renderBuffer = nil
         renderBufferSize = 0
+
+        conversionBuffer?.deallocate()
+        conversionBuffer = nil
+        conversionBufferSize = 0
     }
 
     /// Check if self was speaking during a time window (relative to recording start).
@@ -240,6 +271,61 @@ final class MicMonitor {
                 _vadHistory.removeFirst(_vadHistory.count - 60_000)
             }
             historyLock.unlock()
+        }
+
+        // Convert Float32 -> Int16 16kHz mono and send to callback
+        if let onAudioChunk = onAudioChunk, let outputBuffer = conversionBuffer {
+            let inputSampleRate = deviceFormat.mSampleRate
+            let outputSampleRate = outputFormat.mSampleRate
+            let inputChannels = Int(channelCount)
+
+            let ratio = outputSampleRate / inputSampleRate
+            let outputFrameCount = UInt32(Double(inNumberFrames) * ratio)
+
+            guard outputFrameCount > 0, outputFrameCount <= conversionBufferSize else {
+                return noErr
+            }
+
+            if inputSampleRate == outputSampleRate {
+                // No resampling needed — just mix to mono and convert
+                for i in 0..<Int(inNumberFrames) {
+                    var sample: Float32 = 0
+                    for ch in 0..<inputChannels {
+                        sample += samples[i * inputChannels + ch]
+                    }
+                    sample /= Float32(inputChannels)
+                    let scaled = sample * 32767.0
+                    let clipped = max(-32768.0, min(32767.0, scaled))
+                    outputBuffer[i] = Int16(clipped)
+                }
+            } else {
+                // Downsample with linear interpolation (e.g. 48kHz -> 16kHz)
+                for i in 0..<Int(outputFrameCount) {
+                    let inputIndex = Double(i) / ratio
+                    let inputIndexInt = Int(inputIndex)
+                    let frac = Float32(inputIndex - Double(inputIndexInt))
+
+                    let idx1 = min(inputIndexInt, Int(inNumberFrames) - 1)
+                    let idx2 = min(inputIndexInt + 1, Int(inNumberFrames) - 1)
+
+                    var sample: Float32 = 0
+                    for ch in 0..<inputChannels {
+                        let s1 = samples[idx1 * inputChannels + ch]
+                        let s2 = samples[idx2 * inputChannels + ch]
+                        sample += s1 + frac * (s2 - s1)
+                    }
+                    sample /= Float32(inputChannels)
+
+                    let scaled = sample * 32767.0
+                    let clipped = max(-32768.0, min(32767.0, scaled))
+                    outputBuffer[i] = Int16(clipped)
+                }
+            }
+
+            let actualFrames = (inputSampleRate == outputSampleRate) ? inNumberFrames : outputFrameCount
+            let byteCount = Int(actualFrames) * MemoryLayout<Int16>.size
+            let chunkData = Data(bytes: outputBuffer, count: byteCount)
+            onAudioChunk(chunkData)
         }
 
         return noErr

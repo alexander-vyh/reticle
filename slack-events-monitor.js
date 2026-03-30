@@ -18,9 +18,11 @@ const orgMemoryDb = require('./lib/org-memory-db');
 const slackCapture = require('./lib/slack-capture');
 const slackReader = require('./lib/slack-reader');
 const { trackSlackConversation: _trackSlackConversation } = require('./lib/conversation-tracker');
-const { query: agentQuery } = require('@anthropic-ai/claude-agent-sdk');
-const { createReticleMcpServer } = require('./lib/reticle-mcp-server');
+// Agent SDK and MCP server loaded lazily in main() — don't crash if missing
+let agentQuery = null;
+let createReticleMcpServer = null;
 
+const http = require('http');
 const os = require('os');
 const path = require('path');
 const config = require('./lib/config');
@@ -768,6 +770,53 @@ app.event('app_mention', async ({ event, client }) => {
   await trackMessage(client, event.channel, event.ts, event.user, event.text, 'mention');
 });
 
+// Handle Slack huddle start/end for ad-hoc recording
+app.event('user_huddle_changed', async ({ event }) => {
+  // Only care about our own huddle state
+  if (event.user?.id !== config.slackUserId) return;
+
+  const huddleState = event.user?.profile?.huddle_state;
+  const callId = event.user?.profile?.huddle_state_call_id;
+
+  if (huddleState === 'in_a_huddle') {
+    log.info({ callId }, 'Huddle started — triggering recording');
+    try {
+      const body = JSON.stringify({
+        meetingId: `huddle-${callId || Date.now()}`,
+        title: 'Slack Huddle',
+        attendees: [],
+      });
+      const req = http.request({
+        hostname: '127.0.0.1', port: 9847, path: '/start', method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) },
+      }, (res) => {
+        let data = '';
+        res.on('data', (c) => { data += c; });
+        res.on('end', () => log.info({ resp: data }, 'Recorder start response'));
+      });
+      req.on('error', (err) => log.warn({ err }, 'Recorder not available for huddle'));
+      req.setTimeout(3000, () => req.destroy());
+      req.write(body);
+      req.end();
+    } catch (err) {
+      log.warn({ err }, 'Failed to trigger huddle recording');
+    }
+  } else {
+    log.info({ callId }, 'Huddle ended — stopping recording');
+    try {
+      const req = http.request({
+        hostname: '127.0.0.1', port: 9847, path: '/stop', method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+      });
+      req.on('error', (err) => log.warn({ err }, 'Recorder not available for huddle stop'));
+      req.setTimeout(3000, () => req.destroy());
+      req.end();
+    } catch (err) {
+      log.warn({ err }, 'Failed to stop huddle recording');
+    }
+  }
+});
+
 // ── Bolt Interactive Handlers ────────────────────────────────────────
 
 // Helper: parse action context from interactive payload
@@ -1040,21 +1089,23 @@ async function main() {
     log.error({ err: error }, 'Failed to init follow-ups DB');
   }
 
-  // Check Agent SDK availability (requires claude CLI)
+  // Load Agent SDK and MCP server lazily
   try {
+    agentQuery = require('@anthropic-ai/claude-agent-sdk').query;
+    createReticleMcpServer = require('./lib/reticle-mcp-server').createReticleMcpServer;
+
     const claudePath = process.env.HOME + '/.local/bin/claude';
     if (fs.existsSync(claudePath)) {
       execSync(`${claudePath} --version`, { stdio: 'pipe', timeout: 5000 });
       agentAvailable = true;
       log.info('Claude CLI found — conversational agent enabled');
     } else {
-      // Try PATH as fallback
       execSync('claude --version', { stdio: 'pipe', timeout: 5000 });
       agentAvailable = true;
       log.info('Claude CLI found (PATH) — conversational agent enabled');
     }
   } catch (err) {
-    log.warn('Claude CLI not found — running without conversational agent');
+    log.warn({ err: err.message }, 'Agent SDK not available — running without conversational agent');
   }
 
   // Load state

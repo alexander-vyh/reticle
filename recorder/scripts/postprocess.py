@@ -59,6 +59,11 @@ def parse_args():
         action="store_true",
         help="Enable Ollama LLM correction pass (slow)",
     )
+    p.add_argument(
+        "--mic-wav",
+        default=None,
+        help="Path to mic WAV recording (user's own voice, transcribed separately)",
+    )
     return p.parse_args()
 
 
@@ -466,6 +471,25 @@ def apply_llm_corrections(segments: list[dict]) -> list[dict]:
     return segments
 
 
+def whisper_segments_to_canonical(whisper_result: dict, speaker: str) -> list[dict]:
+    """Convert raw Whisper result segments to canonical {start, end, text, speaker} format.
+
+    Used for mic transcription where diarization is unnecessary (single speaker).
+    """
+    segments = []
+    for seg in whisper_result.get("segments", []):
+        text = seg.get("text", "").strip()
+        if not text:
+            continue
+        segments.append({
+            "start": round(seg["start"], 2),
+            "end": round(seg["end"], 2),
+            "text": text,
+            "speaker": speaker,
+        })
+    return segments
+
+
 def build_output(
     segments: list[dict],
     speaker_info: list[dict],
@@ -566,7 +590,28 @@ def main():
     if args.enable_llm_corrections:
         segments = apply_llm_corrections(segments)
 
-    # Step 7: Build and write output
+    # Step 7: Mic transcription (if --mic-wav provided)
+    if args.mic_wav and Path(args.mic_wav).exists():
+        log.info("Processing mic audio: %s", args.mic_wav)
+        if check_audio_present(args.mic_wav):
+            mic_result = transcribe_audio(args.mic_wav, args.model, args.language)
+            # Speaker label for mic segments: "Self" unless metadata provides a name
+            mic_speaker = metadata.get("selfName", "Self")
+            mic_segments = whisper_segments_to_canonical(mic_result, mic_speaker)
+            # Apply dictionary corrections to mic segments too
+            if not args.skip_corrections:
+                mic_segments = apply_corrections(mic_segments)
+            mic_words = sum(len(s["text"].split()) for s in mic_segments)
+            log.info("Mic transcription: %d segments, %d words (speaker: %s)",
+                     len(mic_segments), mic_words, mic_speaker)
+            # Merge: combine both segment lists and sort by start timestamp
+            segments = sorted(segments + mic_segments, key=lambda s: s["start"])
+        else:
+            log.warning("Mic WAV is silent, skipping mic transcription")
+    elif args.mic_wav:
+        log.warning("Mic WAV not found: %s", args.mic_wav)
+
+    # Step 8: Build and write output
     output = build_output(segments, speaker_info, metadata, wav_path, args.model)
 
     meeting_id = metadata.get("meetingId", "unknown")
