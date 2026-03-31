@@ -387,8 +387,9 @@ async function checkEscalations() {
     const threshold = CONFIG.thresholds.escalation[conv.type];
 
     // Escalate if older than threshold and we haven't escalated recently
+    // Uses escalated_at (not notified_at) so 4h-batch notifications don't suppress escalations
     if (age > threshold) {
-      const lastEscalation = conv.notified_at;
+      const lastEscalation = conv.escalated_at;
       return !lastEscalation || (now - lastEscalation) > 86400; // Re-escalate daily
     }
     return false;
@@ -412,7 +413,7 @@ async function checkEscalations() {
   log.warn({ count: escalated.length, items: escalated.map(c => ({ id: c.id, type: c.type, from: c.from_name || c.from_user })) }, 'Sent escalation notification');
 
   escalated.forEach(conv => {
-    reticleDb.markNotified(db, conv.id);
+    reticleDb.markEscalated(db, conv.id);
     reticleDb.logNotification(db, accountId, conv.id, 'escalation');
   });
 }
