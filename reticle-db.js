@@ -830,10 +830,10 @@ function markO3LatticeLogged(db, sessionId) {
 
 // --- Notifications ---
 
-function logNotification(db, accountId, conversationId, notificationType, channel = 'slack') {
-  db.prepare(`INSERT INTO notification_log (account_id, conversation_id, notification_type, channel)
-    VALUES (?, ?, ?, ?)`
-  ).run(accountId, conversationId, notificationType, channel);
+function logNotification(db, accountId, conversationId, notificationType, channel = 'slack', metadata = null) {
+  db.prepare(`INSERT INTO notification_log (account_id, conversation_id, notification_type, channel, metadata)
+    VALUES (?, ?, ?, ?, ?)`
+  ).run(accountId, conversationId, notificationType, channel, metadata ? JSON.stringify(metadata) : null);
 }
 
 function markNotified(db, conversationId) {
