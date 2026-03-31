@@ -13,6 +13,8 @@ struct PersonDetailView: View {
         VStack(alignment: .leading, spacing: 0) {
             // Identity header
             HStack(spacing: 12) {
+                AnchorIndicator(isAnchored: entity.isAnchored)
+
                 VStack(alignment: .leading, spacing: 4) {
                     if let slackId = entity.slackId {
                         IdentityBadge(label: "Slack", value: slackId)
