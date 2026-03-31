@@ -1045,7 +1045,10 @@ assert.deepStrictEqual(meetingTables, [
 console.log('PASS: meeting tables created');
 
 // --- Test: createMeeting + getMeeting ---
-const nowMeeting = Math.floor(Date.now() / 1000);
+// Use local noon to avoid date-boundary flakes near midnight
+const meetingNoon = new Date();
+meetingNoon.setHours(12, 0, 0, 0);
+const nowMeeting = Math.floor(meetingNoon.getTime() / 1000);
 const meeting = reticleDb.createMeeting(db, {
   id: 'test-meeting-001',
   title: 'Weekly Standup',
@@ -1073,8 +1076,23 @@ assert.ok(meetings.length >= 1);
 console.log('PASS: listMeetings');
 
 // --- Test: getTodaysMeetings ---
+// Create a meeting guaranteed to be "today" regardless of time-of-day by using local noon
+const todayNoon = new Date();
+todayNoon.setHours(12, 0, 0, 0);
+const noonEpoch = Math.floor(todayNoon.getTime() / 1000);
+reticleDb.createMeeting(db, {
+  id: 'test-meeting-today',
+  title: 'Today Check',
+  startTime: noonEpoch,
+  endTime: noonEpoch + 1800,
+  durationSec: 1800,
+  attendeeEmails: ['test@co.com'],
+  captureMode: 'tap',
+  transcriptPath: '/tmp/today.json',
+  wavPath: '/tmp/today.wav'
+});
 const todayMeetings = reticleDb.getTodaysMeetings(db);
-assert.ok(todayMeetings.length >= 1);
+assert.ok(todayMeetings.some(m => m.id === 'test-meeting-today'), 'meeting at local noon should appear in today list');
 console.log('PASS: getTodaysMeetings');
 
 // --- Test: saveMeetingSummary + getMeetingSummary ---
