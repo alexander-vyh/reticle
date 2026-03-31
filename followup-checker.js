@@ -200,9 +200,9 @@ async function checkImmediate() {
  * Build EOD email section for the 4-hour batch notification
  * Returns null if nothing noteworthy to report (conditional suppression)
  */
-function buildEODSection(db) {
+function buildEODSection(db, allPending) {
   const now = Math.floor(Date.now() / 1000);
-  const pendingEmails = reticleDb.getPendingResponses(db, accountId, { type: 'email' });
+  const pendingEmails = allPending.filter(c => c.type === 'email');
   const respondedTodayCount = reticleDb.getResolvedToday(db, accountId, 'email').length;
 
   // Split pending into urgent vs non-urgent by parsing metadata
@@ -271,15 +271,15 @@ function buildEODSection(db) {
 /**
  * Check for 4-hour batch items
  */
-async function check4Hour() {
+async function check4Hour(allPending) {
   const now = Math.floor(Date.now() / 1000);
+  const olderThan = CONFIG.thresholds.batch4h.slackDm;
+  const threshold = now - olderThan;
 
-  // Get items older than 4 hours that haven't been notified recently
-  const pending = reticleDb.getPendingResponses(db, accountId, {
-    olderThan: CONFIG.thresholds.batch4h.slackDm
-  }).filter(conv => {
-    // Only notify if we haven't notified in the last 4 hours
-    return !conv.notified_at || (now - conv.notified_at) > CONFIG.thresholds.batch4h.slackDm;
+  // Filter in-memory: older than 4h and not notified recently
+  const pending = allPending.filter(conv => {
+    return conv.last_activity < threshold &&
+      (!conv.notified_at || (now - conv.notified_at) > olderThan);
   });
 
   const dms = pending.filter(c => c.type === 'slack-dm');
@@ -315,7 +315,7 @@ async function check4Hour() {
   const hour = new Date().getHours();
   const today = new Date().toDateString();
   if (hour >= 17 && lastEodDate !== today) {
-    const eodSection = buildEODSection(db);
+    const eodSection = buildEODSection(db, allPending);
     if (eodSection) {
       if (!hasContent) message = '📊 *End-of-Day Summary*';
       message += eodSection;
@@ -332,17 +332,25 @@ async function check4Hour() {
   await sendSlackDM(message);
   log.info({ count: pending.length, dms: dms.length, mentions: mentions.length, eod: hour >= 17 }, 'Sent 4-hour batch notification');
 
-  // Mark as notified
+  // Mark individual conversations as notified (for dedup filtering)
   pending.forEach(conv => {
     reticleDb.markNotified(db, conv.id);
-    reticleDb.logNotification(db, accountId, conv.id, '4h-batch');
   });
+
+  // Log one row per batch sent (not per conversation)
+  if (pending.length > 0) {
+    reticleDb.logNotification(db, accountId, pending[0].id, '4h-batch', 'slack', {
+      batchSize: pending.length,
+      dms: dms.length,
+      mentions: mentions.length
+    });
+  }
 }
 
 /**
  * Send daily digest
  */
-async function checkDaily() {
+async function checkDaily(allPending) {
   const now = new Date();
   const hour = now.getHours();
 
@@ -353,7 +361,7 @@ async function checkDaily() {
   const today = now.toISOString().split('T')[0];
   if (lastDailyDigest === today) return;
 
-  const pending = reticleDb.getPendingResponses(db, accountId);
+  const pending = allPending;
   const awaiting = reticleDb.getAwaitingReplies(db, accountId, {
     olderThan: CONFIG.thresholds.daily.email
   });
@@ -370,25 +378,34 @@ async function checkDaily() {
 
   lastDailyDigest = today;
 
-  // Mark as notified
+  // Mark individual conversations as notified (prevents immediate re-notification in 4h-batch)
   pending.forEach(conv => {
-    reticleDb.logNotification(db, accountId, conv.id, 'daily-digest');
+    reticleDb.markNotified(db, conv.id);
   });
+
+  // Log one row per digest sent (not per conversation)
+  if (pending.length > 0) {
+    reticleDb.logNotification(db, accountId, pending[0].id, 'daily-digest', 'slack', {
+      pendingCount: pending.length,
+      awaitingCount: awaiting.length
+    });
+  }
 }
 
 /**
  * Check for escalations
  */
-async function checkEscalations() {
+async function checkEscalations(allPending) {
   const now = Math.floor(Date.now() / 1000);
 
-  const escalated = reticleDb.getPendingResponses(db, accountId).filter(conv => {
+  const escalated = allPending.filter(conv => {
     const age = now - conv.last_activity;
     const threshold = CONFIG.thresholds.escalation[conv.type];
 
     // Escalate if older than threshold and we haven't escalated recently
+    // Uses escalated_at (not notified_at) so 4h-batch notifications don't suppress escalations
     if (age > threshold) {
-      const lastEscalation = conv.notified_at;
+      const lastEscalation = conv.escalated_at;
       return !lastEscalation || (now - lastEscalation) > 86400; // Re-escalate daily
     }
     return false;
@@ -412,7 +429,7 @@ async function checkEscalations() {
   log.warn({ count: escalated.length, items: escalated.map(c => ({ id: c.id, type: c.type, from: c.from_name || c.from_user })) }, 'Sent escalation notification');
 
   escalated.forEach(conv => {
-    reticleDb.markNotified(db, conv.id);
+    reticleDb.markEscalated(db, conv.id);
     reticleDb.logNotification(db, accountId, conv.id, 'escalation');
   });
 }
@@ -421,15 +438,16 @@ async function checkEscalations() {
  * Main check loop
  */
 async function runChecks() {
-  const pendingCount = reticleDb.getPendingResponses(db, accountId, {}).length;
+  // Fetch all pending conversations once per poll cycle (not per check function)
+  const allPending = reticleDb.getPendingResponses(db, accountId, {});
   const awaitingCount = reticleDb.getAwaitingReplies(db, accountId, {}).length;
-  log.info({ pendingCount, awaitingCount }, 'Running follow-up checks');
+  log.info({ pendingCount: allPending.length, awaitingCount }, 'Running follow-up checks');
 
   try {
     await checkImmediate();
-    await check4Hour();
-    await checkDaily();
-    await checkEscalations();
+    await check4Hour(allPending);
+    await checkDaily(allPending);
+    await checkEscalations(allPending);
 
     heartbeat.write('followup-checker', {
       checkInterval: CONFIG.checkInterval,

@@ -116,6 +116,7 @@ function initDatabase() {
       resolved_at   INTEGER,
       snoozed_until INTEGER,
       notified_at   INTEGER,
+      escalated_at  INTEGER,
       metadata      TEXT,
       created_at    INTEGER NOT NULL DEFAULT (strftime('%s','now')),
       updated_at    INTEGER NOT NULL DEFAULT (strftime('%s','now'))
@@ -360,6 +361,12 @@ function initDatabase() {
   }
   if (!mpCols.includes('team')) {
     db.exec('ALTER TABLE monitored_people ADD COLUMN team TEXT');
+  }
+
+  // Add escalated_at column to conversations if missing (added 2026-03-30)
+  const convCols = db.pragma('table_info(conversations)').map(c => c.name);
+  if (!convCols.includes('escalated_at')) {
+    db.exec('ALTER TABLE conversations ADD COLUMN escalated_at INTEGER');
   }
 
   // Add narration column to digest_snapshots if missing (added 2026-03-16)
@@ -823,15 +830,21 @@ function markO3LatticeLogged(db, sessionId) {
 
 // --- Notifications ---
 
-function logNotification(db, accountId, conversationId, notificationType, channel = 'slack') {
-  db.prepare(`INSERT INTO notification_log (account_id, conversation_id, notification_type, channel)
-    VALUES (?, ?, ?, ?)`
-  ).run(accountId, conversationId, notificationType, channel);
+function logNotification(db, accountId, conversationId, notificationType, channel = 'slack', metadata = null) {
+  db.prepare(`INSERT INTO notification_log (account_id, conversation_id, notification_type, channel, metadata)
+    VALUES (?, ?, ?, ?, ?)`
+  ).run(accountId, conversationId, notificationType, channel, metadata ? JSON.stringify(metadata) : null);
 }
 
 function markNotified(db, conversationId) {
   db.prepare(
     "UPDATE conversations SET notified_at = strftime('%s','now'), updated_at = strftime('%s','now') WHERE id = ?"
+  ).run(conversationId);
+}
+
+function markEscalated(db, conversationId) {
+  db.prepare(
+    "UPDATE conversations SET escalated_at = strftime('%s','now'), updated_at = strftime('%s','now') WHERE id = ?"
   ).run(conversationId);
 }
 
@@ -1063,6 +1076,7 @@ module.exports = {
   markO3LatticeLogged,
   logNotification,
   markNotified,
+  markEscalated,
   saveSnapshot,
   getLatestSnapshot,
   getSnapshotHistory,
