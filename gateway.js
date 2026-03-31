@@ -549,6 +549,14 @@ app.get('/api/entities', (req, res) => {
     identityByEntity[row.entity_id][row.source] = row.external_id;
   }
 
+  // Load aliases for all entities
+  const aliases = omDb.prepare('SELECT entity_id, alias FROM entity_aliases').all();
+  const aliasesByEntity = {};
+  for (const row of aliases) {
+    if (!aliasesByEntity[row.entity_id]) aliasesByEntity[row.entity_id] = [];
+    aliasesByEntity[row.entity_id].push(row.alias);
+  }
+
   const result = entities.map(e => ({
     id: e.id,
     canonicalName: e.canonical_name,
@@ -558,6 +566,7 @@ app.get('/api/entities', (req, res) => {
     slackId: identityByEntity[e.id]?.slack || null,
     jiraId: identityByEntity[e.id]?.jira || null,
     isAnchored: !!identityByEntity[e.id],
+    aliases: aliasesByEntity[e.id] || [],
   }));
 
   res.json({ entities: result });
@@ -598,6 +607,10 @@ app.get('/api/entities/:id', (req, res) => {
   const idMap = {};
   for (const row of identities) idMap[row.source] = row.external_id;
 
+  const entityAliases = omDb.prepare(
+    'SELECT alias FROM entity_aliases WHERE entity_id = ?'
+  ).all(req.params.id).map(r => r.alias);
+
   res.json({
     entity: {
       id: entity.id,
@@ -608,6 +621,7 @@ app.get('/api/entities/:id', (req, res) => {
       slackId: idMap.slack || null,
       jiraId: idMap.jira || null,
       isAnchored: Object.keys(idMap).length > 0,
+      aliases: entityAliases,
     }
   });
 });
@@ -671,14 +685,14 @@ app.get('/api/entities/:id/commitments', async (req, res) => {
 
 // POST /api/entities/:id/merge — merge source into target, reassign facts and identities
 app.post('/api/entities/:id/merge', (req, res) => {
-  const { targetId } = req.body;
+  const { targetId, preferredName } = req.body;
   if (!targetId) return res.status(400).json({ error: 'targetId required' });
   if (targetId === req.params.id) return res.status(400).json({ error: 'cannot merge entity into itself' });
 
   const omDb = getOrgMemDb();
-  const source = omDb.prepare('SELECT id FROM entities WHERE id = ?').get(req.params.id);
+  const source = omDb.prepare('SELECT id, canonical_name FROM entities WHERE id = ?').get(req.params.id);
   if (!source) return res.status(404).json({ error: 'source entity not found' });
-  const target = omDb.prepare('SELECT id FROM entities WHERE id = ?').get(targetId);
+  const target = omDb.prepare('SELECT id, canonical_name FROM entities WHERE id = ?').get(targetId);
   if (!target) return res.status(404).json({ error: 'target entity not found' });
 
   const now = Math.floor(Date.now() / 1000);
@@ -698,6 +712,38 @@ app.post('/api/entities/:id/merge', (req, res) => {
       } else {
         omDb.prepare('UPDATE identity_map SET entity_id = ? WHERE source = ? AND external_id = ?').run(targetId, row.source, row.external_id);
       }
+    }
+
+    // Move entity_aliases from source to target (skip duplicates)
+    const srcAliases = omDb.prepare('SELECT id, alias, alias_source FROM entity_aliases WHERE entity_id = ?').all(req.params.id);
+    for (const row of srcAliases) {
+      const existsOnTarget = omDb.prepare('SELECT 1 FROM entity_aliases WHERE entity_id = ? AND alias = ?').get(targetId, row.alias);
+      if (existsOnTarget) {
+        omDb.prepare('DELETE FROM entity_aliases WHERE id = ?').run(row.id);
+      } else {
+        omDb.prepare('UPDATE entity_aliases SET entity_id = ? WHERE id = ?').run(targetId, row.id);
+      }
+    }
+
+    // Preserve both canonical_names as aliases before they change.
+    // This ensures the merge never loses name history.
+    const crypto = require('crypto');
+    const namesToAlias = new Set();
+    namesToAlias.add(source.canonical_name);
+    namesToAlias.add(target.canonical_name);
+
+    for (const name of namesToAlias) {
+      const aliasExists = omDb.prepare('SELECT 1 FROM entity_aliases WHERE entity_id = ? AND alias = ?').get(targetId, name);
+      if (!aliasExists) {
+        omDb.prepare('INSERT INTO entity_aliases (id, entity_id, alias, alias_source) VALUES (?, ?, ?, ?)').run(
+          crypto.randomUUID(), targetId, name, 'merge'
+        );
+      }
+    }
+
+    // Set preferred name on target if provided
+    if (preferredName && typeof preferredName === 'string' && preferredName.trim()) {
+      omDb.prepare('UPDATE entities SET canonical_name = ? WHERE id = ?').run(preferredName.trim(), targetId);
     }
 
     // Deactivate source
