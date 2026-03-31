@@ -147,6 +147,7 @@ struct Entity: Codable, Identifiable, Hashable {
     let commitmentCount: Int
     let slackId: String?
     let jiraId: String?
+    let isAnchored: Bool
 }
 
 struct EntitiesResponse: Codable {

@@ -373,9 +373,11 @@ async function testEntitiesEndpoints() {
     assert.strictEqual(alice.monitored, false);
     assert.strictEqual(alice.commitmentCount, 2);
     assert.strictEqual(alice.slackId, 'U123');
+    assert.strictEqual(alice.isAnchored, true, 'Alice has identity_map entry, should be anchored');
     assert.strictEqual(bob.monitored, true);
     assert.strictEqual(bob.commitmentCount, 0);
-    console.log('  PASS: GET /api/entities returns entities with correct shape');
+    assert.strictEqual(bob.isAnchored, false, 'Bob has no identity_map entry, should be floating');
+    console.log('  PASS: GET /api/entities returns entities with correct shape and isAnchored');
 
     // Test 2: POST /api/entities/:id/monitor sets flag
     const monRes = await httpRequest(port, 'POST', '/api/entities/ent-a/monitor');
@@ -448,7 +450,8 @@ async function testEntityDetailAndMerge() {
     assert.strictEqual(detailRes.body.entity.id, 'src-1');
     assert.strictEqual(detailRes.body.entity.canonicalName, 'Gimli Stone');
     assert.strictEqual(detailRes.body.entity.slackId, 'USRC');
-    console.log('  PASS: GET /api/entities/:id returns entity shape');
+    assert.strictEqual(detailRes.body.entity.isAnchored, true, 'src-1 has identity_map entry, should be anchored');
+    console.log('  PASS: GET /api/entities/:id returns entity shape with isAnchored');
 
     // Test 2: GET /api/entities/:id/commitments returns that entity's open facts
     const comRes = await httpRequest(port, 'GET', '/api/entities/src-1/commitments');
@@ -480,7 +483,8 @@ async function testEntityDetailAndMerge() {
     // Target should have inherited slack identity
     const tgtDetail = await httpRequest(port, 'GET', '/api/entities/tgt-1');
     assert.strictEqual(tgtDetail.body.entity.slackId, 'USRC');
-    console.log('  PASS: POST /api/entities/:id/merge reassigns facts and identities');
+    assert.strictEqual(tgtDetail.body.entity.isAnchored, true, 'target inherited identity, should be anchored');
+    console.log('  PASS: POST /api/entities/:id/merge reassigns facts and identities with isAnchored');
 
     // Test 5: merge with invalid targetId returns 400
     const badMerge = await httpRequest(port, 'POST', '/api/entities/tgt-1/merge', { targetId: 'no-such' });

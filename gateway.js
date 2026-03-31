@@ -557,6 +557,7 @@ app.get('/api/entities', (req, res) => {
     commitmentCount: e.commitment_count,
     slackId: identityByEntity[e.id]?.slack || null,
     jiraId: identityByEntity[e.id]?.jira || null,
+    isAnchored: !!identityByEntity[e.id],
   }));
 
   res.json({ entities: result });
@@ -606,6 +607,7 @@ app.get('/api/entities/:id', (req, res) => {
       commitmentCount: entity.commitment_count,
       slackId: idMap.slack || null,
       jiraId: idMap.jira || null,
+      isAnchored: Object.keys(idMap).length > 0,
     }
   });
 });
