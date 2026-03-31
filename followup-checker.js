@@ -332,11 +332,19 @@ async function check4Hour() {
   await sendSlackDM(message);
   log.info({ count: pending.length, dms: dms.length, mentions: mentions.length, eod: hour >= 17 }, 'Sent 4-hour batch notification');
 
-  // Mark as notified
+  // Mark individual conversations as notified (for dedup filtering)
   pending.forEach(conv => {
     reticleDb.markNotified(db, conv.id);
-    reticleDb.logNotification(db, accountId, conv.id, '4h-batch');
   });
+
+  // Log one row per batch sent (not per conversation)
+  if (pending.length > 0) {
+    reticleDb.logNotification(db, accountId, pending[0].id, '4h-batch', 'slack', {
+      batchSize: pending.length,
+      dms: dms.length,
+      mentions: mentions.length
+    });
+  }
 }
 
 /**
@@ -370,10 +378,18 @@ async function checkDaily() {
 
   lastDailyDigest = today;
 
-  // Mark as notified
+  // Mark individual conversations as notified (prevents immediate re-notification in 4h-batch)
   pending.forEach(conv => {
-    reticleDb.logNotification(db, accountId, conv.id, 'daily-digest');
+    reticleDb.markNotified(db, conv.id);
   });
+
+  // Log one row per digest sent (not per conversation)
+  if (pending.length > 0) {
+    reticleDb.logNotification(db, accountId, pending[0].id, 'daily-digest', 'slack', {
+      pendingCount: pending.length,
+      awaitingCount: awaiting.length
+    });
+  }
 }
 
 /**
