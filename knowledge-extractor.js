@@ -359,9 +359,16 @@ function runSweep(db, { log } = {}) {
     }
 
     // Path B: Mention attribution (alias table lookup)
+    // Filter out rejected aliases — if a user rejected a name for an entity,
+    // that entity should not be matched via Path B for that name.
     if (!attributed && fact.mentioned_name) {
       const matches = db.prepare(
-        'SELECT entity_id FROM entity_aliases WHERE LOWER(alias) = LOWER(?)'
+        `SELECT ea.entity_id FROM entity_aliases ea
+         WHERE LOWER(ea.alias) = LOWER(?)
+           AND NOT EXISTS (
+             SELECT 1 FROM rejected_aliases ra
+             WHERE ra.entity_id = ea.entity_id AND LOWER(ra.alias) = LOWER(ea.alias)
+           )`
       ).all(fact.mentioned_name);
 
       if (matches.length === 1) {

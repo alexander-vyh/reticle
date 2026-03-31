@@ -788,6 +788,69 @@ app.get('/api/unattributed', (req, res) => {
   });
 });
 
+// --- Alias feedback (review queue write-back) ---
+
+// POST /api/entities/:id/aliases — confirm a mentioned_name as an alias for this entity
+app.post('/api/entities/:id/aliases', (req, res) => {
+  const { mentionedName, sourceFactId } = req.body;
+  if (!mentionedName) return res.status(400).json({ error: 'mentionedName required' });
+
+  const omDb = getOrgMemDb();
+  const entity = omDb.prepare('SELECT id FROM entities WHERE id = ?').get(req.params.id);
+  if (!entity) return res.status(404).json({ error: 'entity not found' });
+
+  const result = kg.confirmAlias(omDb, {
+    entityId: req.params.id,
+    mentionedName,
+    sourceFactId: sourceFactId || null,
+  });
+
+  res.json({ ok: true, aliasId: result.aliasId, attributedCount: result.attributedCount });
+});
+
+// POST /api/entities/:id/aliases/reject — reject a mentioned_name as NOT being an alias
+app.post('/api/entities/:id/aliases/reject', (req, res) => {
+  const { mentionedName, sourceFactId } = req.body;
+  if (!mentionedName) return res.status(400).json({ error: 'mentionedName required' });
+
+  const omDb = getOrgMemDb();
+  const entity = omDb.prepare('SELECT id FROM entities WHERE id = ?').get(req.params.id);
+  if (!entity) return res.status(404).json({ error: 'entity not found' });
+
+  kg.rejectAlias(omDb, {
+    entityId: req.params.id,
+    mentionedName,
+    sourceFactId: sourceFactId || null,
+  });
+
+  res.json({ ok: true });
+});
+
+// GET /api/entities/:id/aliases — list aliases and rejections for an entity
+app.get('/api/entities/:id/aliases', (req, res) => {
+  const omDb = getOrgMemDb();
+  const entity = omDb.prepare('SELECT id FROM entities WHERE id = ?').get(req.params.id);
+  if (!entity) return res.status(404).json({ error: 'entity not found' });
+
+  const aliases = kg.getAliases(omDb, req.params.id);
+  const rejections = kg.getRejectedAliases(omDb, req.params.id);
+
+  res.json({
+    aliases: aliases.map(a => ({
+      id: a.id,
+      alias: a.alias,
+      aliasSource: a.alias_source,
+      confirmedAt: a.confirmed_at || null,
+    })),
+    rejections: rejections.map(r => ({
+      id: r.id,
+      alias: r.alias,
+      rejectedAt: r.rejected_at,
+      sourceFactId: r.source_fact_id || null,
+    })),
+  });
+});
+
 // GET /api/cracks — credibility gap analysis across entities
 app.get('/api/cracks', (req, res) => {
   const omDb = getOrgMemDb();
