@@ -2,7 +2,7 @@ import XCTest
 
 // MARK: - Test-local types (mirrors production Entity for pure logic testing)
 
-private struct TestEntity {
+private struct MergeTestEntity {
     let id: String
     let canonicalName: String
     let monitored: Bool
@@ -16,7 +16,7 @@ private struct TestEntity {
 // MARK: - Pure function copy from MergeReviewView.collectNameChoices
 
 /// Collect all unique name choices from two entities. Target names appear first.
-private func collectNameChoices(source: TestEntity, target: TestEntity) -> [String] {
+private func collectNameChoices(source: MergeTestEntity, target: MergeTestEntity) -> [String] {
     var seen = Set<String>()
     var result: [String] = []
     for name in [target.canonicalName, source.canonicalName] + (target.aliases ?? []) + (source.aliases ?? []) {
@@ -35,9 +35,9 @@ final class MergeViewTests: XCTestCase {
     // MARK: - collectNameChoices
 
     func testNameChoicesIncludesBothCanonicalNames() {
-        let source = TestEntity(id: "s", canonicalName: "Dan Sherr", monitored: false,
+        let source = MergeTestEntity(id: "s", canonicalName: "Dan Sherr", monitored: false,
                                 isActive: true, commitmentCount: 0, slackId: nil, jiraId: nil, aliases: nil)
-        let target = TestEntity(id: "t", canonicalName: "Daniel Sherr", monitored: true,
+        let target = MergeTestEntity(id: "t", canonicalName: "Daniel Sherr", monitored: true,
                                 isActive: true, commitmentCount: 0, slackId: nil, jiraId: nil, aliases: nil)
 
         let choices = collectNameChoices(source: source, target: target)
@@ -45,9 +45,9 @@ final class MergeViewTests: XCTestCase {
     }
 
     func testNameChoicesTargetCanonicalFirst() {
-        let source = TestEntity(id: "s", canonicalName: "Alice", monitored: false,
+        let source = MergeTestEntity(id: "s", canonicalName: "Alice", monitored: false,
                                 isActive: true, commitmentCount: 0, slackId: nil, jiraId: nil, aliases: nil)
-        let target = TestEntity(id: "t", canonicalName: "Bob", monitored: false,
+        let target = MergeTestEntity(id: "t", canonicalName: "Bob", monitored: false,
                                 isActive: true, commitmentCount: 0, slackId: nil, jiraId: nil, aliases: nil)
 
         let choices = collectNameChoices(source: source, target: target)
@@ -55,10 +55,10 @@ final class MergeViewTests: XCTestCase {
     }
 
     func testNameChoicesIncludesAliases() {
-        let source = TestEntity(id: "s", canonicalName: "Dan Sherr", monitored: false,
+        let source = MergeTestEntity(id: "s", canonicalName: "Dan Sherr", monitored: false,
                                 isActive: true, commitmentCount: 1, slackId: "U1", jiraId: nil,
                                 aliases: ["Danny", "D. Sherr"])
-        let target = TestEntity(id: "t", canonicalName: "Daniel Sherr", monitored: true,
+        let target = MergeTestEntity(id: "t", canonicalName: "Daniel Sherr", monitored: true,
                                 isActive: true, commitmentCount: 2, slackId: nil, jiraId: "dsherr",
                                 aliases: ["Daniel S."])
 
@@ -69,10 +69,10 @@ final class MergeViewTests: XCTestCase {
     }
 
     func testNameChoicesDeduplicates() {
-        let source = TestEntity(id: "s", canonicalName: "Dan Sherr", monitored: false,
+        let source = MergeTestEntity(id: "s", canonicalName: "Dan Sherr", monitored: false,
                                 isActive: true, commitmentCount: 0, slackId: nil, jiraId: nil,
                                 aliases: ["Dan Sherr", "Danny"]) // duplicate of canonical
-        let target = TestEntity(id: "t", canonicalName: "Dan Sherr", monitored: true,
+        let target = MergeTestEntity(id: "t", canonicalName: "Dan Sherr", monitored: true,
                                 isActive: true, commitmentCount: 0, slackId: nil, jiraId: nil,
                                 aliases: ["Danny"]) // duplicate of source alias
 
@@ -83,9 +83,9 @@ final class MergeViewTests: XCTestCase {
     }
 
     func testNameChoicesEmptyAliases() {
-        let source = TestEntity(id: "s", canonicalName: "Alice", monitored: false,
+        let source = MergeTestEntity(id: "s", canonicalName: "Alice", monitored: false,
                                 isActive: true, commitmentCount: 0, slackId: nil, jiraId: nil, aliases: [])
-        let target = TestEntity(id: "t", canonicalName: "Bob", monitored: false,
+        let target = MergeTestEntity(id: "t", canonicalName: "Bob", monitored: false,
                                 isActive: true, commitmentCount: 0, slackId: nil, jiraId: nil, aliases: [])
 
         let choices = collectNameChoices(source: source, target: target)
@@ -93,9 +93,9 @@ final class MergeViewTests: XCTestCase {
     }
 
     func testNameChoicesNilAliases() {
-        let source = TestEntity(id: "s", canonicalName: "Alpha", monitored: false,
+        let source = MergeTestEntity(id: "s", canonicalName: "Alpha", monitored: false,
                                 isActive: true, commitmentCount: 0, slackId: nil, jiraId: nil, aliases: nil)
-        let target = TestEntity(id: "t", canonicalName: "Beta", monitored: false,
+        let target = MergeTestEntity(id: "t", canonicalName: "Beta", monitored: false,
                                 isActive: true, commitmentCount: 0, slackId: nil, jiraId: nil, aliases: nil)
 
         let choices = collectNameChoices(source: source, target: target)
@@ -103,10 +103,10 @@ final class MergeViewTests: XCTestCase {
     }
 
     func testNameChoicesSkipsWhitespaceOnlyNames() {
-        let source = TestEntity(id: "s", canonicalName: "Alice", monitored: false,
+        let source = MergeTestEntity(id: "s", canonicalName: "Alice", monitored: false,
                                 isActive: true, commitmentCount: 0, slackId: nil, jiraId: nil,
                                 aliases: ["  ", ""])
-        let target = TestEntity(id: "t", canonicalName: "Bob", monitored: false,
+        let target = MergeTestEntity(id: "t", canonicalName: "Bob", monitored: false,
                                 isActive: true, commitmentCount: 0, slackId: nil, jiraId: nil, aliases: nil)
 
         let choices = collectNameChoices(source: source, target: target)
