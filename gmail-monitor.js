@@ -18,6 +18,7 @@ const { validatePrerequisites } = require('./lib/startup-validation');
 const gmailApi = require('./lib/gmail-api');
 const ai = require('./lib/ai');
 const peopleStore = require('./lib/people-store');
+const { classifyClosure } = require('./lib/closure-classifier');
 
 // Configuration
 const CONFIG = {
@@ -431,6 +432,14 @@ function applyRuleBasedFilter(email) {
   const subject = email.subject.toLowerCase();
   const to = (email.to || '').toLowerCase();
 
+  // Calendar invites: archive — these are acted on in Google Calendar, not email
+  // Covers Google Calendar format (Invitation:, Updated invitation:, Accepted:, Declined:, Canceled event:)
+  if (subject.startsWith('invitation:') || subject.startsWith('updated invitation:') ||
+      subject.startsWith('accepted:') || subject.startsWith('declined:') ||
+      subject.startsWith('canceled event:') || subject.startsWith('cancelled event:')) {
+    return { action: 'archive', reason: 'Calendar invite (handled in Calendar)' };
+  }
+
   // De-duplicate: archive DW-forwarded copies of emails that also arrive directly
   if (from.includes('via digital workplace')) {
     const dwDuplicateSenders = [
@@ -440,6 +449,22 @@ function applyRuleBasedFilter(email) {
     if (dwDuplicateSenders.some(s => from.includes(s))) {
       return { action: 'archive', reason: 'DW duplicate (direct copy exists)' };
     }
+  }
+
+  // Demote emails forwarded via automated systems to AI triage
+  // These look like real people ("Ashley Farr via Docusign") but are system-routed.
+  // Some are genuine obligations (Docusign signatures) so triage, don't archive.
+  if (from.includes('via docusign') || from.includes('via clari') ||
+      from.includes('via help desk') || from.includes('via lattice')) {
+    // Docusign "review and sign" are genuine obligations — keep those
+    if (from.includes('via docusign') && (subject.includes('review and sign') || subject.includes('please sign'))) {
+      return { action: 'keep', reason: 'Docusign signature request (via forwarded sender)' };
+    }
+    // Docusign "completed" are informational
+    if (from.includes('via docusign') && subject.includes('completed')) {
+      return { action: 'archive', reason: 'Docusign completion notification' };
+    }
+    return { action: 'ai-triage', reason: 'Forwarded via automated system (AI triage)' };
   }
 
   // Auto-archive rules (noise, but keep in archive)
@@ -955,8 +980,31 @@ async function sendBatchSummary() {
 }
 
 /**
+ * Extract plain text from a Gmail message payload.
+ * Walks MIME parts looking for text/plain, falls back to snippet.
+ */
+function extractPlainText(message) {
+  if (!message || !message.payload) return message?.snippet || null;
+
+  function findPart(part) {
+    if (part.mimeType === 'text/plain' && part.body?.data) {
+      return Buffer.from(part.body.data, 'base64').toString('utf-8');
+    }
+    if (part.parts) {
+      for (const sub of part.parts) {
+        const found = findPart(sub);
+        if (found) return found;
+      }
+    }
+    return null;
+  }
+
+  return findPart(message.payload) || message.snippet || null;
+}
+
+/**
  * Check sent emails to detect replies to tracked conversations
- * Flips waiting_for from 'my-response' to 'their-response' when a reply is found
+ * Classifies reply content: closures auto-resolve, continuations flip to their-response
  */
 async function checkSentEmails() {
   if (!followupsDbConn) { log.warn('checkSentEmails skipped — DB connection unavailable'); return; }
@@ -995,6 +1043,7 @@ async function checkSentEmails() {
     }
 
     let flipped = 0;
+    let resolved = 0;
     for (const msg of sentMessages) {
       if (!msg.threadId || !pendingByThread.has(msg.threadId)) continue;
 
@@ -1003,14 +1052,36 @@ async function checkSentEmails() {
       // Idempotency: skip if already flipped
       if (conv.waiting_for === 'their-response') continue;
 
-      reticleDb.updateConversationState(followupsDbConn, conv.id, 'me', 'their-response');
-      flipped++;
+      // Fetch sent message content for closure classification
+      let sentText = null;
+      try {
+        const detail = await gmail.users.messages.get({
+          userId: 'me', id: msg.id, format: 'full'
+        });
+        sentText = extractPlainText(detail.data);
+      } catch (err) {
+        log.debug({ err, msgId: msg.id }, 'Could not fetch sent message body — defaulting to flip');
+      }
+
+      const classification = sentText ? classifyClosure(sentText) : null;
+
+      if (classification && classification.classification === 'closure') {
+        // Short ack / closure — auto-resolve the conversation
+        reticleDb.resolveConversation(followupsDbConn, conv.id);
+        resolved++;
+        log.info({ conversationId: conv.id, reason: classification.reason, confidence: classification.confidence },
+          'Sent-email closure — auto-resolved');
+      } else {
+        // Continuation or unknown — flip to their-response
+        reticleDb.updateConversationState(followupsDbConn, conv.id, 'me', 'their-response');
+        flipped++;
+      }
     }
 
-    if (flipped > 0) {
-      log.info({ flipped, checked: sentMessages.length }, 'Flipped conversations to their-response via sent-mail detection');
+    if (flipped > 0 || resolved > 0) {
+      log.info({ flipped, resolved, checked: sentMessages.length }, 'Sent-mail detection complete');
     } else {
-      log.debug({ checked: sentMessages.length }, 'Sent-mail check: 0 flipped');
+      log.debug({ checked: sentMessages.length }, 'Sent-mail check: 0 flipped, 0 resolved');
     }
   } catch (error) {
     log.error({ err: error }, 'Sent-mail detection failed');
