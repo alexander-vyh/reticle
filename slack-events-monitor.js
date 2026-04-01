@@ -691,7 +691,8 @@ app.event('message', async ({ event, client }) => {
     } catch (err) {
       log.warn({ err, channel: event.channel, ts: event.ts, user: event.user }, 'Failed to track conversation — continuing');
     }
-  } else if (followupsDbConn && event.channel_type === 'im') {
+  } else if (followupsDbConn) {
+    // Track Alexander's outgoing messages (DMs and channel thread replies)
     try {
       await trackSlackConversation(followupsDbConn, event, 'outgoing');
     } catch (err) {
