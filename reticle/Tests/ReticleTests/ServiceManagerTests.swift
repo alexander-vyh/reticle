@@ -12,13 +12,13 @@ struct LaunchctlEntry: Equatable {
     let exitCode: Int
 }
 
-struct HeartbeatErrors {
+struct HeartbeatErrors: Codable {
     let lastError: String?
     let lastErrorAt: Double?
     let countSinceStart: Int
 }
 
-struct HeartbeatMetrics {
+struct HeartbeatMetrics: Codable {
     let recording: Bool?
     let meetingId: String?
     let duration: Double?
@@ -29,7 +29,7 @@ struct HeartbeatMetrics {
     let degradedReason: String?
 }
 
-struct HeartbeatData {
+struct HeartbeatData: Codable {
     let service: String?
     let pid: Int?
     let startedAt: Double?
@@ -371,5 +371,212 @@ final class ServiceManagerTests: XCTestCase {
 
     func testServiceDefinitionCount() {
         XCTAssertEqual(serviceDefinitions.count, 8)
+    }
+
+    // MARK: - HeartbeatData JSON decoding (contract test with Node.js heartbeat.js)
+
+    func testDecodeNodeJsHeartbeatJSON() throws {
+        // This is the exact JSON shape written by lib/heartbeat.js write()
+        let json = """
+        {
+            "service": "gmail-monitor",
+            "pid": 12345,
+            "startedAt": 1711900000000,
+            "lastCheck": 1711900030000,
+            "uptime": 30,
+            "checkInterval": 30000,
+            "status": "ok",
+            "errors": {
+                "lastError": null,
+                "lastErrorAt": null,
+                "countSinceStart": 0
+            },
+            "metrics": {}
+        }
+        """.data(using: .utf8)!
+
+        let hb = try JSONDecoder().decode(HeartbeatData.self, from: json)
+        XCTAssertEqual(hb.service, "gmail-monitor")
+        XCTAssertEqual(hb.pid, 12345)
+        XCTAssertEqual(hb.startedAt, 1711900000000)
+        XCTAssertEqual(hb.lastCheck, 1711900030000)
+        XCTAssertEqual(hb.checkInterval, 30000)
+        XCTAssertEqual(hb.status, "ok")
+        XCTAssertEqual(hb.errors?.countSinceStart, 0)
+        XCTAssertNil(hb.errors?.lastError)
+    }
+
+    func testDecodeNodeJsHeartbeatWithErrors() throws {
+        let json = """
+        {
+            "service": "slack-events",
+            "pid": 9999,
+            "startedAt": 1711900000000,
+            "lastCheck": 1711900060000,
+            "uptime": 60,
+            "checkInterval": 30000,
+            "status": "degraded",
+            "errors": {
+                "lastError": "Slack API rate limited",
+                "lastErrorAt": 1711900055000,
+                "countSinceStart": 3
+            },
+            "metrics": {}
+        }
+        """.data(using: .utf8)!
+
+        let hb = try JSONDecoder().decode(HeartbeatData.self, from: json)
+        XCTAssertEqual(hb.status, "degraded")
+        XCTAssertEqual(hb.errors?.lastError, "Slack API rate limited")
+        XCTAssertEqual(hb.errors?.lastErrorAt, 1711900055000)
+        XCTAssertEqual(hb.errors?.countSinceStart, 3)
+    }
+
+    func testDecodeNodeJsHeartbeatWithMetrics() throws {
+        // Meeting recorder heartbeat with recording metrics
+        let json = """
+        {
+            "service": "meeting-recorder",
+            "pid": 5678,
+            "startedAt": 1711900000000,
+            "lastCheck": 1711900300000,
+            "uptime": 300,
+            "checkInterval": 30000,
+            "status": "ok",
+            "errors": {
+                "lastError": null,
+                "lastErrorAt": null,
+                "countSinceStart": 0
+            },
+            "metrics": {
+                "recording": true,
+                "meetingId": "mtg-abc123",
+                "duration": 245.5,
+                "captureMode": "process-tap"
+            }
+        }
+        """.data(using: .utf8)!
+
+        let hb = try JSONDecoder().decode(HeartbeatData.self, from: json)
+        XCTAssertEqual(hb.metrics?.recording, true)
+        XCTAssertEqual(hb.metrics?.meetingId, "mtg-abc123")
+        XCTAssertEqual(hb.metrics?.duration, 245.5)
+        XCTAssertEqual(hb.metrics?.captureMode, "process-tap")
+    }
+
+    func testDecodeDigestHeartbeatNoCheckInterval() throws {
+        // Scheduled services (digests) may omit checkInterval
+        let json = """
+        {
+            "service": "digest-daily",
+            "pid": 4321,
+            "startedAt": 1711900000000,
+            "lastCheck": 1711900000000,
+            "status": "ok",
+            "errors": {
+                "lastError": null,
+                "lastErrorAt": null,
+                "countSinceStart": 0
+            },
+            "metrics": {
+                "itemCount": 42,
+                "patternCount": 12
+            }
+        }
+        """.data(using: .utf8)!
+
+        let hb = try JSONDecoder().decode(HeartbeatData.self, from: json)
+        XCTAssertNil(hb.checkInterval, "Scheduled services may not have checkInterval")
+        XCTAssertEqual(hb.metrics?.itemCount, 42)
+        XCTAssertEqual(hb.metrics?.patternCount, 12)
+
+        // evaluateHeartbeat should treat this as healthy
+        let health = evaluateHeartbeat(hb)
+        XCTAssertEqual(health.health, "healthy")
+    }
+
+    func testDecodeMinimalHeartbeat() throws {
+        // Minimal valid heartbeat — just status, no extras
+        let json = """
+        {
+            "status": "startup-failed",
+            "errors": {
+                "lastError": "SLACK_BOT_TOKEN not set",
+                "lastErrorAt": null,
+                "countSinceStart": 1
+            }
+        }
+        """.data(using: .utf8)!
+
+        let hb = try JSONDecoder().decode(HeartbeatData.self, from: json)
+        XCTAssertEqual(hb.status, "startup-failed")
+        XCTAssertNil(hb.service)
+        XCTAssertNil(hb.pid)
+
+        let health = evaluateHeartbeat(hb)
+        XCTAssertEqual(health.health, "startup-failed")
+        XCTAssertEqual(health.detail, "SLACK_BOT_TOKEN not set")
+    }
+
+    // MARK: - Heartbeat file I/O integration test
+
+    func testReadHeartbeatFromFile() throws {
+        // Write a realistic heartbeat file to a temp directory and read it back
+        let tmpDir = NSTemporaryDirectory() + "heartbeat-read-test-\(UUID().uuidString)"
+        try FileManager.default.createDirectory(atPath: tmpDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(atPath: tmpDir) }
+
+        let json = """
+        {
+            "service": "gmail-monitor",
+            "pid": 12345,
+            "startedAt": 1711900000000,
+            "lastCheck": 1711900030000,
+            "uptime": 30,
+            "checkInterval": 30000,
+            "status": "ok",
+            "errors": {"lastError": null, "lastErrorAt": null, "countSinceStart": 0},
+            "metrics": {}
+        }
+        """
+        let filePath = "\(tmpDir)/gmail-monitor.json"
+        try json.write(toFile: filePath, atomically: true, encoding: .utf8)
+
+        // Read and decode
+        guard let data = FileManager.default.contents(atPath: filePath) else {
+            XCTFail("Could not read heartbeat file")
+            return
+        }
+        let hb = try JSONDecoder().decode(HeartbeatData.self, from: data)
+        XCTAssertEqual(hb.service, "gmail-monitor")
+        XCTAssertEqual(hb.pid, 12345)
+        XCTAssertEqual(hb.status, "ok")
+
+        // Feed through evaluateHeartbeat — should be healthy
+        let now = 1711900035000.0 // 5 seconds after lastCheck
+        let health = evaluateHeartbeat(hb, now: now)
+        XCTAssertEqual(health.health, "healthy")
+    }
+
+    func testReadCorruptHeartbeatFileReturnsNil() throws {
+        let tmpDir = NSTemporaryDirectory() + "heartbeat-corrupt-test-\(UUID().uuidString)"
+        try FileManager.default.createDirectory(atPath: tmpDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(atPath: tmpDir) }
+
+        // Write garbage
+        let filePath = "\(tmpDir)/broken.json"
+        try "not valid json {{{".write(toFile: filePath, atomically: true, encoding: .utf8)
+
+        guard let data = FileManager.default.contents(atPath: filePath) else {
+            XCTFail("Could not read file")
+            return
+        }
+        let hb = try? JSONDecoder().decode(HeartbeatData.self, from: data)
+        XCTAssertNil(hb, "Corrupt heartbeat file should decode to nil")
+    }
+
+    func testReadMissingHeartbeatFileReturnsNil() {
+        let data = FileManager.default.contents(atPath: "/tmp/nonexistent-heartbeat-\(UUID().uuidString).json")
+        XCTAssertNil(data, "Missing heartbeat file should return nil data")
     }
 }
