@@ -147,6 +147,8 @@ struct Entity: Codable, Identifiable, Hashable {
     let commitmentCount: Int
     let slackId: String?
     let jiraId: String?
+    let isAnchored: Bool
+    let aliases: [String]?
 }
 
 struct EntitiesResponse: Codable {
@@ -315,9 +317,11 @@ class GatewayClient: ObservableObject {
         return res.commitments
     }
 
-    func mergeEntity(sourceId: String, targetId: String) async throws {
+    func mergeEntity(sourceId: String, targetId: String, preferredName: String? = nil) async throws {
         struct Response: Decodable { let ok: Bool }
-        let _: Response = try await request("/api/entities/\(sourceId)/merge", method: "POST", body: ["targetId": targetId])
+        var body: [String: Any] = ["targetId": targetId]
+        if let name = preferredName { body["preferredName"] = name }
+        let _: Response = try await request("/api/entities/\(sourceId)/merge", method: "POST", body: body)
     }
 
     func monitorEntity(id: String) async throws {

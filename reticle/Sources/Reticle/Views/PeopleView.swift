@@ -120,6 +120,8 @@ struct EntityRow: View {
 
     var body: some View {
         HStack(spacing: 8) {
+            AnchorIndicator(isAnchored: entity.isAnchored)
+
             VStack(alignment: .leading, spacing: 3) {
                 Text(entity.canonicalName)
                     .font(.headline)
@@ -149,6 +151,7 @@ struct EntityRow: View {
         }
         .padding(.vertical, 2)
         .opacity(entity.isActive ? 1 : 0.5)
+        .accessibilityLabel("\(entity.canonicalName), \(entity.isAnchored ? "anchored identity" : "floating identity")")
     }
 }
 
@@ -445,6 +448,19 @@ struct AddPersonForm: View {
 
         await onAdd()
         isPresented = false
+    }
+}
+
+// MARK: - Anchor Indicator
+
+struct AnchorIndicator: View {
+    let isAnchored: Bool
+
+    var body: some View {
+        Image(systemName: isAnchored ? "pin.fill" : "icloud.slash")
+            .foregroundStyle(isAnchored ? .green : .orange)
+            .imageScale(.medium)
+            .help(isAnchored ? "Anchored — verified identity" : "Floating — no verified identity link")
     }
 }
 

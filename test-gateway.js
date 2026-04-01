@@ -373,9 +373,11 @@ async function testEntitiesEndpoints() {
     assert.strictEqual(alice.monitored, false);
     assert.strictEqual(alice.commitmentCount, 2);
     assert.strictEqual(alice.slackId, 'U123');
+    assert.strictEqual(alice.isAnchored, true, 'Alice has identity_map entry, should be anchored');
     assert.strictEqual(bob.monitored, true);
     assert.strictEqual(bob.commitmentCount, 0);
-    console.log('  PASS: GET /api/entities returns entities with correct shape');
+    assert.strictEqual(bob.isAnchored, false, 'Bob has no identity_map entry, should be floating');
+    console.log('  PASS: GET /api/entities returns entities with correct shape and isAnchored');
 
     // Test 2: POST /api/entities/:id/monitor sets flag
     const monRes = await httpRequest(port, 'POST', '/api/entities/ent-a/monitor');
@@ -448,7 +450,8 @@ async function testEntityDetailAndMerge() {
     assert.strictEqual(detailRes.body.entity.id, 'src-1');
     assert.strictEqual(detailRes.body.entity.canonicalName, 'Gimli Stone');
     assert.strictEqual(detailRes.body.entity.slackId, 'USRC');
-    console.log('  PASS: GET /api/entities/:id returns entity shape');
+    assert.strictEqual(detailRes.body.entity.isAnchored, true, 'src-1 has identity_map entry, should be anchored');
+    console.log('  PASS: GET /api/entities/:id returns entity shape with isAnchored');
 
     // Test 2: GET /api/entities/:id/commitments returns that entity's open facts
     const comRes = await httpRequest(port, 'GET', '/api/entities/src-1/commitments');
@@ -480,9 +483,10 @@ async function testEntityDetailAndMerge() {
     // Target should have inherited slack identity
     const tgtDetail = await httpRequest(port, 'GET', '/api/entities/tgt-1');
     assert.strictEqual(tgtDetail.body.entity.slackId, 'USRC');
-    console.log('  PASS: POST /api/entities/:id/merge reassigns facts and identities');
+    assert.strictEqual(tgtDetail.body.entity.isAnchored, true, 'target inherited identity, should be anchored');
+    console.log('  PASS: POST /api/entities/:id/merge reassigns facts and identities with isAnchored');
 
-    // Test 5: merge with invalid targetId returns 400
+    // Test 5: merge with invalid targetId returns 404
     const badMerge = await httpRequest(port, 'POST', '/api/entities/tgt-1/merge', { targetId: 'no-such' });
     assert.strictEqual(badMerge.status, 404);
     console.log('  PASS: merge with unknown targetId returns 404');
@@ -574,6 +578,114 @@ async function testEntityFactsAndUnattributed() {
   }
 }
 
+async function testMergeWithPreferredNameAndAliases() {
+  const os = require('os');
+  const path = require('path');
+  const fs = require('fs');
+
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'reticle-merge-pref-test-'));
+  const orgMemDbPath = path.join(tmpDir, 'org-memory.db');
+  const reticleDbPath = path.join(tmpDir, 'reticle.db');
+
+  process.env.ORG_MEMORY_DB_PATH = orgMemDbPath;
+  process.env.RETICLE_DB_PATH = reticleDbPath;
+
+  const omDb = setupOrgMemoryDb(orgMemDbPath);
+  const now = Math.floor(Date.now() / 1000);
+  const kg = require('./lib/knowledge-graph');
+
+  // Create two entities: "Dan Sherr" and "Daniel Sherr"
+  omDb.prepare(`INSERT INTO entities (id, entity_type, canonical_name, monitored, created_at)
+    VALUES (?, ?, ?, ?, ?)`).run('dan-1', 'person', 'Dan Sherr', 0, now);
+  omDb.prepare(`INSERT INTO entities (id, entity_type, canonical_name, monitored, created_at)
+    VALUES (?, ?, ?, ?, ?)`).run('daniel-1', 'person', 'Daniel Sherr', 1, now);
+
+  // Give each entity some identities
+  omDb.prepare(`INSERT INTO identity_map (entity_id, source, external_id, display_name)
+    VALUES (?, ?, ?, ?)`).run('dan-1', 'slack', 'U_DAN', 'Dan Sherr');
+  omDb.prepare(`INSERT INTO identity_map (entity_id, source, external_id, display_name)
+    VALUES (?, ?, ?, ?)`).run('daniel-1', 'jira', 'dsherr', 'Daniel Sherr');
+
+  // Give dan-1 an alias
+  kg.addAlias(omDb, { entityId: 'dan-1', alias: 'Danny', aliasSource: 'manual' });
+
+  // Give daniel-1 a fact
+  omDb.prepare(`INSERT INTO facts (id, entity_id, attribute, value, fact_type, valid_from, resolution, extracted_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)`).run('pf-1', 'dan-1', 'committed_to', 'Fix tests', 'event', now - 3600, 'open', now);
+  omDb.prepare(`INSERT INTO facts (id, entity_id, attribute, value, fact_type, valid_from, resolution, extracted_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)`).run('pf-2', 'daniel-1', 'asked_to', 'Review docs', 'event', now - 7200, null, now);
+  omDb.close();
+
+  jest_clearGatewayCache();
+  const app = require('./gateway');
+  const server = app.listen(0);
+  const port = server.address().port;
+
+  try {
+    // Test 1: GET /api/entities returns aliases field
+    const listRes = await httpRequest(port, 'GET', '/api/entities');
+    const dan = listRes.body.entities.find(e => e.id === 'dan-1');
+    assert.ok(dan, 'dan-1 should be in entities list');
+    assert.ok(Array.isArray(dan.aliases), 'aliases should be an array');
+    assert.ok(dan.aliases.includes('Danny'), 'dan-1 aliases should include Danny');
+    console.log('  PASS: GET /api/entities returns aliases field');
+
+    // Test 2: GET /api/entities/:id returns aliases field
+    const detailRes = await httpRequest(port, 'GET', '/api/entities/dan-1');
+    assert.ok(Array.isArray(detailRes.body.entity.aliases), 'detail aliases should be array');
+    assert.ok(detailRes.body.entity.aliases.includes('Danny'), 'detail should include Danny alias');
+    console.log('  PASS: GET /api/entities/:id returns aliases field');
+
+    // Test 3: Merge with preferredName changes target's canonical_name
+    const mergeRes = await httpRequest(port, 'POST', '/api/entities/dan-1/merge', {
+      targetId: 'daniel-1',
+      preferredName: 'Dan Sherr'
+    });
+    assert.strictEqual(mergeRes.status, 200);
+    assert.strictEqual(mergeRes.body.ok, true);
+
+    // Target should now have preferred name
+    const tgtDetail = await httpRequest(port, 'GET', '/api/entities/daniel-1');
+    assert.strictEqual(tgtDetail.body.entity.canonicalName, 'Dan Sherr',
+      'target canonical_name should be updated to preferredName');
+    console.log('  PASS: merge with preferredName updates target canonical_name');
+
+    // Test 4: Source's old canonical_name becomes an alias on target
+    assert.ok(tgtDetail.body.entity.aliases.includes('Daniel Sherr'),
+      'target should have source old canonical_name as alias');
+    console.log('  PASS: source canonical_name preserved as alias on target');
+
+    // Test 5: Source's aliases are migrated to target
+    assert.ok(tgtDetail.body.entity.aliases.includes('Danny'),
+      'target should inherit source aliases');
+    console.log('  PASS: source aliases migrated to target');
+
+    // Test 6: Target inherited source's slack identity
+    assert.strictEqual(tgtDetail.body.entity.slackId, 'U_DAN',
+      'target should inherit source Slack identity');
+    console.log('  PASS: merge inherits source Slack identity');
+
+    // Test 7: Target has both entities' facts
+    const tgtCom = await httpRequest(port, 'GET', '/api/entities/daniel-1/commitments');
+    assert.strictEqual(tgtCom.body.commitments.length, 2,
+      'target should have facts from both entities');
+    console.log('  PASS: merge reassigns all facts to target');
+
+    // Test 8: Source is deactivated
+    const srcDetail = await httpRequest(port, 'GET', '/api/entities/dan-1');
+    assert.strictEqual(srcDetail.body.entity.isActive, false,
+      'source should be deactivated after merge');
+    console.log('  PASS: source deactivated after merge');
+  } finally {
+    server.close();
+    try { fs.unlinkSync(orgMemDbPath); } catch {}
+    try { fs.unlinkSync(reticleDbPath); } catch {}
+    try { fs.unlinkSync(orgMemDbPath + '-wal'); } catch {}
+    try { fs.unlinkSync(orgMemDbPath + '-shm'); } catch {}
+    try { fs.rmdirSync(tmpDir); } catch {}
+  }
+}
+
 // --- Run all tests ---
 
 console.log('gateway tests:');
@@ -589,6 +701,7 @@ testCommitmentsEndpoints()
   .then(() => testEntitiesEndpoints())
   .then(() => testEntityDetailAndMerge())
   .then(() => testEntityFactsAndUnattributed())
+  .then(() => testMergeWithPreferredNameAndAliases())
   .then(() => {
     console.log('All gateway tests passed');
     process.exit(0);

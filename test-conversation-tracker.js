@@ -101,24 +101,39 @@ const log = {
   console.log('PASS: Mention stores resolved channel name and user name');
 }
 
-// --- Test: Outgoing DM sets correct direction ---
+// --- Test: Outgoing DM flips existing conversation ---
 {
-  const reader = mockSlackReader({ users: { 'UBOTSELF': 'Reticle Bot' } });
+  const reader = mockSlackReader({ users: { 'UOTHER': 'Other Person' } });
   const { trackSlackConversation } = require('./lib/conversation-tracker');
 
+  // First: incoming DM creates a conversation waiting for my-response
   await trackSlackConversation({
     db, accountId: acct.id, slackReader: reader, reticleDb, log
   }, {
-    user: 'UBOTSELF',
+    user: 'UOTHER',
     channel: 'D99999',
     channel_type: 'im',
-    text: 'I responded',
+    text: 'Hey, got a question',
+    ts: '1711300100.000001'
+  }, 'incoming');
+
+  const before = db.prepare('SELECT * FROM conversations WHERE channel_id = ? AND type = ?').get('D99999', 'slack-dm');
+  assert.strictEqual(before.waiting_for, 'my-response', 'Incoming should set waiting_for=my-response');
+
+  // Then: outgoing reply flips to their-response
+  await trackSlackConversation({
+    db, accountId: acct.id, slackReader: reader, reticleDb, log
+  }, {
+    user: 'UMYSELF',
+    channel: 'D99999',
+    channel_type: 'im',
+    text: 'Sure, what is it?',
     ts: '1711300200.000001'
   }, 'outgoing');
 
-  const conv = db.prepare('SELECT * FROM conversations WHERE id = ?').get('slack:dm:UBOTSELF');
-  assert.strictEqual(conv.waiting_for, 'their-response', 'Outgoing should set waiting_for=their-response');
-  console.log('PASS: Outgoing DM sets correct direction');
+  const after = db.prepare('SELECT * FROM conversations WHERE channel_id = ? AND type = ?').get('D99999', 'slack-dm');
+  assert.strictEqual(after.waiting_for, 'their-response', 'Outgoing reply should flip to their-response');
+  console.log('PASS: Outgoing DM flips existing conversation');
 }
 
 // --- Test: getUserInfo failure degrades gracefully ---
