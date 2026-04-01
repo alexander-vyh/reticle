@@ -11,6 +11,7 @@ const log = require('./lib/logger')('followup-checker');
 const config = require('./lib/config');
 const heartbeat = require('./lib/heartbeat');
 const { validatePrerequisites } = require('./lib/startup-validation');
+const { rankConversations, MAX_SURFACED } = require('./lib/conversation-ranker');
 
 // Configuration
 const CONFIG = {
@@ -122,49 +123,51 @@ function formatDuration(seconds) {
  */
 function buildDailyDigest(pending, awaiting) {
   const now = Math.floor(Date.now() / 1000);
+  const totalPending = pending.length;
+  const surfaced = rankConversations(pending);
+
+  if (surfaced.length === 0) {
+    return `✨ All caught up! No pending follow-ups.`;
+  }
 
   let message = `🌅 *Good morning! Follow-ups needed:*\n\n`;
 
-  // Group by type
-  const emails = pending.filter(c => c.type === 'email');
-  const dms = pending.filter(c => c.type === 'slack-dm');
-  const mentions = pending.filter(c => c.type === 'slack-mention');
-
-  if (emails.length > 0) {
-    message += `📧 *Email* (${emails.length}):\n`;
-    emails.slice(0, 5).forEach(conv => {
-      const age = formatDuration(now - conv.last_activity);
-      message += `• ${conv.from_name || conv.from_user} - ${conv.subject} (waiting ${age})\n`;
-    });
-    if (emails.length > 5) {
-      message += `  _...and ${emails.length - 5} more_\n`;
-    }
-    message += '\n';
-  }
+  // Group surfaced items by type
+  const dms = surfaced.filter(c => c.type === 'slack-dm');
+  const mentions = surfaced.filter(c => c.type === 'slack-mention');
+  const emails = surfaced.filter(c => c.type === 'email');
 
   if (dms.length > 0) {
     message += `💬 *Slack DMs* (${dms.length}):\n`;
-    dms.slice(0, 5).forEach(conv => {
+    dms.forEach(conv => {
       const age = formatDuration(now - conv.last_activity);
       const preview = conv.subject ? `"${conv.subject.substring(0, 50)}..."` : '';
       message += `• ${conv.from_name || conv.from_user} - ${preview} (${age} ago)\n`;
     });
-    if (dms.length > 5) {
-      message += `  _...and ${dms.length - 5} more_\n`;
-    }
     message += '\n';
   }
 
   if (mentions.length > 0) {
     message += `📢 *Mentions* (${mentions.length}):\n`;
-    mentions.slice(0, 5).forEach(conv => {
+    mentions.forEach(conv => {
       const age = formatDuration(now - conv.last_activity);
       message += `• #${conv.channel_name || conv.channel_id} - ${conv.from_name} mentioned you (${age} ago)\n`;
     });
-    if (mentions.length > 5) {
-      message += `  _...and ${mentions.length - 5} more_\n`;
-    }
     message += '\n';
+  }
+
+  if (emails.length > 0) {
+    message += `📧 *Email* (${emails.length}):\n`;
+    emails.forEach(conv => {
+      const age = formatDuration(now - conv.last_activity);
+      message += `• ${conv.from_name || conv.from_user} - ${conv.subject} (waiting ${age})\n`;
+    });
+    message += '\n';
+  }
+
+  // Show total if items were capped
+  if (totalPending > surfaced.length) {
+    message += `_${surfaced.length} of ${totalPending} shown — oldest and most direct first_\n\n`;
   }
 
   // Awaiting replies
@@ -178,10 +181,6 @@ function buildDailyDigest(pending, awaiting) {
     if (awaitingEmails.length > 3) {
       message += `  _...and ${awaitingEmails.length - 3} more_\n`;
     }
-  }
-
-  if (emails.length === 0 && dms.length === 0 && mentions.length === 0) {
-    message = `✨ All caught up! No pending follow-ups.`;
   }
 
   return message;
@@ -282,10 +281,11 @@ async function check4Hour(allPending) {
       (!conv.notified_at || (now - conv.notified_at) > olderThan);
   });
 
-  const dms = pending.filter(c => c.type === 'slack-dm');
-  const mentions = pending.filter(c => c.type === 'slack-mention');
+  // Rank and cap for the notification message
+  const surfaced = rankConversations(pending);
+  const dms = surfaced.filter(c => c.type === 'slack-dm');
+  const mentions = surfaced.filter(c => c.type === 'slack-mention');
 
-  // Build the main message (DMs + mentions)
   let hasContent = dms.length > 0 || mentions.length > 0;
   let message = '';
 
@@ -294,20 +294,22 @@ async function check4Hour(allPending) {
 
     if (dms.length > 0) {
       message += `*DMs* (${dms.length}):\n`;
-      dms.slice(0, 3).forEach(conv => {
+      dms.forEach(conv => {
         const age = formatDuration(now - conv.last_activity);
         message += `• ${conv.from_name || conv.from_user} (${age} ago)\n`;
       });
-      if (dms.length > 3) message += `  _...and ${dms.length - 3} more_\n`;
     }
 
     if (mentions.length > 0) {
       message += `\n*Mentions* (${mentions.length}):\n`;
-      mentions.slice(0, 3).forEach(conv => {
+      mentions.forEach(conv => {
         const age = formatDuration(now - conv.last_activity);
         message += `• #${conv.channel_name || conv.channel_id} (${age} ago)\n`;
       });
-      if (mentions.length > 3) message += `  _...and ${mentions.length - 3} more_\n`;
+    }
+
+    if (pending.length > surfaced.length) {
+      message += `\n_${surfaced.length} of ${pending.length} shown_\n`;
     }
   }
 
