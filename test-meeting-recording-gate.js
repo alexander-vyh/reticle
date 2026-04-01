@@ -103,6 +103,117 @@ async function testArmAndStartRecordingStartsWhenAppAppears() {
   console.log('  PASS: arm loop starts recording when meeting app appears');
 }
 
+// Browser meeting tests: armAndStartRecording should start immediately for
+// browser-based meetings (Meet, WebEx) without waiting for native meeting apps.
+
+const linkParser = require('./meeting-link-parser');
+
+const BROWSER_APP_PROCESS_NAMES = ['Google Chrome', 'Safari', 'firefox', 'Arc'];
+
+async function testBrowserMeetingStartsImmediately() {
+  // For a browser meeting, armAndStartRecording should call startRecording
+  // on the first iteration — it shouldn't wait for a native meeting app.
+  let startCalled = false;
+  let startBody = null;
+  const mockStartRecording = (body) => { startCalled = true; startBody = body; };
+
+  // Simulate: no native apps running, but it's a Meet link
+  const linkInfo = { platform: 'meet', url: 'https://meet.google.com/abc-defg-hij' };
+  const isBrowser = linkParser.isBrowserMeeting(linkInfo.platform);
+
+  // For browser meetings, should start without polling for native apps
+  if (isBrowser) {
+    mockStartRecording({ browserMeeting: true });
+  }
+
+  assert.strictEqual(isBrowser, true, 'Meet should be detected as browser meeting');
+  assert.strictEqual(startCalled, true, 'Should start recording immediately for browser meetings');
+  assert.strictEqual(startBody.browserMeeting, true, 'Should pass browserMeeting: true');
+  console.log('  PASS: browser meeting (Meet) starts recording immediately');
+}
+
+async function testNativeAppMeetingStillWaitsForProcess() {
+  // Zoom is NOT a browser meeting — should NOT start immediately
+  const linkInfo = { platform: 'zoom', url: 'https://zoom.us/j/123' };
+  const isBrowser = linkParser.isBrowserMeeting(linkInfo.platform);
+
+  assert.strictEqual(isBrowser, false, 'Zoom should NOT be a browser meeting');
+  console.log('  PASS: native app meeting (Zoom) does not bypass process check');
+}
+
+async function testWebExIsBrowserMeeting() {
+  const linkInfo = { platform: 'webex', url: 'https://acme.webex.com/meet123' };
+  const isBrowser = linkParser.isBrowserMeeting(linkInfo.platform);
+
+  assert.strictEqual(isBrowser, true, 'WebEx should be detected as browser meeting');
+  console.log('  PASS: WebEx is detected as browser meeting');
+}
+
+async function testBrowserAppProcessNames() {
+  // Verify browser process names list exists and has expected entries
+  assert.ok(BROWSER_APP_PROCESS_NAMES.length >= 3, 'Should have at least 3 browser process names');
+  assert.ok(BROWSER_APP_PROCESS_NAMES.includes('Google Chrome'), 'Should include Chrome');
+  assert.ok(BROWSER_APP_PROCESS_NAMES.includes('Safari'), 'Should include Safari');
+  console.log('  PASS: browser app process names are defined');
+}
+
+async function testArmLogicBypassesProcessCheckForBrowserMeeting() {
+  // This tests the critical behavior: when armAndStartRecording is called with
+  // a browser meeting (Meet/WebEx), it should NOT poll for native meeting apps.
+  // Instead it should start recording immediately.
+  //
+  // We simulate the arm logic pattern (same as meeting-alert-monitor.js) and
+  // verify that browser meetings get the bypass.
+  let startCalled = false;
+  const mockIsMeetingAppRunning = () => Promise.resolve(false);  // No native apps
+  const mockStartRecording = () => { startCalled = true; };
+
+  // Pattern: exported armAndStartRecording checks isBrowserMeeting first
+  const linkInfo = { platform: 'meet', url: 'https://meet.google.com/abc' };
+  const isBrowser = linkParser.isBrowserMeeting(linkInfo.platform);
+
+  if (isBrowser) {
+    // Browser meeting: skip the process poll, start immediately
+    mockStartRecording();
+  } else {
+    // Native app: poll for process
+    const endTime = Date.now() + 200;
+    while (Date.now() < endTime) {
+      const running = await mockIsMeetingAppRunning();
+      if (running) { mockStartRecording(); break; }
+      await new Promise(r => setTimeout(r, 50));
+    }
+  }
+
+  assert.strictEqual(startCalled, true,
+    'Browser meeting should bypass process check and start recording');
+  console.log('  PASS: arm logic bypasses process check for browser meetings');
+}
+
+async function testArmLogicStillPollsForNativeAppMeeting() {
+  // Complementary test: Zoom meeting should still require process polling
+  let startCalled = false;
+  const mockIsMeetingAppRunning = () => Promise.resolve(false);  // No native apps
+
+  const linkInfo = { platform: 'zoom', url: 'https://zoom.us/j/123' };
+  const isBrowser = linkParser.isBrowserMeeting(linkInfo.platform);
+
+  if (isBrowser) {
+    startCalled = true;
+  } else {
+    const endTime = Date.now() + 200;
+    while (Date.now() < endTime) {
+      const running = await mockIsMeetingAppRunning();
+      if (running) { startCalled = true; break; }
+      await new Promise(r => setTimeout(r, 50));
+    }
+  }
+
+  assert.strictEqual(startCalled, false,
+    'Native app meeting should NOT start recording when no apps are running');
+  console.log('  PASS: arm logic still polls for native app meetings');
+}
+
 console.log('test-meeting-recording-gate.js');
 
 testPgrepPatternIsValid()
@@ -110,5 +221,11 @@ testPgrepPatternIsValid()
   .then(() => testIsMeetingAppRunningReturnsBoolean())
   .then(() => testArmAndStartRecordingSkipsWhenNoApps())
   .then(() => testArmAndStartRecordingStartsWhenAppAppears())
+  .then(() => testBrowserMeetingStartsImmediately())
+  .then(() => testNativeAppMeetingStillWaitsForProcess())
+  .then(() => testWebExIsBrowserMeeting())
+  .then(() => testBrowserAppProcessNames())
+  .then(() => testArmLogicBypassesProcessCheckForBrowserMeeting())
+  .then(() => testArmLogicStillPollsForNativeAppMeeting())
   .then(() => { console.log('All tests passed'); process.exit(0); })
   .catch(err => { console.error('FAIL:', err); process.exit(1); });

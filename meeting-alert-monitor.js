@@ -772,9 +772,21 @@ function isMeetingAppRunning() {
 
 /**
  * Arm recording for a meeting: poll for a meeting app to appear, then start.
- * Polls every 60 seconds until a meeting app is found or the meeting's end time passes.
+ * For browser-based meetings (Google Meet, WebEx), starts immediately since
+ * the browser is the meeting app and process tap will capture its audio.
+ * For native app meetings (Zoom, Teams), polls every 60 seconds until the
+ * app is found or the meeting's end time passes.
  */
 async function armAndStartRecording(event, linkInfo) {
+  // Browser meetings (Meet, WebEx) don't have a dedicated native app —
+  // the audio goes through the browser. Start recording immediately.
+  if (linkParser.isBrowserMeeting(linkInfo.platform)) {
+    log.info({ eventId: event.id, summary: event.summary, platform: linkInfo.platform },
+      'Browser-based meeting detected, starting recording immediately');
+    await startRecording(event, linkInfo);
+    return;
+  }
+
   const endTime = new Date(event.end.dateTime).getTime();
   const maxRetries = Math.ceil((endTime - Date.now()) / 60_000);
 
