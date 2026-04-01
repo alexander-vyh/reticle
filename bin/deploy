@@ -262,6 +262,7 @@ SCHEDULED_SERVICES=(
   "jira-activity-collector|jira-activity-collector.js"
   "dw-weekly-report|dw-weekly-report.js"
   "knowledge-extractor|knowledge-extractor.js"
+  "org-memory-report|org-memory-report.js"
 )
 
 # Daily digest: weekdays at 6:00 PM
@@ -440,6 +441,41 @@ cat > "$PLIST_DIR/ai.reticle.knowledge-extractor.plist" <<PLIST
   <string>$RETICLE_HOME/logs/knowledge-extractor.log</string>
   <key>StandardErrorPath</key>
   <string>$RETICLE_HOME/logs/knowledge-extractor-error.log</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>HOME</key>
+    <string>$HOME</string>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+  </dict>
+</dict>
+</plist>
+PLIST
+
+# Org-memory weekly report: Friday at 2:00 PM (before weekly digest)
+cat > "$PLIST_DIR/ai.reticle.org-memory-report.plist" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>ai.reticle.org-memory-report</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/opt/homebrew/bin/node</string>
+    <string>$RETICLE_HOME/app/org-memory-report.js</string>
+  </array>
+  <key>StartCalendarInterval</key>
+  <dict><key>Weekday</key><integer>5</integer><key>Hour</key><integer>14</integer><key>Minute</key><integer>0</integer></dict>
+  <key>KeepAlive</key>
+  <false/>
+  <key>ProcessType</key>
+  <string>Background</string>
+  <key>StandardOutPath</key>
+  <string>$RETICLE_HOME/logs/org-memory-report.log</string>
+  <key>StandardErrorPath</key>
+  <string>$RETICLE_HOME/logs/org-memory-report-error.log</string>
   <key>EnvironmentVariables</key>
   <dict>
     <key>HOME</key>
