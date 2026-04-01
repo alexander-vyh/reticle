@@ -90,7 +90,7 @@ function sendMacOSNotification(title, message) {
 }
 
 function trackSlackConversation(db, event, direction) {
-  return _trackSlackConversation({ db, accountId, slackReader, reticleDb, log }, event, direction);
+  return _trackSlackConversation({ db, accountId, slackReader, reticleDb, log, mySlackUserId: config.slackUserId }, event, direction);
 }
 
 // ── Message Tracking ─────────────────────────────────────────────────
@@ -746,9 +746,9 @@ app.event('app_mention', async ({ event, client }) => {
 
   log.info({ eventType: 'app_mention', channel: event.channel }, 'Event received');
 
-  // Track conversation
+  // Track conversation (app_mention = bot was explicitly @mentioned, always track)
   try {
-    await trackSlackConversation(followupsDbConn, event, 'incoming');
+    await trackSlackConversation(followupsDbConn, { ...event, _appMention: true }, 'incoming');
   } catch (err) {
     log.warn({ err }, 'Failed to track mention conversation');
   }
