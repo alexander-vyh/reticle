@@ -686,6 +686,134 @@ async function testMergeWithPreferredNameAndAliases() {
   }
 }
 
+// --- POST /speakers/embeddings tests (HTTP-level) ---
+
+async function testSpeakerEmbeddingsEndpoints() {
+  const os = require('os');
+  const path = require('path');
+  const fs = require('fs');
+
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'reticle-speaker-emb-test-'));
+  const reticleDbPath = path.join(tmpDir, 'reticle.db');
+  const orgMemDbPath = path.join(tmpDir, 'org-memory.db');
+
+  process.env.RETICLE_DB_PATH = reticleDbPath;
+  process.env.ORG_MEMORY_DB_PATH = orgMemDbPath;
+
+  delete require.cache[require.resolve('./gateway')];
+  delete require.cache[require.resolve('./reticle-db')];
+
+  const app = require('./gateway');
+  const server = app.listen(0);
+  const port = server.address().port;
+
+  try {
+    // Seed a monitored person for the embedding
+    const addRes = await httpRequest(port, 'POST', '/people', {
+      email: 'mark@co.com', name: 'Mark'
+    });
+    assert.strictEqual(addRes.status, 200);
+
+    // Get the person ID
+    const listRes = await httpRequest(port, 'GET', '/people');
+    const mark = listRes.body.people.find(p => p.email === 'mark@co.com');
+    assert.ok(mark, 'mark@co.com should exist');
+    const personId = mark.id;
+
+    // Test 1: POST /speakers/embeddings with valid data returns 200
+    // Create a fake 192-float embedding as base64
+    const embeddingBuffer = Buffer.alloc(192 * 4); // 192 floats × 4 bytes
+    for (let i = 0; i < 192; i++) embeddingBuffer.writeFloatLE(Math.random(), i * 4);
+    const embeddingBase64 = embeddingBuffer.toString('base64');
+
+    const postRes = await httpRequest(port, 'POST', '/speakers/embeddings', {
+      personId,
+      embedding: embeddingBase64,
+      sourceMeetingId: 'meeting-test-001',
+      modelVersion: 'ecapa-tdnn-v1',
+      qualityScore: 0.85
+    });
+    assert.strictEqual(postRes.status, 200, `expected 200, got ${postRes.status}: ${JSON.stringify(postRes.body)}`);
+    assert.strictEqual(postRes.body.ok, true);
+    assert.strictEqual(postRes.body.personId, personId);
+    assert.strictEqual(postRes.body.sourceMeetingId, 'meeting-test-001');
+    assert.strictEqual(postRes.body.modelVersion, 'ecapa-tdnn-v1');
+    console.log('  PASS: POST /speakers/embeddings saves embedding');
+
+    // Test 2: GET /speakers/embeddings returns the saved embedding
+    const getRes = await httpRequest(port, 'GET', '/speakers/embeddings');
+    assert.strictEqual(getRes.status, 200);
+    assert.ok(Array.isArray(getRes.body.embeddings));
+    const found = getRes.body.embeddings.find(e => e.personId === personId);
+    assert.ok(found, 'saved embedding should appear in GET response');
+    assert.strictEqual(found.modelVersion, 'ecapa-tdnn-v1');
+    assert.strictEqual(found.name, 'Mark');
+    // Verify the base64 round-trips correctly
+    assert.strictEqual(found.embedding, embeddingBase64);
+    console.log('  PASS: GET /speakers/embeddings returns saved embedding with correct base64');
+
+    // Test 3: POST /speakers/embeddings without required fields returns 400
+    const badRes1 = await httpRequest(port, 'POST', '/speakers/embeddings', {
+      personId
+    });
+    assert.strictEqual(badRes1.status, 400);
+    assert.ok(badRes1.body.error);
+    console.log('  PASS: POST /speakers/embeddings without embedding returns 400');
+
+    const badRes2 = await httpRequest(port, 'POST', '/speakers/embeddings', {
+      embedding: embeddingBase64,
+      sourceMeetingId: 'meeting-test-002',
+      modelVersion: 'v1'
+    });
+    assert.strictEqual(badRes2.status, 400);
+    assert.ok(badRes2.body.error);
+    console.log('  PASS: POST /speakers/embeddings without personId returns 400');
+
+    // Test 4: Upsert — POST same person+meeting updates, does not duplicate
+    const embeddingBuffer2 = Buffer.alloc(192 * 4);
+    for (let i = 0; i < 192; i++) embeddingBuffer2.writeFloatLE(Math.random() * 2, i * 4);
+    const embeddingBase64v2 = embeddingBuffer2.toString('base64');
+
+    const upsertRes = await httpRequest(port, 'POST', '/speakers/embeddings', {
+      personId,
+      embedding: embeddingBase64v2,
+      sourceMeetingId: 'meeting-test-001',
+      modelVersion: 'ecapa-tdnn-v2',
+      qualityScore: 0.92
+    });
+    assert.strictEqual(upsertRes.status, 200);
+    assert.strictEqual(upsertRes.body.modelVersion, 'ecapa-tdnn-v2');
+
+    // Verify only one embedding for this person+meeting
+    const getRes2 = await httpRequest(port, 'GET', '/speakers/embeddings');
+    const personEmbs = getRes2.body.embeddings.filter(e => e.personId === personId);
+    assert.strictEqual(personEmbs.length, 1, 'upsert should not create duplicate');
+    assert.strictEqual(personEmbs[0].modelVersion, 'ecapa-tdnn-v2');
+    console.log('  PASS: POST /speakers/embeddings upserts on same person+meeting');
+
+    // Test 5: qualityScore is optional (null is fine)
+    const noQualityRes = await httpRequest(port, 'POST', '/speakers/embeddings', {
+      personId,
+      embedding: embeddingBase64,
+      sourceMeetingId: 'meeting-test-002',
+      modelVersion: 'ecapa-tdnn-v1'
+    });
+    assert.strictEqual(noQualityRes.status, 200);
+    assert.strictEqual(noQualityRes.body.ok, true);
+    console.log('  PASS: POST /speakers/embeddings works without qualityScore');
+
+  } finally {
+    server.close();
+    try { fs.unlinkSync(reticleDbPath); } catch {}
+    try { fs.unlinkSync(reticleDbPath + '-wal'); } catch {}
+    try { fs.unlinkSync(reticleDbPath + '-shm'); } catch {}
+    try { fs.unlinkSync(orgMemDbPath); } catch {}
+    try { fs.unlinkSync(orgMemDbPath + '-wal'); } catch {}
+    try { fs.unlinkSync(orgMemDbPath + '-shm'); } catch {}
+    try { fs.rmdirSync(tmpDir); } catch {}
+  }
+}
+
 // --- Run all tests ---
 
 console.log('gateway tests:');
@@ -702,6 +830,7 @@ testCommitmentsEndpoints()
   .then(() => testEntityDetailAndMerge())
   .then(() => testEntityFactsAndUnattributed())
   .then(() => testMergeWithPreferredNameAndAliases())
+  .then(() => testSpeakerEmbeddingsEndpoints())
   .then(() => {
     console.log('All gateway tests passed');
     process.exit(0);

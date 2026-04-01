@@ -1046,6 +1046,22 @@ app.get('/speakers/embeddings', (req, res) => {
   res.json({ embeddings: embeddings.map(e => ({ personId: e.person_id, name: e.name, email: e.email, embedding: e.embedding.toString('base64'), modelVersion: e.model_version })) });
 });
 
+app.post('/speakers/embeddings', (req, res) => {
+  const { personId, embedding, sourceMeetingId, modelVersion, qualityScore } = req.body;
+  if (!personId || !embedding || !sourceMeetingId || !modelVersion) {
+    return res.status(400).json({ error: 'personId, embedding, sourceMeetingId, and modelVersion required' });
+  }
+  const embeddingBuffer = Buffer.from(embedding, 'base64');
+  reticleDb.saveSpeakerEmbedding(db, {
+    personId,
+    embedding: embeddingBuffer,
+    sourceMeetingId,
+    modelVersion,
+    qualityScore: qualityScore ?? null
+  });
+  res.json({ ok: true, personId, sourceMeetingId, modelVersion });
+});
+
 app.get('/corrections/dictionary', (req, res) => { res.json({ corrections: reticleDb.getCorrections(db) }); });
 
 app.post('/meetings/:id/corrections', (req, res) => {
