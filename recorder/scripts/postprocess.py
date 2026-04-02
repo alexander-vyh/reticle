@@ -520,7 +520,8 @@ def build_output(
 def check_audio_present(wav_path: str, threshold_rms: float = 0.003, sample_size: int = 50_000) -> bool:
     """Return False if the WAV is mostly digital silence, True if real audio is present.
 
-    Samples up to `sample_size` frames to avoid reading large files fully.
+    Samples three windows (start, middle, end) to avoid missing speech
+    that doesn't begin at the start of the file.
     Threshold: ~-50 dBFS — above noise floor, below any speech.
     """
     import wave
@@ -533,20 +534,31 @@ def check_audio_present(wav_path: str, threshold_rms: float = 0.003, sample_size
             sampwidth = wf.getsampwidth()
             if n_frames == 0 or sampwidth == 0:
                 return False
-            frames_to_read = min(n_frames, sample_size)
-            raw = wf.readframes(frames_to_read)
-            if sampwidth == 2:
+            if sampwidth != 2:
+                return True  # Non-16-bit: assume present
+
+            # Sample from start, middle, and near the end
+            chunk = min(n_frames, sample_size)
+            offsets = [0]
+            if n_frames > chunk * 2:
+                offsets.append((n_frames - chunk) // 2)
+            if n_frames > chunk * 3:
+                offsets.append(n_frames - chunk)
+
+            for offset in offsets:
+                wf.setpos(offset)
+                raw = wf.readframes(chunk)
                 samples = struct.unpack(f"{len(raw) // 2}h", raw)
                 rms = math.sqrt(sum(s * s for s in samples) / len(samples)) / 32768.0
-            else:
-                return True  # Non-16-bit: assume present
+                if rms >= threshold_rms:
+                    return True
+
+            log.warning("Audio below silence threshold in all %d windows (rms < %.3f) — skipping transcription",
+                        len(offsets), threshold_rms)
+            return False
     except Exception as e:
         log.warning("Audio presence check failed (%s), proceeding anyway", e)
         return True
-
-    if rms < threshold_rms:
-        log.warning("Audio below silence threshold (rms=%.6f < %.3f) — skipping transcription", rms, threshold_rms)
-        return False
     log.info("Audio presence confirmed (rms=%.4f)", rms)
     return True
 
@@ -561,22 +573,29 @@ def main():
 
     log.info("Post-processing: %s (%s)", metadata.get("title", "?"), wav_path)
 
-    # Pre-check: skip Whisper entirely if the WAV is silent (phantom recording guard)
-    if not check_audio_present(wav_path):
-        log.warning("Skipping transcription: WAV is silent. No transcript will be written.")
+    # Pre-check: skip if BOTH main WAV and mic WAV are silent (phantom recording guard)
+    main_has_audio = check_audio_present(wav_path)
+    mic_has_audio = args.mic_wav and Path(args.mic_wav).exists() and check_audio_present(args.mic_wav)
+
+    if not main_has_audio and not mic_has_audio:
+        log.warning("Skipping transcription: both WAVs are silent. No transcript will be written.")
         return
 
-    # Step 1: Transcribe
-    whisper_result = transcribe_audio(wav_path, args.model, args.language)
+    # Step 1: Transcribe main WAV (others' audio)
+    segments = []
+    if main_has_audio:
+        whisper_result = transcribe_audio(wav_path, args.model, args.language)
 
-    # Step 2: Diarize
-    speaker_segments = []
-    if not args.skip_diarization:
-        speaker_segments = run_diarization(wav_path)
+        # Step 2: Diarize
+        speaker_segments = []
+        if not args.skip_diarization:
+            speaker_segments = run_diarization(wav_path)
 
-    # Step 3: Align transcript with speakers
-    segments = align_transcript_with_speakers(whisper_result, speaker_segments)
-    log.info("Aligned %d segments", len(segments))
+        # Step 3: Align transcript with speakers
+        segments = align_transcript_with_speakers(whisper_result, speaker_segments)
+        log.info("Aligned %d segments", len(segments))
+    else:
+        log.info("Main WAV is silent (solo call?) — skipping to mic-only transcription")
 
     # Step 4: Identify speakers
     attendees = metadata.get("attendees", [])
