@@ -18,9 +18,7 @@ const orgMemoryDb = require('./lib/org-memory-db');
 const slackCapture = require('./lib/slack-capture');
 const slackReader = require('./lib/slack-reader');
 const { trackSlackConversation: _trackSlackConversation } = require('./lib/conversation-tracker');
-// Agent SDK and MCP server loaded lazily in main() — don't crash if missing
-let agentQuery = null;
-let createReticleMcpServer = null;
+// Agent uses direct Anthropic API tool-use (no Agent SDK needed)
 
 const http = require('http');
 const os = require('os');
@@ -48,7 +46,7 @@ let agentAvailable = false;
 
 // ── Bolt App ─────────────────────────────────────────────────────────
 const app = new App({
-  token: config.slackUserToken || config.slackBotToken,
+  token: config.slackBotToken,
   appToken: config.slackAppToken,
   socketMode: true,
   logLevel: LogLevel.WARN,
@@ -207,27 +205,72 @@ const AGENT_SYSTEM_PROMPT = `You are Reticle's Slack assistant for Alexander. Yo
 Your capabilities:
 - Query Alexander's follow-ups, commitments, and work state via the Reticle MCP tools
 - Search the web for work-relevant information (weather, flight status, news) via WebSearch
-- Fetch web pages for details via WebFetch
-
-Your constraints:
-- You can read files but CANNOT write, edit, or delete files
-- You CANNOT run shell commands or execute code
-- You CANNOT see images or screenshots shared in Slack
-- If conversation history is provided below, use it for context
-- If asked about something you can't access, say so directly
-
-Local access:
-- You CAN read files on this machine (meeting transcripts, documents, config)
-- Transcripts are at ~/.config/reticle/transcripts/
-- Project files are at ~/GitHub/reticle/
-- Use Read/Glob to find and read files when relevant
-- Do NOT write, edit, or delete files unless explicitly asked
-
 Style:
 - Be concise and direct — this is Slack, not an essay
 - No filler ("Great question!", "I'd be happy to help!")
 - Use tools for real data — never guess or speculate
-- Summarize tool results conversationally — don't dump raw JSON`;
+- Summarize tool results conversationally — don't dump raw JSON
+- When showing obligations, list them readably with person, description, and age
+- Before resolving, confirm which item you're resolving`;
+
+// Tool definitions for direct Anthropic API tool-use
+const AGENT_TOOLS = [
+  {
+    name: 'list_obligations',
+    description: 'List open obligations (commitments, asks) from the org-memory knowledge graph, grouped by person. Returns fact IDs for resolving.',
+    input_schema: { type: 'object', properties: { personName: { type: 'string', description: 'Filter by person name (optional)' } } },
+  },
+  {
+    name: 'resolve_obligation',
+    description: 'Mark an obligation as completed. Requires the fact ID from list_obligations. Always confirm with the user before calling this.',
+    input_schema: {
+      type: 'object', required: ['factId'],
+      properties: { factId: { type: 'string', description: 'UUID of the fact' }, rationale: { type: 'string', description: 'Why resolved' } },
+    },
+  },
+  {
+    name: 'waive_obligation',
+    description: 'Mark an obligation as intentionally waived (not acting on it). Different from resolve.',
+    input_schema: {
+      type: 'object', required: ['factId'],
+      properties: { factId: { type: 'string', description: 'UUID of the fact' }, rationale: { type: 'string', description: 'Why waived' } },
+    },
+  },
+  {
+    name: 'get_open_followups',
+    description: 'Get follow-up status: unreplied conversations (waiting for your response), awaiting (waiting for others), stale (7+ days), resolved today.',
+    input_schema: { type: 'object', properties: {} },
+  },
+];
+
+// Tool execution — calls library functions directly (no MCP, no subprocess)
+async function executeAgentTool(name, input) {
+  const { getObligations, resolveObligation, getFollowups, groupFollowups } = require('./lib/reticle-mcp-server');
+
+  switch (name) {
+    case 'list_obligations': {
+      const obligations = await getObligations(
+        { mockOrgMemory: false },
+        input.personName || undefined
+      );
+      return JSON.stringify({ obligations });
+    }
+    case 'resolve_obligation': {
+      await resolveObligation({ mockOrgMemory: false }, input.factId, 'completed', input.rationale);
+      return JSON.stringify({ resolved: true, factId: input.factId });
+    }
+    case 'waive_obligation': {
+      await resolveObligation({ mockOrgMemory: false }, input.factId, 'abandoned', input.rationale || 'intentionally waived');
+      return JSON.stringify({ waived: true, factId: input.factId });
+    }
+    case 'get_open_followups': {
+      const items = await getFollowups({ mockCollectors: false, db: followupsDbConn, accountId });
+      return JSON.stringify(groupFollowups(items));
+    }
+    default:
+      return JSON.stringify({ error: `Unknown tool: ${name}` });
+  }
+}
 
 async function handleAgentMessage(client, event) {
   const startTime = Date.now();
@@ -240,67 +283,110 @@ async function handleAgentMessage(client, event) {
 
   try {
     // Fetch conversation history for context
-    let threadContext = '';
+    let conversationMessages = [{ role: 'user', content: event.text || '' }];
     try {
       const historyResult = await client.conversations.history({
         channel: event.channel,
-        limit: 20,
+        limit: 10,
       });
       if (historyResult.messages && historyResult.messages.length > 1) {
-        const recentMessages = historyResult.messages
-          .slice(0, 20)
+        // Build multi-turn conversation from recent history
+        const history = historyResult.messages
+          .slice(0, 10)
           .reverse()
-          .filter(m => !m.subtype)
-          .map(m => {
-            const role = m.user === CONFIG.myUserId ? 'Reticle' : 'Alexander';
-            return `${role}: ${m.text || ''}`;
-          })
-          .join('\n');
-        threadContext = `\n\nConversation history (most recent messages in this DM):\n${recentMessages}`;
-      }
-    } catch (err) {
-      log.debug({ err }, 'Could not fetch conversation history — proceeding without context');
-    }
-
-    let resultText = '';
-    let toolsUsed = [];
-    let messageTypes = [];
-
-    for await (const message of agentQuery({
-      prompt: event.text || '',
-      options: {
-        model: 'claude-haiku-4-5',
-        maxTurns: 10,
-        systemPrompt: AGENT_SYSTEM_PROMPT + threadContext,
-        permissionMode: 'bypassPermissions',
-        allowedTools: ['WebSearch', 'WebFetch', 'Read', 'Glob', 'Grep'],
-        disallowedTools: ['Write', 'Edit', 'Bash', 'Agent', 'AskUserQuestion'],
-        cwd: process.env.HOME,
-        mcpServers: {
-          reticle: {
-            command: 'node',
-            args: [path.join(__dirname, 'lib', 'reticle-mcp-server.js')],
-          }
-        },
-      },
-    })) {
-      messageTypes.push(message.type);
-      if (message.type === 'result') {
-        resultText = message.result || '';
-        log.debug({ stopReason: message.stop_reason, resultLen: resultText.length }, 'Agent result received');
-      } else if (message.type === 'assistant' && message.content) {
-        // Log tool use blocks
-        for (const block of (Array.isArray(message.content) ? message.content : [])) {
-          if (block.type === 'tool_use') {
-            toolsUsed.push(block.name);
-            log.debug({ tool: block.name }, 'Agent used tool');
+          .filter(m => !m.subtype && m.text)
+          .map(m => ({
+            role: m.user === CONFIG.myUserId ? 'assistant' : 'user',
+            content: m.text,
+          }));
+        // Ensure alternating roles and ends with the current user message
+        const cleaned = [];
+        let lastRole = null;
+        for (const msg of history) {
+          if (msg.role !== lastRole) {
+            cleaned.push(msg);
+            lastRole = msg.role;
           }
         }
+        // Make sure we end with the current message
+        if (cleaned.length > 0 && cleaned[cleaned.length - 1].content !== event.text) {
+          if (cleaned[cleaned.length - 1].role === 'user') {
+            cleaned[cleaned.length - 1] = { role: 'user', content: event.text };
+          } else {
+            cleaned.push({ role: 'user', content: event.text });
+          }
+        }
+        if (cleaned.length > 1 && cleaned[0].role === 'user') {
+          conversationMessages = cleaned;
+        }
       }
+    } catch (err) {
+      log.debug({ err }, 'Could not fetch conversation history');
+    }
+
+    // Direct Anthropic API tool-use loop
+    const ai = require('./lib/ai');
+    const anthropic = ai.getClient();
+    if (!anthropic) throw new Error('AI client not available');
+
+    let messages = conversationMessages;
+    let resultText = '';
+    const toolsUsed = [];
+    const MAX_ROUNDS = 5;
+
+    for (let round = 0; round < MAX_ROUNDS; round++) {
+      const response = await anthropic.messages.create({
+        model: 'claude-opus-4-6',
+        max_tokens: 4096,
+        system: AGENT_SYSTEM_PROMPT,
+        tools: AGENT_TOOLS,
+        messages,
+      });
+
+      // If Claude is done (no tool calls), extract final text
+      if (response.stop_reason === 'end_turn') {
+        const textBlocks = response.content.filter(b => b.type === 'text' && b.text?.trim());
+        resultText = textBlocks.map(b => b.text).join('\n');
+        break;
+      }
+
+      // If Claude wants to use tools, execute them
+      if (response.stop_reason === 'tool_use') {
+        // Append assistant message with tool_use blocks
+        messages = [...messages, { role: 'assistant', content: response.content }];
+
+        // Execute each tool call
+        const toolResults = [];
+        for (const block of response.content) {
+          if (block.type === 'tool_use') {
+            toolsUsed.push(block.name);
+            log.info({ tool: block.name, input: block.input }, 'Agent executing tool');
+            try {
+              const result = await executeAgentTool(block.name, block.input);
+              toolResults.push({ type: 'tool_result', tool_use_id: block.id, content: result });
+            } catch (err) {
+              log.error({ err, tool: block.name }, 'Tool execution failed');
+              toolResults.push({
+                type: 'tool_result', tool_use_id: block.id,
+                content: `Error: ${err.message}`, is_error: true,
+              });
+            }
+          }
+        }
+
+        // Append tool results and continue the loop
+        messages = [...messages, { role: 'user', content: toolResults }];
+        continue;
+      }
+
+      // Unexpected stop reason — extract whatever text we have
+      const textBlocks = response.content.filter(b => b.type === 'text' && b.text?.trim());
+      resultText = textBlocks.map(b => b.text).join('\n') || 'I got an unexpected response. Try again?';
+      break;
     }
 
     const elapsed = Date.now() - startTime;
-    log.info({ channel: event.channel, elapsed, toolsUsed, messageCount: messageTypes.length }, 'Agent response ready');
+    log.info({ channel: event.channel, elapsed, toolsUsed, rounds: toolsUsed.length }, 'Agent response ready');
 
     // Remove thinking indicator
     try {
@@ -308,7 +394,25 @@ async function handleAgentMessage(client, event) {
     } catch (_) {}
 
     if (resultText) {
-      await client.chat.postMessage({ channel: event.channel, text: resultText, unfurl_links: false });
+      // Resolve the bot's DM channel (event.channel may be from user-token perspective)
+      let replyChannel = event.channel;
+      try {
+        const dm = await client.conversations.open({ users: event.user });
+        replyChannel = dm.channel.id;
+        log.debug({ eventChannel: event.channel, resolvedChannel: replyChannel }, 'Resolved bot DM channel');
+      } catch (dmErr) {
+        log.warn({ err: dmErr.message, user: event.user, eventChannel: event.channel }, 'conversations.open failed — using event channel');
+      }
+
+      // Split long messages for Slack's 4000-char limit
+      if (resultText.length > 3900) {
+        const chunks = resultText.match(/[\s\S]{1,3900}/g) || [resultText];
+        for (const chunk of chunks) {
+          await client.chat.postMessage({ channel: replyChannel, text: chunk, unfurl_links: false });
+        }
+      } else {
+        await client.chat.postMessage({ channel: replyChannel, text: resultText, unfurl_links: false });
+      }
     }
   } catch (err) {
     const elapsed = Date.now() - startTime;
@@ -728,7 +832,9 @@ app.event('message', async ({ event, client }) => {
   }
 
   // Route DMs from Alexander to the conversational agent (async, non-blocking)
-  if (agentAvailable && event.channel_type === 'im' && event.user === config.slackUserId) {
+  // Only route to the agent for messages in the bot's own DM channel with Alexander
+  // (not Alexander's DMs with other people, which the bot can't reply to)
+  if (agentAvailable && CONFIG.botDmChannel && event.channel === CONFIG.botDmChannel) {
     handleAgentMessage(client, event).catch(err => {
       log.error({ err, channel: event.channel, ts: event.ts }, 'Agent pipeline failed');
     });
@@ -1090,23 +1196,18 @@ async function main() {
     log.error({ err: error }, 'Failed to init follow-ups DB');
   }
 
-  // Load Agent SDK and MCP server lazily
+  // Check if AI client is available for conversational agent
   try {
-    agentQuery = require('@anthropic-ai/claude-agent-sdk').query;
-    createReticleMcpServer = require('./lib/reticle-mcp-server').createReticleMcpServer;
-
-    const claudePath = process.env.HOME + '/.local/bin/claude';
-    if (fs.existsSync(claudePath)) {
-      execSync(`${claudePath} --version`, { stdio: 'pipe', timeout: 5000 });
+    const ai = require('./lib/ai');
+    const testClient = ai.getClient();
+    if (testClient) {
       agentAvailable = true;
-      log.info('Claude CLI found — conversational agent enabled');
+      log.info('AI client available — conversational agent enabled');
     } else {
-      execSync('claude --version', { stdio: 'pipe', timeout: 5000 });
-      agentAvailable = true;
-      log.info('Claude CLI found (PATH) — conversational agent enabled');
+      log.warn('No AI client — running without conversational agent');
     }
   } catch (err) {
-    log.warn({ err: err.message }, 'Agent SDK not available — running without conversational agent');
+    log.warn({ err: err.message }, 'AI client check failed — running without conversational agent');
   }
 
   // Load state
@@ -1148,6 +1249,15 @@ async function main() {
   // Start Bolt app (Socket Mode)
   await app.start();
   log.info('Bolt.js Socket Mode connected');
+
+  // Resolve the bot's DM channel with Alexander (for agent routing)
+  try {
+    const dm = await app.client.conversations.open({ users: config.slackUserId });
+    CONFIG.botDmChannel = dm.channel.id;
+    log.info({ botDmChannel: CONFIG.botDmChannel }, 'Resolved bot DM channel with Alexander');
+  } catch (err) {
+    log.warn({ err: err.message }, 'Could not resolve bot DM channel — agent will be unavailable');
+  }
 
   // Heartbeat
   heartbeat.write('slack-events', { checkInterval: 30000, status: 'ok' });
