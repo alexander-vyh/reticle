@@ -200,18 +200,26 @@ async function checkTimeouts(client) {
 
 // ── Agent (Claude Agent SDK) ─────────────────────────────────────────
 
-const AGENT_SYSTEM_PROMPT = `You are Reticle's Slack assistant for Alexander. You respond to messages in Slack DMs — you are NOT a CLI tool, file editor, or coding assistant.
+const AGENT_SYSTEM_PROMPT = `You are Reticle, Alexander's work-alignment instrument. You respond in Slack DMs.
 
-Your capabilities:
-- Query Alexander's follow-ups, commitments, and work state via the Reticle MCP tools
-- Search the web for work-relevant information (weather, flight status, news) via WebSearch
-Style:
-- Be concise and direct — this is Slack, not an essay
-- No filler ("Great question!", "I'd be happy to help!")
-- Use tools for real data — never guess or speculate
-- Summarize tool results conversationally — don't dump raw JSON
-- When showing obligations, list them readably with person, description, and age
-- Before resolving, confirm which item you're resolving`;
+A follow-up snapshot has been loaded at the start of this conversation. Use it to answer questions — do not call get_open_followups again unless Alexander explicitly asks for a refresh.
+
+Core rules:
+- STRUCTURED, NOT PROSE: Use "Person — description — age" format. No paragraphs, no emoji headers.
+- REMEMBER THE THREAD: You have conversation history. Reference what you already said. Never re-dump data.
+- BEFORE RESOLVING: Confirm which specific item by name and fact ID.
+
+What you can do:
+- Answer factual questions about a specific person ("did I reply to Josh?", "what's open with Sam?") — answer yes/no, one line of evidence, stop.
+- Resolve or waive obligations via tools after confirmation
+- Report count summaries ("you have 3 unreplied items")
+
+What you must NOT do:
+- Return ranked or prioritized lists — no ranking layer exists yet. If asked "what should I handle first?" or "show me what's urgent", respond: "I don't have a ranking layer yet — ask me about a specific person and I can tell you their status."
+- Dump the full queue unprompted. If asked "show me everything" / "show me stale", respond with a count and offer specific lookup: "There are N items. Who do you want to check on?"
+- Editorialize ("It's… a lot"). State facts, not commentary.
+- Repeat information you already provided in this thread.
+- Say "I don't have context" — you DO have the thread history and the loaded snapshot.`;
 
 // Tool definitions for direct Anthropic API tool-use
 const AGENT_TOOLS = [
@@ -282,46 +290,41 @@ async function handleAgentMessage(client, event) {
   } catch (_) {}
 
   try {
-    // Fetch conversation history for context
-    let conversationMessages = [{ role: 'user', content: event.text || '' }];
+    const { buildConversationMessages } = require('./lib/agent-conversation');
+    const { getFollowups, groupFollowups } = require('./lib/reticle-mcp-server');
+
+    // Fetch a single data snapshot upfront — all turns in this request reason from
+    // this snapshot, preventing contradictions from independent re-queries.
+    let snapshot = null;
     try {
+      const items = await getFollowups({ mockCollectors: false, db: followupsDbConn, accountId });
+      snapshot = JSON.stringify(groupFollowups(items));
+      log.debug({ snapshotLen: snapshot.length }, 'Fetched followup snapshot');
+    } catch (err) {
+      log.warn({ err: err.message }, 'Could not fetch followup snapshot — proceeding without');
+    }
+
+    // Fetch recent Slack conversation history for multi-turn context
+    let rawHistory = [];
+    try {
+      const tenMinAgo = Math.floor(Date.now() / 1000) - 600;
       const historyResult = await client.conversations.history({
         channel: event.channel,
-        limit: 10,
+        limit: 20,
+        oldest: String(tenMinAgo),
       });
       if (historyResult.messages && historyResult.messages.length > 1) {
-        // Build multi-turn conversation from recent history
-        const history = historyResult.messages
-          .slice(0, 10)
+        rawHistory = historyResult.messages
           .reverse()
           .filter(m => !m.subtype && m.text)
           .map(m => ({
-            role: m.user === CONFIG.myUserId ? 'assistant' : 'user',
+            role: m.bot_id || m.user === CONFIG.botUserId ? 'assistant' : 'user',
             content: m.text,
           }));
-        // Ensure alternating roles and ends with the current user message
-        const cleaned = [];
-        let lastRole = null;
-        for (const msg of history) {
-          if (msg.role !== lastRole) {
-            cleaned.push(msg);
-            lastRole = msg.role;
-          }
-        }
-        // Make sure we end with the current message
-        if (cleaned.length > 0 && cleaned[cleaned.length - 1].content !== event.text) {
-          if (cleaned[cleaned.length - 1].role === 'user') {
-            cleaned[cleaned.length - 1] = { role: 'user', content: event.text };
-          } else {
-            cleaned.push({ role: 'user', content: event.text });
-          }
-        }
-        if (cleaned.length > 1 && cleaned[0].role === 'user') {
-          conversationMessages = cleaned;
-        }
+        log.debug({ turns: rawHistory.length }, 'Loaded raw conversation history');
       }
     } catch (err) {
-      log.debug({ err }, 'Could not fetch conversation history');
+      log.debug({ err: err.message }, 'Could not fetch conversation history — using single message');
     }
 
     // Direct Anthropic API tool-use loop
@@ -329,7 +332,11 @@ async function handleAgentMessage(client, event) {
     const anthropic = ai.getClient();
     if (!anthropic) throw new Error('AI client not available');
 
-    let messages = conversationMessages;
+    let messages = buildConversationMessages({
+      history: rawHistory,
+      currentText: event.text || '',
+      snapshot,
+    });
     let resultText = '';
     const toolsUsed = [];
     const MAX_ROUNDS = 5;
