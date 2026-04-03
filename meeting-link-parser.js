@@ -62,7 +62,7 @@ function extractMeetingLink(event) {
  * @returns {boolean}
  */
 function isBrowserMeeting(platform) {
-  return ['meet', 'webex', 'calendar'].includes(platform);
+  return ['meet', 'webex'].includes(platform);
 }
 
 module.exports = { extractMeetingLink, isBrowserMeeting, PATTERNS };

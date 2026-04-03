@@ -754,7 +754,7 @@ function platformToDeviceHint(platform) {
 
 // Meeting app process names to check for join detection.
 // Matches what RecorderConfig.meetingApps covers, translated to process names.
-const MEETING_APP_PROCESS_NAMES = ['zoom.us', 'Slack', 'Microsoft Teams'];
+const MEETING_APP_PROCESS_NAMES = ['zoom.us', 'Slack', 'Microsoft Teams', 'CptHost'];
 
 /**
  * Check if any known meeting app is currently running.
@@ -785,6 +785,13 @@ async function armAndStartRecording(event, linkInfo) {
       'Browser-based meeting detected, starting recording immediately');
     await startRecording(event, linkInfo);
     return;
+  }
+
+  // For meetings with no video link (platform === 'calendar'), include browser
+  // apps in the tap targets — the user might join via a browser-based tool
+  if (linkInfo.platform === 'calendar') {
+    log.info({ eventId: event.id, summary: event.summary },
+      'No video link in calendar event — polling for any meeting app or browser activity');
   }
 
   const endTime = new Date(event.end.dateTime).getTime();
@@ -822,7 +829,7 @@ async function startRecording(event, linkInfo) {
     startTime: event.start.dateTime,
     endTime: event.end.dateTime,
     deviceHint: platformToDeviceHint(linkInfo.platform),
-    browserMeeting: linkParser.isBrowserMeeting(linkInfo.platform),
+    browserMeeting: linkParser.isBrowserMeeting(linkInfo.platform) || linkInfo.platform === 'calendar',
   };
 
   try {

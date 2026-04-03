@@ -135,7 +135,7 @@ assert('finds webex link in location',
 console.log('\nisBrowserMeeting:');
 assert('meet is browser meeting', parser.isBrowserMeeting('meet'), true);
 assert('webex is browser meeting', parser.isBrowserMeeting('webex'), true);
-assert('calendar is browser meeting', parser.isBrowserMeeting('calendar'), true);
+assert('calendar is NOT browser meeting (uses app-polling path)', parser.isBrowserMeeting('calendar'), false);
 assert('zoom is NOT browser meeting', parser.isBrowserMeeting('zoom'), false);
 assert('teams is NOT browser meeting', parser.isBrowserMeeting('teams'), false);
 
