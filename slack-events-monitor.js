@@ -204,28 +204,33 @@ const AGENT_SYSTEM_PROMPT = `You are Reticle, Alexander's work-alignment instrum
 
 A follow-up snapshot has been loaded at the start of this conversation. Use it to answer questions — do not call get_open_followups again unless Alexander explicitly asks for a refresh.
 
+You accept exactly four query shapes. Anything outside these gets refused.
+
+ACCEPTED:
+1. "What do I have open with [person]?" → one sentence: what's open, how old, source.
+   If no open items: one sentence with what WAS found — last message date, direction (sent/received), and source. Never assert absence without stating what was checked.
+2. "When did I last interact with [person]?" → one date and one sentence of context.
+   If no record: state the snapshot coverage (date range, sources) — not a bare "nothing found."
+3. "Mark [person/item] resolved" → confirm the specific fact ID, then call resolve_obligation.
+4. "Snooze [person] for N days" → confirm, then call waive_obligation with rationale.
+
+REFUSED (redirect to digest):
+- Broad observation: "show me stale", "check on me", "show me everything", "what's urgent"
+  → Respond: "For your current status, check the followup-checker digest. Ask me about a specific person."
+- Ranking or prioritization: "what should I handle first?", "what's most urgent?"
+  → Respond: "I can't rank — no ranking layer exists. Ask me about a specific person."
+
 Core rules:
-- STRUCTURED, NOT PROSE: Use "Person — description — age" format. No paragraphs, no emoji headers.
-- REMEMBER THE THREAD: You have conversation history. Reference what you already said. Never re-dump data.
-- BEFORE RESOLVING: Confirm which specific item by name and fact ID.
-
-What you can do:
-- Answer factual questions about a specific person ("did I reply to Josh?", "what's open with Sam?") — answer yes/no, one line of evidence, stop.
-- Resolve or waive obligations via tools after confirmation
-- Report count summaries ("you have 3 unreplied items")
-
-What you must NOT do:
-- Return ranked or prioritized lists — no ranking layer exists yet. If asked "what should I handle first?" or "show me what's urgent", respond: "I don't have a ranking layer yet — ask me about a specific person and I can tell you their status."
-- Dump the full queue unprompted. If asked "show me everything" / "show me stale", respond with a count and offer specific lookup: "There are N items. Who do you want to check on?"
-- Editorialize ("It's… a lot"). State facts, not commentary.
-- Repeat information you already provided in this thread.
-- Say "I don't have context" — you DO have the thread history and the loaded snapshot.`;
+- YOUR FIRST LINE IS ALWAYS THE ANSWER. One sentence or one date. No preamble.
+- STOP WHEN THE QUESTION IS ANSWERED. Do not expand to adjacent items. Do not return context not asked for. "Did I reply to Josh?" has one answer — give it and stop.
+- REMEMBER THE THREAD: You have conversation history and a loaded snapshot. Never re-dump data.
+- BEFORE RESOLVING: Confirm the specific item by name and fact ID first.`;
 
 // Tool definitions for direct Anthropic API tool-use
 const AGENT_TOOLS = [
   {
     name: 'list_obligations',
-    description: 'List open obligations (commitments, asks) from the org-memory knowledge graph, grouped by person. Returns fact IDs for resolving.',
+    description: 'List open obligations (commitments, asks) from the org-memory knowledge graph, grouped by person. Returns fact IDs for resolving. Use only for write-back operations (resolve/waive) — do NOT use to answer "what do I have open with [person]?" queries; use get_open_followups for those.',
     input_schema: { type: 'object', properties: { personName: { type: 'string', description: 'Filter by person name (optional)' } } },
   },
   {
@@ -246,7 +251,7 @@ const AGENT_TOOLS = [
   },
   {
     name: 'get_open_followups',
-    description: 'Get follow-up status: unreplied conversations (waiting for your response), awaiting (waiting for others), stale (7+ days), resolved today.',
+    description: 'Get follow-up status: unreplied conversations (waiting for your response), awaiting (waiting for others), stale (7+ days), resolved today. This is the authoritative source for "what do I have open with [person]?" and "when did I last interact with [person]?" queries.',
     input_schema: { type: 'object', properties: {} },
   },
 ];
@@ -369,7 +374,11 @@ async function handleAgentMessage(client, event) {
             toolsUsed.push(block.name);
             log.info({ tool: block.name, input: block.input }, 'Agent executing tool');
             try {
-              const result = await executeAgentTool(block.name, block.input);
+              // Hard gate: if snapshot was pre-fetched, serve it directly rather than
+              // re-querying — prevents summarization variance across turns.
+              const result = (block.name === 'get_open_followups' && snapshot)
+                ? snapshot
+                : await executeAgentTool(block.name, block.input);
               toolResults.push({ type: 'tool_result', tool_use_id: block.id, content: result });
             } catch (err) {
               log.error({ err, tool: block.name }, 'Tool execution failed');
