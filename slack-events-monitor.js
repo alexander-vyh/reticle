@@ -374,7 +374,11 @@ async function handleAgentMessage(client, event) {
             toolsUsed.push(block.name);
             log.info({ tool: block.name, input: block.input }, 'Agent executing tool');
             try {
-              const result = await executeAgentTool(block.name, block.input);
+              // Hard gate: if snapshot was pre-fetched, serve it directly rather than
+              // re-querying — prevents summarization variance across turns.
+              const result = (block.name === 'get_open_followups' && snapshot)
+                ? snapshot
+                : await executeAgentTool(block.name, block.input);
               toolResults.push({ type: 'tool_result', tool_use_id: block.id, content: result });
             } catch (err) {
               log.error({ err, tool: block.name }, 'Tool execution failed');
