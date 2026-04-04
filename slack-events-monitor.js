@@ -230,7 +230,7 @@ Core rules:
 const AGENT_TOOLS = [
   {
     name: 'list_obligations',
-    description: 'List open obligations (commitments, asks) from the org-memory knowledge graph, grouped by person. Returns fact IDs for resolving.',
+    description: 'List open obligations (commitments, asks) from the org-memory knowledge graph, grouped by person. Returns fact IDs for resolving. Use only for write-back operations (resolve/waive) — do NOT use to answer "what do I have open with [person]?" queries; use get_open_followups for those.',
     input_schema: { type: 'object', properties: { personName: { type: 'string', description: 'Filter by person name (optional)' } } },
   },
   {
@@ -251,7 +251,7 @@ const AGENT_TOOLS = [
   },
   {
     name: 'get_open_followups',
-    description: 'Get follow-up status: unreplied conversations (waiting for your response), awaiting (waiting for others), stale (7+ days), resolved today.',
+    description: 'Get follow-up status: unreplied conversations (waiting for your response), awaiting (waiting for others), stale (7+ days), resolved today. This is the authoritative source for "what do I have open with [person]?" and "when did I last interact with [person]?" queries.',
     input_schema: { type: 'object', properties: {} },
   },
 ];
