@@ -54,6 +54,7 @@ let lastDailyDigest = null;
 let last4hCheck = null;
 let lastEodDate = null;
 let errorCount = 0;
+let startupGrace = false; // Suppress notifications on first poll after startup
 
 // Check timer — stored so SIGHUP can reset it with updated interval
 let checkTimer = null;
@@ -331,8 +332,12 @@ async function check4Hour(allPending) {
     return;
   }
 
-  await sendSlackDM(message);
-  log.info({ count: pending.length, dms: dms.length, mentions: mentions.length, eod: hour >= 17 }, 'Sent 4-hour batch notification');
+  if (startupGrace) {
+    log.info({ count: pending.length }, 'Startup grace — suppressing 4h-batch notification');
+  } else {
+    await sendSlackDM(message);
+    log.info({ count: pending.length, dms: dms.length, mentions: mentions.length, eod: hour >= 17 }, 'Sent 4-hour batch notification');
+  }
 
   // Mark individual conversations as notified (for dedup filtering)
   pending.forEach(conv => {
@@ -427,8 +432,12 @@ async function checkEscalations(allPending) {
     if (conv.subject) message += `   "${conv.subject.substring(0, 60)}..."\n`;
   });
 
-  await sendSlackDM(message);
-  log.warn({ count: escalated.length, items: escalated.map(c => ({ id: c.id, type: c.type, from: c.from_name || c.from_user })) }, 'Sent escalation notification');
+  if (startupGrace) {
+    log.info({ count: escalated.length }, 'Startup grace — suppressing escalation notification');
+  } else {
+    await sendSlackDM(message);
+    log.warn({ count: escalated.length, items: escalated.map(c => ({ id: c.id, type: c.type, from: c.from_name || c.from_user })) }, 'Sent escalation notification');
+  }
 
   escalated.forEach(conv => {
     reticleDb.markEscalated(db, conv.id);
@@ -491,8 +500,11 @@ async function main() {
   accountId = primaryAccount.id;
   log.info('Reticle DB initialized');
 
-  // Initial check
+  // Skip notifications on first check after startup — prevents deploy-triggered spam.
+  // The first poll only logs counts and writes heartbeat, no Slack messages sent.
+  startupGrace = true;
   await runChecks();
+  startupGrace = false;
 
   // Set up interval
   checkTimer = setInterval(runChecks, CONFIG.checkInterval);
